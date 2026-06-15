@@ -40,6 +40,7 @@ type DressPoint = {
 
 type DressKeyframe = {
   time: number;
+  frame?: GarmentFrame;
   points: DressPoint[];
 };
 
@@ -47,6 +48,7 @@ const CANVAS_WIDTH = 390;
 const CANVAS_HEIGHT = 672;
 const BOTTOM_VIDEO_SRC = "/cards/ai%20girl%202.mp4";
 const FOREGROUND_VIDEO_SRC = "/cards/Green%20bg%20sample%202%20swap.mp4";
+const GENERATED_KEYFRAMES_SRC = "/cards/generated-mesh-keyframes.json";
 const CLAIM_THRESHOLD = 0.35;
 const FRONT_SURFACE_MIN_WEIGHT = 0.28;
 const FRONT_SURFACE_U_IS_MIRRORED = true;
@@ -55,13 +57,22 @@ const BODY_WRAP_WIDTH_SCALE = 0.72;
 const BODY_WRAP_DEPTH = 132;
 
 const BODY_MESH_ROWS = [
-  { id: "shoulder", label: "Shoulder", v: 0.06 },
-  { id: "upper-arm", label: "Upper", v: 0.18 },
-  { id: "chest", label: "Chest", v: 0.3 },
-  { id: "waist", label: "Waist", v: 0.45 },
-  { id: "hip", label: "Hip", v: 0.62 },
-  { id: "thigh", label: "Thigh", v: 0.78 },
-  { id: "leg", label: "Leg", v: 0.94 },
+  { id: "neck", label: "Neck", v: 0.025 },
+  { id: "shoulder", label: "Shoulder", v: 0.075 },
+  { id: "upper-arm", label: "Upper", v: 0.13 },
+  { id: "underarm", label: "Under", v: 0.19 },
+  { id: "bust", label: "Bust", v: 0.25 },
+  { id: "chest", label: "Chest", v: 0.31 },
+  { id: "rib", label: "Rib", v: 0.38 },
+  { id: "mid-waist", label: "M Waist", v: 0.45 },
+  { id: "waist", label: "Waist", v: 0.52 },
+  { id: "high-hip", label: "H Hip", v: 0.59 },
+  { id: "hip", label: "Hip", v: 0.66 },
+  { id: "upper-thigh", label: "U Thigh", v: 0.73 },
+  { id: "mid-thigh", label: "M Thigh", v: 0.8 },
+  { id: "thigh", label: "Thigh", v: 0.87 },
+  { id: "knee", label: "Knee", v: 0.93 },
+  { id: "leg", label: "Leg", v: 0.985 },
 ];
 
 const DEFAULT_DRESS_POINTS: DressPoint[] = [
@@ -444,6 +455,16 @@ function cloneDressPoints(points: DressPoint[]) {
   return points.map((point) => ({ ...point }));
 }
 
+function cloneGarmentFrame(frame: GarmentFrame): GarmentFrame {
+  return {
+    origin: { ...frame.origin },
+    uAxis: { ...frame.uAxis },
+    vAxis: { ...frame.vAxis },
+    width: frame.width,
+    height: frame.height,
+  };
+}
+
 function interpolateDressPoints(keyframes: DressKeyframe[], time: number) {
   if (keyframes.length === 0) return cloneDressPoints(DEFAULT_DRESS_POINTS);
 
@@ -464,6 +485,97 @@ function interpolateDressPoints(keyframes: DressKeyframe[], time: number) {
   });
 }
 
+function interpolateGarmentFrame(keyframes: DressKeyframe[], time: number) {
+  const keyframesWithFrames = keyframes.filter((keyframe) => keyframe.frame);
+  if (keyframesWithFrames.length === 0) return null;
+
+  const sortedKeyframes = [...keyframesWithFrames].sort((a, b) => a.time - b.time);
+  const previous = [...sortedKeyframes].reverse().find((keyframe) => keyframe.time <= time) ?? sortedKeyframes[0];
+  const next = sortedKeyframes.find((keyframe) => keyframe.time >= time) ?? sortedKeyframes[sortedKeyframes.length - 1];
+  const previousFrame = previous.frame;
+  const nextFrame = next.frame;
+
+  if (!previousFrame || !nextFrame) return null;
+  if (previous.time === next.time) return cloneGarmentFrame(previousFrame);
+
+  const blend = (time - previous.time) / (next.time - previous.time);
+  return {
+    origin: {
+      x: previousFrame.origin.x + (nextFrame.origin.x - previousFrame.origin.x) * blend,
+      y: previousFrame.origin.y + (nextFrame.origin.y - previousFrame.origin.y) * blend,
+    },
+    uAxis: normalize({
+      x: previousFrame.uAxis.x + (nextFrame.uAxis.x - previousFrame.uAxis.x) * blend,
+      y: previousFrame.uAxis.y + (nextFrame.uAxis.y - previousFrame.uAxis.y) * blend,
+    }),
+    vAxis: normalize({
+      x: previousFrame.vAxis.x + (nextFrame.vAxis.x - previousFrame.vAxis.x) * blend,
+      y: previousFrame.vAxis.y + (nextFrame.vAxis.y - previousFrame.vAxis.y) * blend,
+    }),
+    width: previousFrame.width + (nextFrame.width - previousFrame.width) * blend,
+    height: previousFrame.height + (nextFrame.height - previousFrame.height) * blend,
+  };
+}
+
+function isValidDressPoint(value: unknown): value is DressPoint {
+  if (!value || typeof value !== "object") return false;
+  const point = value as DressPoint;
+  return (
+    typeof point.id === "string" &&
+    typeof point.u === "number" &&
+    Number.isFinite(point.u) &&
+    typeof point.v === "number" &&
+    Number.isFinite(point.v)
+  );
+}
+
+function isValidGarmentFrame(value: unknown): value is GarmentFrame {
+  if (!value || typeof value !== "object") return false;
+  const frame = value as GarmentFrame;
+  return (
+    typeof frame.origin?.x === "number" &&
+    typeof frame.origin?.y === "number" &&
+    typeof frame.uAxis?.x === "number" &&
+    typeof frame.uAxis?.y === "number" &&
+    typeof frame.vAxis?.x === "number" &&
+    typeof frame.vAxis?.y === "number" &&
+    typeof frame.width === "number" &&
+    Number.isFinite(frame.width) &&
+    typeof frame.height === "number" &&
+    Number.isFinite(frame.height)
+  );
+}
+
+function parseGeneratedKeyframes(value: unknown) {
+  const keyframeValues = Array.isArray(value)
+    ? value
+    : value && typeof value === "object" && Array.isArray((value as { keyframes?: unknown }).keyframes)
+      ? (value as { keyframes: unknown[] }).keyframes
+      : [];
+
+  return keyframeValues
+    .filter((keyframe): keyframe is { time: number; frame?: unknown; points: unknown[] } => {
+      return (
+        keyframe !== null &&
+        typeof keyframe === "object" &&
+        typeof (keyframe as { time?: unknown }).time === "number" &&
+        Array.isArray((keyframe as { points?: unknown }).points)
+      );
+    })
+    .map((keyframe) => ({
+      time: keyframe.time,
+      frame: isValidGarmentFrame(keyframe.frame) ? cloneGarmentFrame(keyframe.frame) : undefined,
+      points: keyframe.points.filter(isValidDressPoint).map((point) => ({
+        id: point.id,
+        label: typeof point.label === "string" ? point.label : point.id,
+        u: point.u,
+        v: point.v,
+      })),
+    }))
+    .filter((keyframe) => keyframe.points.length >= 6)
+    .sort((a, b) => a.time - b.time);
+}
+
 function isTrackableGarmentPixel(image: ImageData, index: number) {
   const red = image.data[index];
   const green = image.data[index + 1];
@@ -478,6 +590,13 @@ function isTrackableGarmentPixel(image: ImageData, index: number) {
 
 function isForegroundMaskPixel(image: ImageData, index: number) {
   return image.data[index + 3] > 72;
+}
+
+function quantile(values: number[], amount: number) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = clamp(Math.round((sorted.length - 1) * amount), 0, sorted.length - 1);
+  return sorted[index];
 }
 
 function findForegroundBoundsAtRow(image: ImageData, centerY: number, band: number, minX: number, maxX: number) {
@@ -504,26 +623,90 @@ function findForegroundBoundsAtRow(image: ImageData, centerY: number, band: numb
   return { left, right, pixelsFound };
 }
 
-function findBodyBoundsAtRow(image: ImageData, centerY: number, band: number) {
+type ForegroundSpan = {
+  left: number;
+  right: number;
+  pixelsFound: number;
+  samples: number[];
+};
+
+function getForegroundSpansAtRow(image: ImageData, centerY: number, band: number) {
   const minY = Math.max(0, Math.floor(centerY - band));
   const maxY = Math.min(CANVAS_HEIGHT - 1, Math.ceil(centerY + band));
-  let left = CANVAS_WIDTH;
-  let right = 0;
-  let pixelsFound = 0;
+  const minColumnHits = Math.max(2, Math.round((maxY - minY + 1) * 0.16));
+  const spans: ForegroundSpan[] = [];
+  let current: ForegroundSpan | null = null;
 
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = 6; x < CANVAS_WIDTH - 6; x += 1) {
+  for (let x = 6; x < CANVAS_WIDTH - 6; x += 1) {
+    let hits = 0;
+    for (let y = minY; y <= maxY; y += 1) {
       const index = (y * CANVAS_WIDTH + x) * 4;
       if (isForegroundMaskPixel(image, index)) {
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        pixelsFound += 1;
+        hits += 1;
       }
+    }
+
+    if (hits >= minColumnHits) {
+      if (!current) current = { left: x, right: x, pixelsFound: 0, samples: [] };
+      current.right = x;
+      current.pixelsFound += hits;
+      current.samples.push(x);
+      continue;
+    }
+
+    if (current) {
+      spans.push(current);
+      current = null;
     }
   }
 
-  if (pixelsFound < 28 || right <= left) return null;
-  return { left, right, pixelsFound };
+  if (current) spans.push(current);
+
+  const merged: ForegroundSpan[] = [];
+  for (const span of spans.filter((item) => item.right - item.left >= 5)) {
+    const previous = merged[merged.length - 1];
+    if (previous && span.left - previous.right <= 4) {
+      previous.right = span.right;
+      previous.pixelsFound += span.pixelsFound;
+      previous.samples.push(...span.samples);
+    } else {
+      merged.push({ ...span });
+    }
+  }
+
+  return merged;
+}
+
+function findBodyBoundsAtRow(image: ImageData, centerY: number, band: number, expectedCenterX: number) {
+  const spans = getForegroundSpansAtRow(image, centerY, band);
+  if (spans.length === 0) return null;
+
+  const selectedSpan = spans
+    .map((span) => {
+      const center = (span.left + span.right) / 2;
+      const width = span.right - span.left;
+      const centerDistance = Math.abs(center - expectedCenterX);
+      const tooWidePenalty = Math.max(0, width - 210) * 1.9;
+      return {
+        ...span,
+        score: span.pixelsFound + width * 4 - centerDistance * 5 - tooWidePenalty,
+      };
+    })
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!selectedSpan || selectedSpan.pixelsFound < 18) return null;
+
+  const trimAmount = selectedSpan.right - selectedSpan.left > 96 ? 0.08 : 0.04;
+  const left = quantile(selectedSpan.samples, trimAmount);
+  const right = quantile(selectedSpan.samples, 1 - trimAmount);
+  if (right <= left) return null;
+
+  return {
+    left,
+    right,
+    pixelsFound: selectedSpan.pixelsFound,
+    spanCount: spans.length,
+  };
 }
 
 function trackDressPointsFromForeground(
@@ -597,11 +780,21 @@ function trackBodyPointsFromForeground(
 ) {
   const leftPoints: DressPoint[] = [];
   const rightPoints: DressPoint[] = [];
+  const previousById = previousPoints ? new Map(previousPoints.map((point) => [point.id, point])) : null;
+  let expectedCenterX = localToWorld(frame, 0.5, BODY_MESH_ROWS[0].v).x;
   let trackedRows = 0;
 
   for (const row of BODY_MESH_ROWS) {
     const rowCenter = localToWorld(frame, 0.5, row.v).y;
-    const bounds = findBodyBoundsAtRow(keyedImage, rowCenter, row.v < 0.22 ? 11 : 14);
+    const previousLeft = previousById?.get(`left-${row.id}`);
+    const previousRight = previousById?.get(`right-${row.id}`);
+    if (previousLeft && previousRight) {
+      const previousLeftWorld = localToWorld(frame, previousLeft.u, row.v);
+      const previousRightWorld = localToWorld(frame, previousRight.u, row.v);
+      expectedCenterX = (previousLeftWorld.x + previousRightWorld.x) / 2;
+    }
+
+    const bounds = findBodyBoundsAtRow(keyedImage, rowCenter, row.v < 0.2 ? 9 : 12, expectedCenterX);
     if (!bounds) {
       const fallbackLeftU = 0.08 + Math.abs(row.v - 0.45) * 0.18;
       const fallbackRightU = 0.92 - Math.abs(row.v - 0.45) * 0.18;
@@ -612,7 +805,8 @@ function trackBodyPointsFromForeground(
 
     const leftLocal = worldToLocal(frame, { x: bounds.left, y: rowCenter });
     const rightLocal = worldToLocal(frame, { x: bounds.right, y: rowCenter });
-    const edgePadding = row.v < 0.24 ? 0.015 : 0.025;
+    const edgePadding = row.v < 0.24 ? 0.006 : 0.012;
+    expectedCenterX = (bounds.left + bounds.right) / 2;
     leftPoints.push({
       id: `left-${row.id}`,
       label: `L ${row.label}`,
@@ -632,9 +826,8 @@ function trackBodyPointsFromForeground(
   if (trackedRows < 3) return previousPoints ?? tracked;
   if (!previousPoints || previousPoints.length !== tracked.length) return tracked;
 
-  const previousById = new Map(previousPoints.map((point) => [point.id, point]));
   return tracked.map((point) => {
-    const previous = previousById.get(point.id);
+    const previous = previousById?.get(point.id);
     if (!previous) return point;
     return {
       ...point,
@@ -1037,6 +1230,7 @@ function drawForegroundLayer(
   marks: ScratchMark[],
   isEditing: boolean,
   isCurved: boolean,
+  showMesh: boolean,
 ) {
   const activeMask = foregroundMask ?? drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
 
@@ -1051,8 +1245,10 @@ function drawForegroundLayer(
   foregroundContext.globalCompositeOperation = "source-over";
 
   context.drawImage(foregroundCanvas, 0, 0);
-  if (isCurved) drawCurvedSurfaceCues(context, frame, points);
-  drawSurfaceMesh(context, frame, points, isCurved, activeMask);
+  if (showMesh) {
+    if (isCurved) drawCurvedSurfaceCues(context, frame, points);
+    drawSurfaceMesh(context, frame, points, isCurved, activeMask);
+  }
 
   if (isEditing) {
     context.save();
@@ -1104,8 +1300,10 @@ export function ScratchPrototype() {
   const trackedDressPointsRef = useRef<DressPoint[] | null>(null);
   const [dressPoints, setDressPoints] = useState(DEFAULT_DRESS_POINTS);
   const [keyframes, setKeyframes] = useState(DEFAULT_KEYFRAMES);
+  const [keyframeSource, setKeyframeSource] = useState("Default");
   const [isEditingShape, setIsEditingShape] = useState(false);
   const [isCurvedMask, setIsCurvedMask] = useState(true);
+  const [showMesh, setShowMesh] = useState(true);
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
   const [usingBottomVideo, setUsingBottomVideo] = useState(false);
@@ -1143,16 +1341,18 @@ export function ScratchPrototype() {
         foregroundVideo && hasForegroundFrame && foregroundCanvasRef.current
           ? drawChromaKeyedVideo(foregroundCanvasRef.current, foregroundContext, foregroundVideo)
           : null;
+      const keyframedFrame = interpolateGarmentFrame(keyframes, videoTime);
       const frame =
-        keyedForeground && !isEditingShape
+        keyframedFrame ??
+        (keyedForeground && !isEditingShape
           ? trackBodyFrameFromForeground(keyedForeground, baseFrame, trackedFrameRef.current)
-          : baseFrame;
-      if (keyedForeground && !isEditingShape) {
+          : baseFrame);
+      if (keyedForeground && !isEditingShape && !keyframedFrame) {
         trackedFrameRef.current = frame;
       }
       const keyframedDressPoints = interpolateDressPoints(keyframes, videoTime);
       const renderDressPoints =
-        isEditingShape || !keyedForeground
+        isEditingShape || keyframedFrame || !keyedForeground
           ? isEditingShape
             ? dressPoints
             : keyframedDressPoints
@@ -1161,7 +1361,7 @@ export function ScratchPrototype() {
               keyedForeground,
               trackedDressPointsRef.current,
             );
-      if (!isEditingShape && keyedForeground) {
+      if (!isEditingShape && keyedForeground && !keyframedFrame) {
         trackedDressPointsRef.current = cloneDressPoints(renderDressPoints);
       }
       foregroundMaskRef.current = keyedForeground;
@@ -1199,6 +1399,7 @@ export function ScratchPrototype() {
             marksRef.current,
             isEditingShape,
             isCurvedMask,
+            showMesh,
           );
         }
       } else {
@@ -1226,7 +1427,27 @@ export function ScratchPrototype() {
 
     animationId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationId);
-  }, [claimed, dressPoints, duration, isCurvedMask, isEditingShape, keyframes, progress]);
+  }, [claimed, dressPoints, duration, isCurvedMask, isEditingShape, keyframes, progress, showMesh]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    fetch(GENERATED_KEYFRAMES_SRC)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (isCancelled || !data) return;
+        const generatedKeyframes = parseGeneratedKeyframes(data);
+        if (generatedKeyframes.length === 0) return;
+
+        setKeyframes(generatedKeyframes);
+        setKeyframeSource("Generated");
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
@@ -1385,9 +1606,10 @@ export function ScratchPrototype() {
     const points = isEditingShape ? dressPoints : renderedDressPointsRef.current;
     setKeyframes((currentKeyframes) => {
       const nextKeyframes = currentKeyframes.filter((keyframe) => Math.abs(keyframe.time - time) > 0.08);
-      nextKeyframes.push({ time, points: cloneDressPoints(points) });
+      nextKeyframes.push({ time, frame: cloneGarmentFrame(frameRef.current), points: cloneDressPoints(points) });
       return nextKeyframes.sort((a, b) => a.time - b.time);
     });
+    setKeyframeSource("Manual");
   }
 
   return (
@@ -1476,6 +1698,10 @@ export function ScratchPrototype() {
               <dd>{isCurvedMask ? "3D UV mesh" : "Flat"}</dd>
             </div>
             <div>
+              <dt>Mesh</dt>
+              <dd>{showMesh ? "Shown" : "Hidden"}</dd>
+            </div>
+            <div>
               <dt>Time</dt>
               <dd>
                 {formatTime(currentTime)} / {formatTime(duration)}
@@ -1483,7 +1709,9 @@ export function ScratchPrototype() {
             </div>
             <div>
               <dt>Keys</dt>
-              <dd>{keyframes.length}</dd>
+              <dd>
+                {keyframes.length} {keyframeSource}
+              </dd>
             </div>
             <div>
               <dt>Bottom</dt>
@@ -1539,6 +1767,13 @@ export function ScratchPrototype() {
             <button
               type="button"
               className="secondary-button"
+              onClick={() => setShowMesh((current) => !current)}
+            >
+              {showMesh ? "Hide mesh" : "Show mesh"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
               onClick={() => {
                 activeDressPointRef.current = null;
                 marksRef.current = [];
@@ -1571,6 +1806,16 @@ export function ScratchPrototype() {
                 value={JSON.stringify(
                   keyframes.map((keyframe) => ({
                     time: Number(keyframe.time.toFixed(2)),
+                    frame: keyframe.frame
+                      ? {
+                          origin: {
+                            x: Number(keyframe.frame.origin.x.toFixed(1)),
+                            y: Number(keyframe.frame.origin.y.toFixed(1)),
+                          },
+                          width: Number(keyframe.frame.width.toFixed(1)),
+                          height: Number(keyframe.frame.height.toFixed(1)),
+                        }
+                      : undefined,
                     points: keyframe.points.map(({ id, u, v }) => ({
                       id,
                       u: Number(u.toFixed(3)),

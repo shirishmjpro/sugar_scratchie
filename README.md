@@ -31,6 +31,22 @@ npm run dev
 
 Then open the local Vite URL shown in the terminal.
 
+## Generate Mesh Keyframes
+
+The prototype can generate repeatable mesh keyframes from the foreground green-screen clip:
+
+```bash
+npm run generate:keyframes
+```
+
+This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds with `ffmpeg`, chroma-keys each frame, tracks the visible body silhouette rows, and writes:
+
+```text
+public/cards/generated-mesh-keyframes.json
+```
+
+The tracker detects separate foreground spans on each row, prefers the span closest to the torso from the previous frame, and trims noisy row edges so hands and stray alpha pixels do not pull the mesh outward as aggressively. When that file is present, the app loads it automatically and uses the stored frame and mesh points instead of recalculating the mesh live in the browser. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
+
 ## Video Clips
 
 Current clip paths:
