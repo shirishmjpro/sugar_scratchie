@@ -11,16 +11,22 @@ const INPUT_VIDEO = resolve("public/cards/Green bg sample 2 swap.mp4");
 const OUTPUT_JSON = resolve("public/cards/generated-mesh-keyframes.json");
 
 const BODY_MESH_ROWS = [
-  { id: "shoulder", label: "Shoulder", v: 0.06 },
-  { id: "upper-arm", label: "Upper", v: 0.14 },
-  { id: "bust", label: "Bust", v: 0.24 },
-  { id: "chest", label: "Chest", v: 0.32 },
-  { id: "rib", label: "Rib", v: 0.4 },
-  { id: "waist", label: "Waist", v: 0.5 },
-  { id: "hip", label: "Hip", v: 0.62 },
-  { id: "upper-thigh", label: "U Thigh", v: 0.72 },
-  { id: "thigh", label: "Thigh", v: 0.82 },
-  { id: "leg", label: "Leg", v: 0.94 },
+  { id: "neck", label: "Neck", v: 0.025 },
+  { id: "shoulder", label: "Shoulder", v: 0.075 },
+  { id: "upper-arm", label: "Upper", v: 0.13 },
+  { id: "underarm", label: "Under", v: 0.19 },
+  { id: "bust", label: "Bust", v: 0.25 },
+  { id: "chest", label: "Chest", v: 0.31 },
+  { id: "rib", label: "Rib", v: 0.38 },
+  { id: "mid-waist", label: "M Waist", v: 0.45 },
+  { id: "waist", label: "Waist", v: 0.52 },
+  { id: "high-hip", label: "H Hip", v: 0.59 },
+  { id: "hip", label: "Hip", v: 0.66 },
+  { id: "upper-thigh", label: "U Thigh", v: 0.73 },
+  { id: "mid-thigh", label: "M Thigh", v: 0.8 },
+  { id: "thigh", label: "Thigh", v: 0.87 },
+  { id: "knee", label: "Knee", v: 0.93 },
+  { id: "leg", label: "Leg", v: 0.985 },
 ];
 
 function normalize(vector) {

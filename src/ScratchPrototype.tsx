@@ -1092,6 +1092,32 @@ function drawSegmentedMeshLine(
   if (isDrawing) context.stroke();
 }
 
+function drawMeshUvLine(
+  context: CanvasRenderingContext2D,
+  frame: GarmentFrame,
+  points: DressPoint[],
+  start: Vec2,
+  end: Vec2,
+  isCurved: boolean,
+  foregroundMask: ImageData | null,
+  samples: number,
+) {
+  const linePoints: Vec2[] = [];
+  for (let sample = 0; sample <= samples; sample += 1) {
+    const blend = sample / samples;
+    linePoints.push(
+      getMeshPoint(
+        frame,
+        points,
+        start.x + (end.x - start.x) * blend,
+        start.y + (end.y - start.y) * blend,
+        isCurved,
+      ),
+    );
+  }
+  drawSegmentedMeshLine(context, linePoints, foregroundMask);
+}
+
 function drawSurfaceMesh(
   context: CanvasRenderingContext2D,
   frame: GarmentFrame,
@@ -1099,9 +1125,10 @@ function drawSurfaceMesh(
   isCurved: boolean,
   foregroundMask: ImageData | null,
 ) {
-  const columns = isCurved ? 16 : 7;
-  const rows = isCurved ? 20 : 10;
+  const columns = isCurved ? 22 : 9;
+  const rows = isCurved ? 30 : 14;
   const samples = 72;
+  const diagonalSamples = 16;
   const meshCanvas = document.createElement("canvas");
   meshCanvas.width = CANVAS_WIDTH;
   meshCanvas.height = CANVAS_HEIGHT;
@@ -1111,25 +1138,40 @@ function drawSurfaceMesh(
   meshContext.save();
   drawDressPath(meshContext, frame, points, isCurved);
   meshContext.clip();
-  meshContext.strokeStyle = isCurved ? "rgba(255, 255, 255, 0.2)" : "rgba(255, 255, 255, 0.14)";
-  meshContext.lineWidth = isCurved ? 1.1 : 0.8;
+  meshContext.strokeStyle = isCurved ? "rgba(255, 255, 255, 0.16)" : "rgba(255, 255, 255, 0.12)";
+  meshContext.lineWidth = isCurved ? 0.85 : 0.7;
 
   for (let column = 1; column < columns; column += 1) {
     const u = column / columns;
-    const linePoints: Vec2[] = [];
-    for (let sample = 0; sample <= samples; sample += 1) {
-      linePoints.push(getMeshPoint(frame, points, u, sample / samples, isCurved));
-    }
-    drawSegmentedMeshLine(meshContext, linePoints, foregroundMask);
+    drawMeshUvLine(meshContext, frame, points, { x: u, y: 0 }, { x: u, y: 1 }, isCurved, foregroundMask, samples);
   }
 
   for (let row = 1; row < rows; row += 1) {
     const v = row / rows;
-    const linePoints: Vec2[] = [];
-    for (let sample = 0; sample <= samples; sample += 1) {
-      linePoints.push(getMeshPoint(frame, points, sample / samples, v, isCurved));
+    drawMeshUvLine(meshContext, frame, points, { x: 0, y: v }, { x: 1, y: v }, isCurved, foregroundMask, samples);
+  }
+
+  meshContext.strokeStyle = isCurved ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.16)";
+  meshContext.lineWidth = isCurved ? 0.95 : 0.75;
+
+  for (let row = 0; row < rows; row += 1) {
+    const v0 = row / rows;
+    const v1 = (row + 1) / rows;
+    for (let column = 0; column < columns; column += 1) {
+      const u0 = column / columns;
+      const u1 = (column + 1) / columns;
+      const shouldRise = (row + column) % 2 === 0;
+      drawMeshUvLine(
+        meshContext,
+        frame,
+        points,
+        shouldRise ? { x: u0, y: v1 } : { x: u0, y: v0 },
+        shouldRise ? { x: u1, y: v0 } : { x: u1, y: v1 },
+        isCurved,
+        foregroundMask,
+        diagonalSamples,
+      );
     }
-    drawSegmentedMeshLine(meshContext, linePoints, foregroundMask);
   }
 
   meshContext.restore();
