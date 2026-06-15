@@ -75,6 +75,19 @@ const BODY_MESH_ROWS = [
   { id: "leg", label: "Leg", v: 0.985 },
 ];
 
+const STABLE_BODY_CAGE_PROFILE = [
+  { v: 0, left: 0.39, right: 0.61 },
+  { v: 0.05, left: 0.31, right: 0.69 },
+  { v: 0.12, left: 0.2, right: 0.8 },
+  { v: 0.22, left: 0.18, right: 0.82 },
+  { v: 0.34, left: 0.23, right: 0.77 },
+  { v: 0.48, left: 0.29, right: 0.71 },
+  { v: 0.62, left: 0.22, right: 0.78 },
+  { v: 0.78, left: 0.27, right: 0.73 },
+  { v: 0.92, left: 0.32, right: 0.68 },
+  { v: 1, left: 0.36, right: 0.64 },
+];
+
 const DEFAULT_DRESS_POINTS: DressPoint[] = [
   { id: "left-strap", label: "L strap", u: -0.35, v: 0.003 },
   { id: "left-chest", label: "L chest", u: -0.04, v: 0.162 },
@@ -449,6 +462,78 @@ function drawChromaKeyedVideo(
 
 function getDressWorldPoints(frame: GarmentFrame, points: DressPoint[], isCurved = false) {
   return points.map((point) => projectLocalToWorld(frame, point.u, point.v, isCurved));
+}
+
+function getTrackedBodyCenterU(points: DressPoint[], v: number) {
+  const leftPoints = points.filter((point) => point.id.startsWith("left-"));
+  const rightPoints = points.filter((point) => point.id.startsWith("right-"));
+  const centers = leftPoints
+    .map((leftPoint) => {
+      const rowId = leftPoint.id.replace(/^left-/, "");
+      const rightPoint = rightPoints.find((point) => point.id === `right-${rowId}`);
+      if (!rightPoint) return null;
+
+      return {
+        v: (leftPoint.v + rightPoint.v) / 2,
+        u: (leftPoint.u + rightPoint.u) / 2,
+      };
+    })
+    .filter((center): center is { u: number; v: number } => Boolean(center))
+    .sort((a, b) => a.v - b.v);
+
+  if (centers.length === 0) return 0.5;
+
+  const clampedV = Math.max(0, Math.min(1, v));
+  if (clampedV <= centers[0].v) return Math.max(0.32, Math.min(0.68, centers[0].u));
+  if (clampedV >= centers[centers.length - 1].v) {
+    return Math.max(0.32, Math.min(0.68, centers[centers.length - 1].u));
+  }
+
+  for (let index = 0; index < centers.length - 1; index += 1) {
+    const current = centers[index];
+    const next = centers[index + 1];
+    if (clampedV >= current.v && clampedV <= next.v) {
+      const span = next.v - current.v || 1;
+      const blend = (clampedV - current.v) / span;
+      const centerU = current.u + (next.u - current.u) * blend;
+      return Math.max(0.32, Math.min(0.68, centerU));
+    }
+  }
+
+  return 0.5;
+}
+
+function getStableBodyCageU(side: "left" | "right", v: number, points: DressPoint[] = []) {
+  const sorted = STABLE_BODY_CAGE_PROFILE;
+  const clampedV = Math.max(0, Math.min(1, v));
+  const centerU = getTrackedBodyCenterU(points, clampedV);
+  const getProfileU = (value: number) => Math.max(-0.08, Math.min(1.08, centerU + value - 0.5));
+
+  if (clampedV <= sorted[0].v) return getProfileU(sorted[0][side]);
+  if (clampedV >= sorted[sorted.length - 1].v) return getProfileU(sorted[sorted.length - 1][side]);
+
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const current = sorted[index];
+    const next = sorted[index + 1];
+    if (clampedV >= current.v && clampedV <= next.v) {
+      const span = next.v - current.v || 1;
+      const blend = (clampedV - current.v) / span;
+      return getProfileU(current[side] + (next[side] - current[side]) * blend);
+    }
+  }
+
+  return getProfileU(sorted[0][side]);
+}
+
+function getStableBodyCageWorldPoints(frame: GarmentFrame, points: DressPoint[] = [], isCurved = false) {
+  const leftPoints = STABLE_BODY_CAGE_PROFILE.map((profile) =>
+    projectLocalToWorld(frame, getStableBodyCageU("left", profile.v, points), profile.v, isCurved),
+  );
+  const rightPoints = [...STABLE_BODY_CAGE_PROFILE]
+    .reverse()
+    .map((profile) => projectLocalToWorld(frame, getStableBodyCageU("right", profile.v, points), profile.v, isCurved));
+
+  return [...leftPoints, ...rightPoints];
 }
 
 function cloneDressPoints(points: DressPoint[]) {
@@ -962,6 +1047,22 @@ function drawDressPath(context: CanvasRenderingContext2D, frame: GarmentFrame, p
   context.closePath();
 }
 
+function drawStableBodyCagePath(
+  context: CanvasRenderingContext2D,
+  frame: GarmentFrame,
+  points: DressPoint[] = [],
+  isCurved = false,
+) {
+  const worldPoints = getStableBodyCageWorldPoints(frame, points, isCurved);
+
+  context.beginPath();
+  context.moveTo(worldPoints[0].x, worldPoints[0].y);
+  for (let index = 1; index < worldPoints.length; index += 1) {
+    context.lineTo(worldPoints[index].x, worldPoints[index].y);
+  }
+  context.closePath();
+}
+
 function drawEditorHandles(context: CanvasRenderingContext2D, frame: GarmentFrame, points: DressPoint[], isCurved = false) {
   context.save();
   context.font = "600 10px Inter, system-ui, sans-serif";
@@ -987,27 +1088,6 @@ function drawEditorHandles(context: CanvasRenderingContext2D, frame: GarmentFram
   context.restore();
 }
 
-function getEdgeUAtV(points: DressPoint[], side: "left" | "right", v: number) {
-  const edgePoints = points.filter((point) => point.id.startsWith(`${side}-`));
-  const sorted = [...edgePoints].sort((a, b) => a.v - b.v);
-  if (sorted.length === 0) return side === "left" ? 0 : 1;
-
-  if (v <= sorted[0].v) return sorted[0].u;
-  if (v >= sorted[sorted.length - 1].v) return sorted[sorted.length - 1].u;
-
-  for (let index = 0; index < sorted.length - 1; index += 1) {
-    const current = sorted[index];
-    const next = sorted[index + 1];
-    if (v >= current.v && v <= next.v) {
-      const span = next.v - current.v || 1;
-      const blend = (v - current.v) / span;
-      return current.u + (next.u - current.u) * blend;
-    }
-  }
-
-  return sorted[0].u;
-}
-
 function getMeshPoint(frame: GarmentFrame, points: DressPoint[], u: number, v: number, isCurved: boolean) {
   return getMeshProjection(frame, points, u, v, isCurved).point;
 }
@@ -1019,8 +1099,8 @@ function getMeshProjection(
   v: number,
   isCurved: boolean,
 ) {
-  const leftU = getEdgeUAtV(points, "left", v);
-  const rightU = getEdgeUAtV(points, "right", v);
+  const leftU = getStableBodyCageU("left", v, points);
+  const rightU = getStableBodyCageU("right", v, points);
   const frontU = isCurved && FRONT_SURFACE_U_IS_MIRRORED ? 1 - u : u;
   const surfaceU = leftU + (rightU - leftU) * frontU;
   return projectSurfacePoint(frame, surfaceU, v, isCurved);
@@ -1136,7 +1216,7 @@ function drawSurfaceMesh(
   if (!meshContext) return;
 
   meshContext.save();
-  drawDressPath(meshContext, frame, points, isCurved);
+  drawStableBodyCagePath(meshContext, frame, points, isCurved);
   meshContext.clip();
   meshContext.strokeStyle = isCurved ? "rgba(255, 255, 255, 0.16)" : "rgba(255, 255, 255, 0.12)";
   meshContext.lineWidth = isCurved ? 0.85 : 0.7;
@@ -1194,18 +1274,19 @@ function drawSurfaceMesh(
 
 function drawCurvedSurfaceCues(context: CanvasRenderingContext2D, frame: GarmentFrame, points: DressPoint[]) {
   context.save();
-  drawDressPath(context, frame, points, true);
+  drawStableBodyCagePath(context, frame, points, true);
   context.clip();
 
-  const left = projectLocalToWorld(frame, 0, 0.5, true);
-  const center = projectLocalToWorld(frame, 0.5, 0.5, true);
-  const right = projectLocalToWorld(frame, 1, 0.5, true);
+  const centerU = getTrackedBodyCenterU(points, 0.5);
+  const left = projectLocalToWorld(frame, getStableBodyCageU("left", 0.5, points), 0.5, true);
+  const center = projectLocalToWorld(frame, centerU, 0.5, true);
+  const right = projectLocalToWorld(frame, getStableBodyCageU("right", 0.5, points), 0.5, true);
   const shade = context.createLinearGradient(left.x, left.y, right.x, right.y);
   shade.addColorStop(0, "rgba(0, 0, 0, 0.3)");
   shade.addColorStop(0.5, "rgba(255, 255, 255, 0.13)");
   shade.addColorStop(1, "rgba(0, 0, 0, 0.24)");
   context.fillStyle = shade;
-  drawDressPath(context, frame, points, true);
+  drawStableBodyCagePath(context, frame, points, true);
   context.fill();
 
   context.strokeStyle = "rgba(255, 255, 255, 0.22)";
@@ -1277,7 +1358,11 @@ function drawForegroundLayer(
   const activeMask = foregroundMask ?? drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
 
   foregroundContext.save();
-  drawDressPath(foregroundContext, frame, points, isCurved);
+  if (isEditing) {
+    drawDressPath(foregroundContext, frame, points, isCurved);
+  } else {
+    drawStableBodyCagePath(foregroundContext, frame, points, isCurved);
+  }
   foregroundContext.clip();
   foregroundContext.globalCompositeOperation = "destination-out";
   for (const mark of marks) {
@@ -1574,7 +1659,7 @@ export function ScratchPrototype() {
     const frame = frameRef.current;
     const renderDressPoints = renderedDressPointsRef.current;
     const foregroundMask = foregroundMaskRef.current;
-    const dressPolygon = getDressWorldPoints(frame, renderDressPoints, isCurvedMask);
+    const dressPolygon = getStableBodyCageWorldPoints(frame, renderDressPoints, isCurvedMask);
 
     if (!pointInPolygon(point, dressPolygon)) return;
     if (!isPointOnForegroundMask(foregroundMask, point)) return;

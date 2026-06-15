@@ -46,7 +46,7 @@ This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds with `
 public/cards/generated-mesh-keyframes.json
 ```
 
-The tracker detects separate foreground spans on each row, prefers the span closest to the torso from the previous frame, and trims noisy row edges so hands and stray alpha pixels do not pull the mesh outward as aggressively. The current tracker writes 32 boundary points per sampled frame, which gives the triangular mesh more body contour anchors. When that file is present, the app loads it automatically and uses the stored frame and mesh points instead of recalculating the mesh live in the browser. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
+The tracker detects separate foreground spans on each row, prefers the span closest to the torso from the previous frame, and trims noisy row edges so hands and stray alpha pixels do not pull the tracked reference points outward as aggressively. The active scratch surface uses a stable pseudo-3D body cage, while the generated keyframes provide overall frame motion and optional reference points. When that file is present, the app loads it automatically. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
 
 ## Video Clips
 
@@ -61,6 +61,6 @@ The renderer draws the bottom video first, chroma-keys the green background out 
 
 The prototype starts with generated keyframes sampled across the foreground clip. Use **Edit dress shape** to tune the scratchable area at the current timestamp, then **Save keyframe** to replace or add a shape. The renderer interpolates between saved keyframes during playback. The JSON readouts expose both the current shape and saved keyframes so the annotation data can be moved into a real card definition later.
 
-Use **Use flat mask** / **Use 3D mesh** to compare a flat polygon projection against the curved UV mesh projection. In mesh mode, the dress shape is subdivided into a triangular UV lattice, then projected through a curved body-surface approximation. Scratches are stored in garment UV coordinates, so when the keyframed mesh moves, the scratched holes move with the surface.
+Use **Use flat mask** / **Use 3D mesh** to compare a flat stable cage projection against the curved UV mesh projection. In mesh mode, the stable body cage is subdivided into a triangular UV lattice, then projected through a curved body-surface approximation. Scratches are stored in garment UV coordinates, so when the keyframed frame moves, the scratched holes move with the surface without following noisy 2D silhouette edges.
 
 The current 3D mode is still canvas-based. A later Three.js/WebGL mesh can replace the renderer while keeping the same keyframe and scratch-coordinate model.
