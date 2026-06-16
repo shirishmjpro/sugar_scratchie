@@ -57,10 +57,10 @@ const BODY_WRAP_WIDTH_SCALE = 0.72;
 const BODY_WRAP_DEPTH = 132;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const HOVER_REVEAL_RADIUS = 46;
-const CURVED_MESH_COLUMNS = 18;
-const CURVED_MESH_ROWS = 24;
-const CURVED_MESH_LINE_SAMPLES = 48;
-const CURVED_MESH_DIAGONAL_SAMPLES = 8;
+const CURVED_MESH_COLUMNS = 26;
+const CURVED_MESH_ROWS = 34;
+const CURVED_MESH_LINE_SAMPLES = 64;
+const CURVED_MESH_DIAGONAL_SAMPLES = 10;
 
 const BODY_MESH_ROWS = [
   { id: "neck", label: "Neck", v: 0.025 },
@@ -903,8 +903,8 @@ function trackDressPointsFromForeground(
     if (!previous) return point;
     return {
       ...point,
-      u: previous.u * 0.62 + point.u * 0.38,
-      v: previous.v * 0.76 + point.v * 0.24,
+      u: previous.u * 0.45 + point.u * 0.55,
+      v: previous.v * 0.55 + point.v * 0.45,
     };
   });
 }
@@ -967,8 +967,8 @@ function trackBodyPointsFromForeground(
     if (!previous) return point;
     return {
       ...point,
-      u: previous.u * 0.58 + point.u * 0.42,
-      v: previous.v * 0.72 + point.v * 0.28,
+      u: previous.u * 0.42 + point.u * 0.58,
+      v: previous.v * 0.55 + point.v * 0.45,
     };
   });
 }
@@ -1018,13 +1018,13 @@ function trackBodyFrameFromForeground(
 
   return {
     origin: {
-      x: previousFrame.origin.x * 0.68 + detectedFrame.origin.x * 0.32,
-      y: previousFrame.origin.y * 0.72 + detectedFrame.origin.y * 0.28,
+      x: previousFrame.origin.x * 0.5 + detectedFrame.origin.x * 0.5,
+      y: previousFrame.origin.y * 0.55 + detectedFrame.origin.y * 0.45,
     },
     uAxis: fallbackFrame.uAxis,
     vAxis: fallbackFrame.vAxis,
-    width: previousFrame.width * 0.68 + detectedFrame.width * 0.32,
-    height: previousFrame.height * 0.72 + detectedFrame.height * 0.28,
+    width: previousFrame.width * 0.5 + detectedFrame.width * 0.5,
+    height: previousFrame.height * 0.55 + detectedFrame.height * 0.45,
   };
 }
 
@@ -1709,6 +1709,19 @@ export function ScratchPrototype() {
     };
   }, []);
 
+  function applyScratchZoom(point: Vec2) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.style.transformOrigin = `${(point.x / CANVAS_WIDTH) * 100}% ${(point.y / CANVAS_HEIGHT) * 100}%`;
+    canvas.style.transform = "scale(1.35)";
+  }
+
+  function clearScratchZoom() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.style.transform = "scale(1)";
+  }
+
   function getCanvasPoint(clientX: number, clientY: number) {
     const canvas = canvasRef.current;
     if (!canvas) return null;
@@ -1775,7 +1788,7 @@ export function ScratchPrototype() {
       {
         u: local.u,
         v: local.v,
-        radius: 0.09,
+        radius: 0.045,
       },
     ].slice(-180);
 
@@ -1880,13 +1893,14 @@ export function ScratchPrototype() {
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
               drawingRef.current = true;
-              hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
+              const point = getCanvasPoint(event.clientX, event.clientY);
+              hoverPointRef.current = point;
               event.currentTarget.setPointerCapture(event.pointerId);
               if (isEditingShape) {
-                const point = getCanvasPoint(event.clientX, event.clientY);
                 activeDressPointRef.current = point ? getNearestDressPointId(point) : null;
                 moveDressPoint(event.clientX, event.clientY);
               } else {
+                if (point) applyScratchZoom(point);
                 addScratch(event.clientX, event.clientY);
               }
             }}
@@ -1902,16 +1916,19 @@ export function ScratchPrototype() {
             onPointerUp={() => {
               drawingRef.current = false;
               activeDressPointRef.current = null;
+              clearScratchZoom();
             }}
             onPointerLeave={() => {
               drawingRef.current = false;
               activeDressPointRef.current = null;
               hoverPointRef.current = null;
+              clearScratchZoom();
             }}
             onPointerCancel={() => {
               drawingRef.current = false;
               activeDressPointRef.current = null;
               hoverPointRef.current = null;
+              clearScratchZoom();
             }}
           />
         </div>

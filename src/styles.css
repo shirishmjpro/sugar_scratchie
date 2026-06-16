@@ -94,6 +94,7 @@ textarea:focus-visible {
   display: block;
   height: 100%;
   position: relative;
+  transition: transform 0.18s ease-out;
   width: 100%;
 }
 
