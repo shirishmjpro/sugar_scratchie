@@ -55,6 +55,12 @@ const FRONT_SURFACE_U_IS_MIRRORED = true;
 const BODY_WRAP_RADIANS = Math.PI * 1.22;
 const BODY_WRAP_WIDTH_SCALE = 0.72;
 const BODY_WRAP_DEPTH = 132;
+const UI_STATE_UPDATE_INTERVAL_MS = 250;
+const HOVER_REVEAL_RADIUS = 46;
+const CURVED_MESH_COLUMNS = 18;
+const CURVED_MESH_ROWS = 24;
+const CURVED_MESH_LINE_SAMPLES = 48;
+const CURVED_MESH_DIAGONAL_SAMPLES = 8;
 
 const BODY_MESH_ROWS = [
   { id: "neck", label: "Neck", v: 0.025 },
@@ -88,6 +94,11 @@ const STABLE_BODY_CAGE_PROFILE = [
   { v: 1, left: 0.36, right: 0.64 },
 ];
 
+const BODY_PROFILE_MAX_WIDTH = STABLE_BODY_CAGE_PROFILE.reduce(
+  (max, profile) => Math.max(max, profile.right - profile.left),
+  0,
+);
+
 const DEFAULT_DRESS_POINTS: DressPoint[] = [
   { id: "left-strap", label: "L strap", u: -0.35, v: 0.003 },
   { id: "left-chest", label: "L chest", u: -0.04, v: 0.162 },
@@ -98,6 +109,21 @@ const DEFAULT_DRESS_POINTS: DressPoint[] = [
   { id: "right-chest", label: "R chest", u: 1.069, v: 0.132 },
   { id: "right-strap", label: "R strap", u: 0.867, v: -0.029 },
 ];
+
+const reusableCanvases = new Map<string, HTMLCanvasElement>();
+
+function getReusableCanvas(id: string) {
+  let canvas = reusableCanvases.get(id);
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    reusableCanvases.set(id, canvas);
+  }
+
+  if (canvas.width !== CANVAS_WIDTH) canvas.width = CANVAS_WIDTH;
+  if (canvas.height !== CANVAS_HEIGHT) canvas.height = CANVAS_HEIGHT;
+
+  return canvas;
+}
 
 const DEFAULT_KEYFRAMES: DressKeyframe[] = [
   {
@@ -292,16 +318,20 @@ function projectSurfacePoint(frame: GarmentFrame, u: number, v: number, isCurved
   const clampedU = Math.max(0, Math.min(1, u));
   const overflowU = u - clampedU;
   const theta = (clampedU - 0.5) * BODY_WRAP_RADIANS;
-  const verticalFalloff = Math.max(0.22, 1 - Math.abs(v - 0.5) * 0.92);
+  // Cross-section depth follows the silhouette: deep where the body is wide
+  // (bust, hip), shallow where it pinches (waist), tapering at neck and legs.
+  const widthRatio = Math.max(0.2, getBodyProfileWidth(v) / BODY_PROFILE_MAX_WIDTH);
+  const endTaper = Math.max(0.32, 1 - Math.abs(v - 0.5) * 0.35);
+  const depthFalloff = widthRatio * endTaper;
   const surface: Vec3 = {
     x: Math.sin(theta) * frame.width * BODY_WRAP_WIDTH_SCALE + overflowU * frame.width * 0.34,
     y: (v - 0.5) * frame.height,
-    z: Math.cos(theta) * BODY_WRAP_DEPTH * verticalFalloff,
+    z: Math.cos(theta) * BODY_WRAP_DEPTH * depthFalloff,
   };
   const cameraDistance = 560;
   const perspective = cameraDistance / (cameraDistance - surface.z);
   const center = localToWorld(frame, 0.5, 0.5);
-  const frontWeight = Math.max(0, Math.cos(theta)) * verticalFalloff;
+  const frontWeight = Math.max(0, Math.cos(theta)) * depthFalloff;
 
   return {
     point: {
@@ -501,6 +531,27 @@ function getTrackedBodyCenterU(points: DressPoint[], v: number) {
   }
 
   return 0.5;
+}
+
+function getBodyProfileWidth(v: number) {
+  const sorted = STABLE_BODY_CAGE_PROFILE;
+  const clampedV = Math.max(0, Math.min(1, v));
+  const widthAt = (profile: (typeof sorted)[number]) => profile.right - profile.left;
+
+  if (clampedV <= sorted[0].v) return widthAt(sorted[0]);
+  if (clampedV >= sorted[sorted.length - 1].v) return widthAt(sorted[sorted.length - 1]);
+
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const current = sorted[index];
+    const next = sorted[index + 1];
+    if (clampedV >= current.v && clampedV <= next.v) {
+      const span = next.v - current.v || 1;
+      const blend = (clampedV - current.v) / span;
+      return widthAt(current) + (widthAt(next) - widthAt(current)) * blend;
+    }
+  }
+
+  return widthAt(sorted[0]);
 }
 
 function getStableBodyCageU(side: "left" | "right", v: number, points: DressPoint[] = []) {
@@ -1143,16 +1194,30 @@ function isPointOnForegroundMask(mask: ImageData | null, point: Vec2) {
   return mask.data[index + 3] > 72;
 }
 
-function drawSegmentedMeshLine(
+function drawMeshUvLine(
   context: CanvasRenderingContext2D,
-  points: Vec2[],
-  mask: ImageData | null,
+  frame: GarmentFrame,
+  points: DressPoint[],
+  start: Vec2,
+  end: Vec2,
+  isCurved: boolean,
+  foregroundMask: ImageData | null,
+  samples: number,
 ) {
   let isDrawing = false;
 
   context.beginPath();
-  for (const point of points) {
-    if (isPointOnForegroundMask(mask, point)) {
+  for (let sample = 0; sample <= samples; sample += 1) {
+    const blend = sample / samples;
+    const point = getMeshPoint(
+      frame,
+      points,
+      start.x + (end.x - start.x) * blend,
+      start.y + (end.y - start.y) * blend,
+      isCurved,
+    );
+
+    if (isPointOnForegroundMask(foregroundMask, point)) {
       if (!isDrawing) {
         context.moveTo(point.x, point.y);
         isDrawing = true;
@@ -1172,32 +1237,6 @@ function drawSegmentedMeshLine(
   if (isDrawing) context.stroke();
 }
 
-function drawMeshUvLine(
-  context: CanvasRenderingContext2D,
-  frame: GarmentFrame,
-  points: DressPoint[],
-  start: Vec2,
-  end: Vec2,
-  isCurved: boolean,
-  foregroundMask: ImageData | null,
-  samples: number,
-) {
-  const linePoints: Vec2[] = [];
-  for (let sample = 0; sample <= samples; sample += 1) {
-    const blend = sample / samples;
-    linePoints.push(
-      getMeshPoint(
-        frame,
-        points,
-        start.x + (end.x - start.x) * blend,
-        start.y + (end.y - start.y) * blend,
-        isCurved,
-      ),
-    );
-  }
-  drawSegmentedMeshLine(context, linePoints, foregroundMask);
-}
-
 function drawSurfaceMesh(
   context: CanvasRenderingContext2D,
   frame: GarmentFrame,
@@ -1205,16 +1244,15 @@ function drawSurfaceMesh(
   isCurved: boolean,
   foregroundMask: ImageData | null,
 ) {
-  const columns = isCurved ? 22 : 9;
-  const rows = isCurved ? 30 : 14;
-  const samples = 72;
-  const diagonalSamples = 16;
-  const meshCanvas = document.createElement("canvas");
-  meshCanvas.width = CANVAS_WIDTH;
-  meshCanvas.height = CANVAS_HEIGHT;
+  const columns = isCurved ? CURVED_MESH_COLUMNS : 9;
+  const rows = isCurved ? CURVED_MESH_ROWS : 14;
+  const samples = isCurved ? CURVED_MESH_LINE_SAMPLES : 42;
+  const diagonalSamples = isCurved ? CURVED_MESH_DIAGONAL_SAMPLES : 8;
+  const meshCanvas = getReusableCanvas("mesh");
   const meshContext = meshCanvas.getContext("2d");
   if (!meshContext) return;
 
+  meshContext.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
   meshContext.save();
   drawStableBodyCagePath(meshContext, frame, points, isCurved);
   meshContext.clip();
@@ -1257,11 +1295,10 @@ function drawSurfaceMesh(
   meshContext.restore();
 
   if (foregroundMask) {
-    const maskCanvas = document.createElement("canvas");
-    maskCanvas.width = CANVAS_WIDTH;
-    maskCanvas.height = CANVAS_HEIGHT;
+    const maskCanvas = getReusableCanvas("mesh-mask");
     const maskContext = maskCanvas.getContext("2d");
     if (maskContext) {
+      maskContext.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
       maskContext.putImageData(foregroundMask, 0, 0);
       meshContext.globalCompositeOperation = "destination-in";
       meshContext.drawImage(maskCanvas, 0, 0);
@@ -1354,6 +1391,7 @@ function drawForegroundLayer(
   isEditing: boolean,
   isCurved: boolean,
   showMesh: boolean,
+  hoverPoint: Vec2 | null,
 ) {
   const activeMask = foregroundMask ?? drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
 
@@ -1371,7 +1409,40 @@ function drawForegroundLayer(
   foregroundContext.restore();
   foregroundContext.globalCompositeOperation = "source-over";
 
+  if (hoverPoint) {
+    foregroundContext.save();
+    foregroundContext.globalCompositeOperation = "destination-out";
+    const gradient = foregroundContext.createRadialGradient(
+      hoverPoint.x,
+      hoverPoint.y,
+      0,
+      hoverPoint.x,
+      hoverPoint.y,
+      HOVER_REVEAL_RADIUS,
+    );
+    gradient.addColorStop(0, "rgba(0,0,0,1)");
+    gradient.addColorStop(0.72, "rgba(0,0,0,1)");
+    gradient.addColorStop(1, "rgba(0,0,0,0)");
+    foregroundContext.fillStyle = gradient;
+    foregroundContext.beginPath();
+    foregroundContext.arc(hoverPoint.x, hoverPoint.y, HOVER_REVEAL_RADIUS, 0, Math.PI * 2);
+    foregroundContext.fill();
+    foregroundContext.restore();
+    foregroundContext.globalCompositeOperation = "source-over";
+  }
+
   context.drawImage(foregroundCanvas, 0, 0);
+
+  if (hoverPoint) {
+    context.save();
+    context.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(hoverPoint.x, hoverPoint.y, HOVER_REVEAL_RADIUS, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
+
   if (showMesh) {
     if (isCurved) drawCurvedSurfaceCues(context, frame, points);
     drawSurfaceMesh(context, frame, points, isCurved, activeMask);
@@ -1419,6 +1490,7 @@ export function ScratchPrototype() {
   const foregroundCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const foregroundMaskRef = useRef<ImageData | null>(null);
   const marksRef = useRef<ScratchMark[]>([]);
+  const hoverPointRef = useRef<Vec2 | null>(null);
   const drawingRef = useRef(false);
   const activeDressPointRef = useRef<string | null>(null);
   const frameRef = useRef<GarmentFrame>(getSyntheticFrame(0));
@@ -1438,6 +1510,14 @@ export function ScratchPrototype() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(18.8);
   const [isPaused, setIsPaused] = useState(false);
+  const progressRef = useRef(progress);
+  const claimedRef = useRef(claimed);
+  const uiStateRef = useRef({
+    currentTime,
+    duration,
+    isPaused,
+    lastUpdatedAt: 0,
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1496,9 +1576,25 @@ export function ScratchPrototype() {
       frameRef.current = frame;
 
       if (bottomVideo) {
-        setCurrentTime(videoTime);
-        setDuration(bottomVideo.duration || duration);
-        setIsPaused(bottomVideo.paused);
+        const now = performance.now();
+        const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
+        const nextPaused = bottomVideo.paused;
+        const shouldUpdateUi =
+          now - uiStateRef.current.lastUpdatedAt >= UI_STATE_UPDATE_INTERVAL_MS ||
+          nextPaused !== uiStateRef.current.isPaused ||
+          Math.abs(videoTime - uiStateRef.current.currentTime) > 1;
+
+        if (shouldUpdateUi) {
+          uiStateRef.current = {
+            currentTime: videoTime,
+            duration: nextDuration,
+            isPaused: nextPaused,
+            lastUpdatedAt: now,
+          };
+          setCurrentTime(videoTime);
+          setDuration(nextDuration);
+          setIsPaused(nextPaused);
+        }
       }
 
       context.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -1527,6 +1623,7 @@ export function ScratchPrototype() {
             isEditingShape,
             isCurvedMask,
             showMesh,
+            isEditingShape ? null : hoverPointRef.current,
           );
         }
       } else {
@@ -1540,21 +1637,21 @@ export function ScratchPrototype() {
       context.fillText(
         isEditingShape
           ? "Drag dress handles to fit the video"
-          : claimed
+          : claimedRef.current
             ? "Dress reveal completed"
             : "Scratch the foreground video",
         36,
         CANVAS_HEIGHT - 58,
       );
       context.font = "13px Inter, system-ui, sans-serif";
-      context.fillText(`${Math.round(progress * 100)}% revealed`, 36, CANVAS_HEIGHT - 36);
+      context.fillText(`${Math.round(progressRef.current * 100)}% revealed`, 36, CANVAS_HEIGHT - 36);
 
       animationId = requestAnimationFrame(render);
     };
 
     animationId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationId);
-  }, [claimed, dressPoints, duration, isCurvedMask, isEditingShape, keyframes, progress, showMesh]);
+  }, [dressPoints, isCurvedMask, isEditingShape, keyframes, showMesh]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1583,7 +1680,13 @@ export function ScratchPrototype() {
 
     const onBottomCanPlay = () => {
       setUsingBottomVideo(true);
-      setDuration(bottomVideo.duration || duration);
+      const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
+      uiStateRef.current = {
+        ...uiStateRef.current,
+        duration: nextDuration,
+        isPaused: bottomVideo.paused,
+      };
+      setDuration(nextDuration);
       void bottomVideo.play().catch(() => setUsingBottomVideo(false));
     };
     const onForegroundCanPlay = () => {
@@ -1677,8 +1780,10 @@ export function ScratchPrototype() {
     ].slice(-180);
 
     const nextProgress = calculateRevealProgress(renderDressPoints, marksRef.current);
+    progressRef.current = nextProgress;
     setProgress(nextProgress);
     if (nextProgress >= CLAIM_THRESHOLD) {
+      claimedRef.current = true;
       setClaimed(true);
     }
   }
@@ -1692,6 +1797,11 @@ export function ScratchPrototype() {
     if (foregroundVideo && Number.isFinite(foregroundVideo.duration) && foregroundVideo.duration > 0) {
       foregroundVideo.currentTime = nextTime % foregroundVideo.duration;
     }
+    uiStateRef.current = {
+      ...uiStateRef.current,
+      currentTime: nextTime,
+      lastUpdatedAt: performance.now(),
+    };
     setCurrentTime(nextTime);
   }
 
@@ -1703,10 +1813,12 @@ export function ScratchPrototype() {
     if (bottomVideo.paused) {
       void bottomVideo.play();
       void foregroundVideo.play();
+      uiStateRef.current = { ...uiStateRef.current, isPaused: false };
       setIsPaused(false);
     } else {
       bottomVideo.pause();
       foregroundVideo.pause();
+      uiStateRef.current = { ...uiStateRef.current, isPaused: true };
       setIsPaused(true);
     }
   }
@@ -1719,6 +1831,7 @@ export function ScratchPrototype() {
       const foregroundVideo = foregroundVideoRef.current;
       bottomVideo?.pause();
       foregroundVideo?.pause();
+      uiStateRef.current = { ...uiStateRef.current, isPaused: true };
       setIsPaused(true);
       setDressPoints(cloneDressPoints(renderedDressPointsRef.current));
       setIsEditingShape(true);
@@ -1767,6 +1880,7 @@ export function ScratchPrototype() {
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
               drawingRef.current = true;
+              hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
               event.currentTarget.setPointerCapture(event.pointerId);
               if (isEditingShape) {
                 const point = getCanvasPoint(event.clientX, event.clientY);
@@ -1777,6 +1891,7 @@ export function ScratchPrototype() {
               }
             }}
             onPointerMove={(event) => {
+              hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
               if (!drawingRef.current) return;
               if (isEditingShape) {
                 moveDressPoint(event.clientX, event.clientY);
@@ -1788,9 +1903,15 @@ export function ScratchPrototype() {
               drawingRef.current = false;
               activeDressPointRef.current = null;
             }}
+            onPointerLeave={() => {
+              drawingRef.current = false;
+              activeDressPointRef.current = null;
+              hoverPointRef.current = null;
+            }}
             onPointerCancel={() => {
               drawingRef.current = false;
               activeDressPointRef.current = null;
+              hoverPointRef.current = null;
             }}
           />
         </div>
@@ -1904,6 +2025,8 @@ export function ScratchPrototype() {
               onClick={() => {
                 activeDressPointRef.current = null;
                 marksRef.current = [];
+                progressRef.current = 0;
+                claimedRef.current = false;
                 setProgress(0);
                 setClaimed(false);
                 setDressPoints(DEFAULT_DRESS_POINTS);
@@ -1959,6 +2082,8 @@ export function ScratchPrototype() {
             type="button"
             onClick={() => {
               marksRef.current = [];
+              progressRef.current = 0;
+              claimedRef.current = false;
               setProgress(0);
               setClaimed(false);
             }}
