@@ -32,6 +32,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from scipy import ndimage
+from transformers import AutoModelForSemanticSegmentation, SegformerImageProcessor
 
 REPO_ROOT = Path(__file__).parent.parent
 INPUT_VIDEO = REPO_ROOT / "public/cards/Green bg sample 2 swap.mp4"
@@ -41,12 +42,33 @@ DEBUG_OVERLAY_DIR = REPO_ROOT / ".tmp" / "track_overlay"
 CANVAS_WIDTH = 390
 CANVAS_HEIGHT = 672
 FRAME_BYTES = CANVAS_WIDTH * CANVAS_HEIGHT * 4
-FPS = float(os.environ.get("FPS", "10"))
+FPS = float(os.environ.get("FPS", "20"))
 MAX_FRAMES = int(os.environ["MAX_FRAMES"]) if os.environ.get("MAX_FRAMES") else None
-GRID_COLS = int(os.environ.get("GRID_COLS", "12"))
-GRID_ROWS = int(os.environ.get("GRID_ROWS", "18"))
+GRID_COLS = int(os.environ.get("GRID_COLS", "16"))
+GRID_ROWS = int(os.environ.get("GRID_ROWS", "24"))
 DEVICE = os.environ.get("DEVICE", "mps")
 DEBUG_OVERLAY = bool(os.environ.get("DEBUG_OVERLAY"))
+# Temporal low-pass (in frames) to de-jitter each track. 0 disables.
+SMOOTH_SIGMA = float(os.environ.get("SMOOTH_SIGMA", "1.2"))
+# Distribute end-to-start drift so a looping clip closes seamlessly. 0 disables.
+LOOP_CLOSE = float(os.environ.get("LOOP_CLOSE", "1"))
+# Per-frame garment mask refines visibility (drops points that leave the dress
+# or get occluded by an arm). Off by default: clothes parsing is unreliable on
+# translucent/turning fabric and was dropping valid arm/side tracks.
+PER_FRAME_MASK = os.environ.get("PER_FRAME_MASK", "0") != "0"
+# Frame to seed the grid from. "auto" picks the most frontal frame (max body
+# area) so sides that rotate into view later are captured; or set an index.
+REF_FRAME = os.environ.get("REF_FRAME", "auto")
+# Optional: seed from the tracked frame that best matches this reference image
+# (e.g. a hand-picked full-front frame). Overrides REF_FRAME when set.
+REF_IMAGE = os.environ.get("REF_IMAGE")
+
+# Clothes-parsing model + the class ids that count as scratchable garment.
+# Excludes Hair(2), Face(11), Left-arm(14), Right-arm(15), legs/skin, so the
+# mesh border follows the dress instead of the body silhouette (no hands/head).
+SEG_MODEL = os.environ.get("SEG_MODEL", "mattmdjaga/segformer_b2_clothes")
+GARMENT_CLASSES = {4, 5, 6, 7, 8, 17}  # Upper-clothes, Skirt, Pants, Dress, Belt, Scarf
+HEAD_CLASSES = {1, 2, 3, 11}  # Hat, Hair, Sunglasses, Face
 
 
 def run(command, args):
@@ -105,6 +127,50 @@ def clean_silhouette(rgba):
     return labels == int(counts.argmax())
 
 
+_seg_cache = {}
+
+
+def _segment(rgb):
+    if "model" not in _seg_cache:
+        _seg_cache["proc"] = SegformerImageProcessor.from_pretrained(SEG_MODEL)
+        _seg_cache["model"] = AutoModelForSemanticSegmentation.from_pretrained(SEG_MODEL).to(DEVICE).eval()
+    proc, model = _seg_cache["proc"], _seg_cache["model"]
+    image = Image.fromarray(rgb, mode="RGB")
+    inputs = proc(images=image, return_tensors="pt").to(DEVICE)
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    upsampled = torch.nn.functional.interpolate(
+        logits, size=(CANVAS_HEIGHT, CANVAS_WIDTH), mode="bilinear", align_corners=False
+    )
+    return upsampled.argmax(1)[0].cpu().numpy()
+
+
+def _largest_blob(mask):
+    mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), bool), iterations=1)
+    mask = ndimage.binary_fill_holes(mask)
+    labels, count = ndimage.label(mask)
+    if count == 0:
+        return mask
+    counts = np.bincount(labels.ravel())
+    counts[0] = 0
+    return labels == int(counts.argmax())
+
+
+def build_garment_mask(rgb):
+    """Per-frame garment mask (Upper-clothes/Dress/...), cleaned to largest blob."""
+    return _largest_blob(np.isin(_segment(rgb), list(GARMENT_CLASSES)))
+
+
+def build_trackable_mask(rgba):
+    """Region we seed tracking on: the body silhouette MINUS the head. Keeps the
+    arms/sleeves (which clothes parsing labels inconsistently) and only removes
+    hair/face, so the lattice covers the whole garment including arms."""
+    silhouette = clean_silhouette(rgba)
+    head = np.isin(_segment(rgba[:, :, :3]), list(HEAD_CLASSES))
+    head = ndimage.binary_dilation(head, iterations=3)
+    return _largest_blob(silhouette & ~head)
+
+
 def row_span(mask, y):
     """Left/right x of the silhouette at integer row y, or None."""
     row = mask[y]
@@ -114,52 +180,101 @@ def row_span(mask, y):
     return float(xs.min()), float(xs.max())
 
 
+def pick_reference_frame(frames, samples=20):
+    """Pick the frame with the largest trackable (body-minus-head) area — the
+    most frontal pose, where both sides and the hands are most visible."""
+    if REF_IMAGE:
+        ref = np.asarray(Image.open(REF_IMAGE).convert("RGB").resize((CANVAS_WIDTH, CANVAS_HEIGHT)), np.float32)
+        diffs = [float(np.abs(frames[i, :, :, :3].astype(np.float32) - ref).mean()) for i in range(len(frames))]
+        best = int(np.argmin(diffs))
+        print(f"REF_IMAGE matched tracked frame {best} (mean abs diff {diffs[best]:.1f})")
+        return best
+    if REF_FRAME != "auto":
+        return max(0, min(len(frames) - 1, int(REF_FRAME)))
+    T = len(frames)
+    step = max(1, T // samples)
+    best_idx, best_area = 0, -1
+    for i in range(0, T, step):
+        area = int(build_trackable_mask(frames[i]).sum())
+        if area > best_area:
+            best_idx, best_area = i, area
+    return best_idx
+
+
 def seed_grid(mask):
-    """Place a GRID_COLS x GRID_ROWS lattice onto the body in frame 0. Each row
-    is spread across that row's silhouette span, so every vertex starts on the
-    garment and the UV grid is regular. Returns (queries Nx3 [t,x,y], uv Nx2)."""
-    ys = np.where(mask.any(axis=1))[0]
-    if len(ys) == 0:
-        raise SystemExit("Frame 0 silhouette is empty; cannot seed grid.")
-    top, bottom = int(ys.min()), int(ys.max())
+    """Lay a full GRID_COLS x GRID_ROWS lattice over the mask's bounding box and
+    keep every cell, marking which ones start on the body. Area-filling (not
+    per-row spans) so thin parts like arms get their own vertices.
 
-    # The garment starts at the shoulders, not the top of the head. Find the
-    # shoulder line as the first row (scanning down) where the silhouette widens
-    # to half its max width, so the grid skips the head/hair.
-    widths = mask.sum(axis=1).astype(float)
-    max_width = widths[top:bottom + 1].max()
-    shoulder_y = top
-    for y in range(top, bottom + 1):
-        if widths[y] >= 0.5 * max_width:
-            shoulder_y = y
-            break
+    Returns full-grid arrays so the renderer keeps a regular topology:
+      uv     (N,2) regular grid coords
+      seeds  (N,2) seed pixel positions (used for invalid cells too)
+      valid  (N,)  bool: did this cell start on the body
+    where N = GRID_COLS * GRID_ROWS.
+    """
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        raise SystemExit("Frame 0 trackable mask is empty; cannot seed grid.")
+    bx0, bx1, by0, by1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+    # erode so seeds sit just inside the body, off the noisy silhouette edge
+    inside = ndimage.binary_erosion(mask, iterations=3)
 
-    # inset vertically so top/bottom rows sit just inside the garment
-    top_inset = shoulder_y + (bottom - shoulder_y) * 0.01
-    bottom_inset = bottom - (bottom - shoulder_y) * 0.02
-
-    queries, uv = [], []
+    uv, seeds, valid = [], [], []
     for j in range(GRID_ROWS):
         v = j / (GRID_ROWS - 1)
-        y = top_inset + (bottom_inset - top_inset) * v
-        span = row_span(mask, int(round(y)))
-        if span is None:
-            # fall back to nearest spanned row
-            for dy in range(1, 40):
-                span = row_span(mask, int(round(y)) - dy) or row_span(mask, int(round(y)) + dy)
-                if span:
-                    break
-        if span is None:
-            continue
-        left, right = span
-        inset = (right - left) * 0.04
-        left, right = left + inset, right - inset
+        y = by0 + (by1 - by0) * v
         for i in range(GRID_COLS):
             u = i / (GRID_COLS - 1)
-            x = left + (right - left) * u
-            queries.append([0.0, x, y])
+            x = bx0 + (bx1 - bx0) * u
+            yi, xi = int(round(y)), int(round(x))
+            ok = 0 <= yi < CANVAS_HEIGHT and 0 <= xi < CANVAS_WIDTH and bool(inside[yi, xi])
             uv.append([u, v])
-    return np.array(queries, dtype=np.float32), np.array(uv, dtype=np.float32)
+            seeds.append([x, y])
+            valid.append(ok)
+    return (
+        np.array(uv, dtype=np.float32),
+        np.array(seeds, dtype=np.float32),
+        np.array(valid, dtype=bool),
+    )
+
+
+def smooth_tracks(tracks, sigma):
+    """Gaussian low-pass each vertex trajectory over time to remove jitter."""
+    if sigma <= 0:
+        return tracks
+    smoothed = tracks.copy()
+    smoothed[:, :, 0] = ndimage.gaussian_filter1d(tracks[:, :, 0], sigma, axis=0, mode="nearest")
+    smoothed[:, :, 1] = ndimage.gaussian_filter1d(tracks[:, :, 1], sigma, axis=0, mode="nearest")
+    return smoothed
+
+
+def close_loop(tracks, strength):
+    """Linearly distribute the end-to-start residual so the last frame returns
+    to the seed positions, removing accumulated drift over a looping clip."""
+    if strength <= 0 or len(tracks) < 3:
+        return tracks, 0.0
+    residual = tracks[-1] - tracks[0]
+    mean_drift = float(np.hypot(residual[:, 0], residual[:, 1]).mean())
+    T = len(tracks)
+    ramp = (np.arange(T) / (T - 1))[:, None, None]
+    return tracks - ramp * residual[None] * strength, mean_drift
+
+
+def visibility_from_masks(tracks, masks, base_vis, tolerance=4):
+    """A vertex stays visible only if it also lands on the garment mask that
+    frame (within `tolerance` px), dropping points that slide onto skin/bg or
+    are occluded by a crossing arm."""
+    refined = base_vis.copy()
+    struct = np.ones((tolerance * 2 + 1, tolerance * 2 + 1), bool)
+    for t, mask in enumerate(masks):
+        dilated = ndimage.binary_dilation(mask, structure=struct)
+        for n in range(tracks.shape[1]):
+            x = int(round(tracks[t, n, 0]))
+            y = int(round(tracks[t, n, 1]))
+            on = 0 <= y < CANVAS_HEIGHT and 0 <= x < CANVAS_WIDTH and bool(dilated[y, x])
+            if not on:
+                refined[t, n] = 0
+    return refined
 
 
 def write_overlay(frames, tracks, vis, step=10):
@@ -185,9 +300,18 @@ def main():
     T = frames.shape[0]
     print(f"Loaded {T} frames ({CANVAS_WIDTH}x{CANVAS_HEIGHT})")
 
-    mask0 = clean_silhouette(frames[0])
-    queries, uv = seed_grid(mask0)
-    print(f"Seeded {len(queries)} grid points ({GRID_COLS}x{GRID_ROWS} lattice)")
+    # Seed from the most frontal frame (max body area), not frame 0, so a side
+    # that rotates into view later is still captured. Track bidirectionally so
+    # those seeds reach frames before the reference too.
+    ref_idx = pick_reference_frame(frames)
+    print(f"Reference frame for seeding: {ref_idx} (t={ref_idx / FPS:.2f}s)")
+    trackable = build_trackable_mask(frames[ref_idx])
+    uv, seeds, valid = seed_grid(trackable)
+    total = len(uv)
+    valid_idx = np.where(valid)[0]
+    ref_col = np.full((len(valid_idx), 1), float(ref_idx), np.float32)
+    queries = np.concatenate([ref_col, seeds[valid_idx]], axis=1)
+    print(f"Seeded {len(valid_idx)}/{total} grid cells on body ({GRID_COLS}x{GRID_ROWS} lattice)")
 
     print("Loading CoTracker3 (offline) ...")
     model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
@@ -196,14 +320,33 @@ def main():
     # video: B,T,3,H,W ; rgb only
     rgb = frames[:, :, :, :3].astype(np.float32)
     video = torch.from_numpy(rgb).permute(0, 3, 1, 2)[None].to(DEVICE)  # 1,T,3,H,W
-    q = torch.from_numpy(queries)[None].to(DEVICE)  # 1,N,3
+    q = torch.from_numpy(queries)[None].to(DEVICE)  # 1,M,3
 
-    print(f"Tracking {len(queries)} points across {T} frames on {DEVICE} ...")
+    print(f"Tracking {len(queries)} points across {T} frames on {DEVICE} (bidirectional) ...")
     with torch.no_grad():
-        tracks, vis = model(video, queries=q)
-    tracks = tracks[0].cpu().numpy()  # T,N,2
-    vis = (vis[0].cpu().numpy() > 0.5).astype(np.uint8)  # T,N
-    print(f"Tracked: tracks {tracks.shape}, mean visibility {vis.mean():.2f}")
+        tracks_v, vis_v = model(video, queries=q, backward_tracking=True)
+    tracks_v = tracks_v[0].cpu().numpy()  # T,M,2
+    vis_v = (vis_v[0].cpu().numpy() > 0.5).astype(np.uint8)  # T,M
+    print(f"Tracked: {tracks_v.shape}, mean CoTracker visibility {vis_v.mean():.2f}")
+
+    tracks_v = smooth_tracks(tracks_v, SMOOTH_SIGMA)
+    tracks_v, mean_drift = close_loop(tracks_v, LOOP_CLOSE)
+    if LOOP_CLOSE > 0:
+        print(f"Loop closure: distributed {mean_drift:.1f}px mean end-to-start drift")
+
+    # Scatter tracked (valid) cells back into the full regular grid. Invalid
+    # cells (off-body in frame 0) stay at their seed position with vis=0, which
+    # the renderer skips.
+    tracks = np.tile(seeds[None], (T, 1, 1)).astype(np.float32)  # T,total,2
+    vis = np.zeros((T, total), dtype=np.uint8)
+    tracks[:, valid_idx, :] = tracks_v
+    vis[:, valid_idx] = vis_v
+
+    if PER_FRAME_MASK:
+        print("Building per-frame garment masks to refine visibility ...")
+        masks = [build_garment_mask(frames[t, :, :, :3]) for t in range(T)]
+        vis = visibility_from_masks(tracks, masks, vis)
+        print(f"Refined mean visibility {vis.mean():.2f}")
 
     if DEBUG_OVERLAY:
         write_overlay(frames, tracks, vis)
@@ -213,23 +356,29 @@ def main():
     for t in range(T):
         out_frames.append({
             "t": round(t / FPS, 3),
-            "verts": [[round(float(x), 2), round(float(y), 2)] for x, y in tracks[t]],
+            "verts": [[round(float(x), 1), round(float(y), 1)] for x, y in tracks[t]],
             "vis": [int(v) for v in vis[t]],
         })
 
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+    # Compact (no indentation) — this ships to the browser, so keep it small.
     OUTPUT_JSON.write_text(json.dumps({
         "source": "public/cards/Green bg sample 2 swap.mp4",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "generator": "cotracker3-grid-v1",
+        "generator": "cotracker3-grid-v4",
         "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
         "fps": FPS,
         "durationSeconds": round(duration, 3),
+        "refFrame": int(ref_idx),
+        "smoothSigma": SMOOTH_SIGMA,
+        "loopClose": LOOP_CLOSE,
+        "perFrameMask": PER_FRAME_MASK,
         "mesh": {"cols": GRID_COLS, "rows": GRID_ROWS},
         "uv": [[round(float(u), 4), round(float(v), 4)] for u, v in uv],
         "frames": out_frames,
-    }, indent=2) + "\n")
-    print(f"Wrote {T} mesh frames to {OUTPUT_JSON}")
+    }, separators=(",", ":")) + "\n")
+    size_mb = OUTPUT_JSON.stat().st_size / 1e6
+    print(f"Wrote {T} mesh frames to {OUTPUT_JSON} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ const BOTTOM_VIDEO_SRC = "/cards/ai%20girl%202.mp4";
 const FOREGROUND_VIDEO_SRC = "/cards/Green%20bg%20sample%202%20swap.mp4";
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
-const DEFAULT_MESH_FILE = "generated-ai-mesh-keyframes.json";
+const DEFAULT_MESH_FILE = "tracked-mesh.json";
 const CLAIM_THRESHOLD = 0.35;
 const FRONT_SURFACE_MIN_WEIGHT = 0.12;
 const FRONT_SURFACE_U_IS_MIRRORED = true;
@@ -257,24 +257,6 @@ const DEFAULT_KEYFRAMES: DressKeyframe[] = [
   },
 ];
 
-function pointInQuad(point: Vec2, quad: Vec2[]) {
-  let sign = 0;
-
-  for (let index = 0; index < quad.length; index += 1) {
-    const a = quad[index];
-    const b = quad[(index + 1) % quad.length];
-    const cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
-
-    if (cross !== 0) {
-      const currentSign = Math.sign(cross);
-      if (sign === 0) sign = currentSign;
-      if (currentSign !== sign) return false;
-    }
-  }
-
-  return true;
-}
-
 function pointInPolygon(point: Vec2, polygon: Vec2[]) {
   let inside = false;
 
@@ -400,28 +382,6 @@ function worldToLocal(frame: GarmentFrame, point: Vec2) {
   };
 }
 
-function worldToSurfaceLocal(frame: GarmentFrame, point: Vec2, isCurved: boolean) {
-  if (!isCurved) return worldToLocal(frame, point);
-
-  let best = { u: 0.5, v: 0.5, distance: Number.POSITIVE_INFINITY };
-  const columns = 36;
-  const rows = 56;
-
-  for (let row = 0; row <= rows; row += 1) {
-    const v = row / rows;
-    for (let column = -8; column <= columns + 8; column += 1) {
-      const u = column / columns;
-      const projected = projectLocalToWorld(frame, u, v, true);
-      const distance = Math.hypot(projected.x - point.x, projected.y - point.y);
-      if (distance < best.distance) {
-        best = { u, v, distance };
-      }
-    }
-  }
-
-  return { u: best.u, v: best.v };
-}
-
 function getGarmentQuad(frame: GarmentFrame) {
   return [
     localToWorld(frame, 0, 0),
@@ -505,7 +465,6 @@ function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
 }
 
 function drawChromaKeyedVideo(
-  foregroundCanvas: HTMLCanvasElement,
   foregroundContext: CanvasRenderingContext2D,
   video: HTMLVideoElement,
 ) {
@@ -838,30 +797,6 @@ function quantile(values: number[], amount: number) {
   return sorted[index];
 }
 
-function findForegroundBoundsAtRow(image: ImageData, centerY: number, band: number, minX: number, maxX: number) {
-  const minY = Math.max(0, Math.floor(centerY - band));
-  const maxY = Math.min(CANVAS_HEIGHT - 1, Math.ceil(centerY + band));
-  const startX = Math.max(18, Math.floor(minX));
-  const endX = Math.min(CANVAS_WIDTH - 18, Math.ceil(maxX));
-  let left = CANVAS_WIDTH;
-  let right = 0;
-  let pixelsFound = 0;
-
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = startX; x <= endX; x += 1) {
-      const index = (y * CANVAS_WIDTH + x) * 4;
-      if (isTrackableGarmentPixel(image, index)) {
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        pixelsFound += 1;
-      }
-    }
-  }
-
-  if (pixelsFound < 24 || right <= left) return null;
-  return { left, right, pixelsFound };
-}
-
 type ForegroundSpan = {
   left: number;
   right: number;
@@ -946,70 +881,6 @@ function findBodyBoundsAtRow(image: ImageData, centerY: number, band: number, ex
     pixelsFound: selectedSpan.pixelsFound,
     spanCount: spans.length,
   };
-}
-
-function trackDressPointsFromForeground(
-  frame: GarmentFrame,
-  basePoints: DressPoint[],
-  keyedImage: ImageData,
-  previousPoints: DressPoint[] | null,
-) {
-  const byId = new Map(basePoints.map((point) => [point.id, point]));
-  const pairs = [
-    ["left-strap", "right-strap"],
-    ["left-chest", "right-chest"],
-    ["left-waist", "right-waist"],
-    ["left-hem", "right-hem"],
-  ] as const;
-  const tracked = cloneDressPoints(basePoints);
-  let trackedRows = 0;
-
-  for (const [leftId, rightId] of pairs) {
-    const leftPoint = byId.get(leftId);
-    const rightPoint = byId.get(rightId);
-    if (!leftPoint || !rightPoint) continue;
-
-    const v = (leftPoint.v + rightPoint.v) / 2;
-    const rowCenter = localToWorld(frame, 0.5, v).y;
-    const predictedLeft = projectLocalToWorld(frame, leftPoint.u, leftPoint.v, false);
-    const predictedRight = projectLocalToWorld(frame, rightPoint.u, rightPoint.v, false);
-    const bounds = findForegroundBoundsAtRow(
-      keyedImage,
-      rowCenter,
-      leftId.includes("strap") ? 7 : 12,
-      Math.min(predictedLeft.x, predictedRight.x) - 24,
-      Math.max(predictedLeft.x, predictedRight.x) + 24,
-    );
-    if (!bounds) continue;
-
-    const leftLocal = worldToLocal(frame, { x: bounds.left, y: rowCenter });
-    const rightLocal = worldToLocal(frame, { x: bounds.right, y: rowCenter });
-    const edgePadding = leftId.includes("strap") ? 0.02 : 0.035;
-
-    for (const point of tracked) {
-      if (point.id === leftId) {
-        point.u = Math.max(-0.45, Math.min(0.45, leftLocal.u + edgePadding));
-      }
-      if (point.id === rightId) {
-        point.u = Math.max(0.55, Math.min(1.45, rightLocal.u - edgePadding));
-      }
-    }
-    trackedRows += 1;
-  }
-
-  if (trackedRows < 2) return basePoints;
-  if (!previousPoints) return tracked;
-
-  const previousById = new Map(previousPoints.map((point) => [point.id, point]));
-  return tracked.map((point) => {
-    const previous = previousById.get(point.id);
-    if (!previous) return point;
-    return {
-      ...point,
-      u: previous.u * 0.45 + point.u * 0.55,
-      v: previous.v * 0.55 + point.v * 0.45,
-    };
-  });
 }
 
 function trackBodyPointsFromForeground(
@@ -1129,65 +1000,6 @@ function trackBodyFrameFromForeground(
     width: previousFrame.width * 0.5 + detectedFrame.width * 0.5,
     height: previousFrame.height * 0.55 + detectedFrame.height * 0.45,
   };
-}
-
-function trackGarmentFrameFromForeground(
-  keyedImage: ImageData,
-  fallbackFrame: GarmentFrame,
-  previousFrame: GarmentFrame | null,
-) {
-  let minX = CANVAS_WIDTH;
-  let maxX = 0;
-  let minY = CANVAS_HEIGHT;
-  let maxY = 0;
-  let pixelsFound = 0;
-
-  for (let y = 270; y < CANVAS_HEIGHT - 28; y += 2) {
-    for (let x = 54; x < CANVAS_WIDTH - 42; x += 2) {
-      const index = (y * CANVAS_WIDTH + x) * 4;
-      if (isTrackableGarmentPixel(keyedImage, index)) {
-        minX = Math.min(minX, x);
-        maxX = Math.max(maxX, x);
-        minY = Math.min(minY, y);
-        maxY = Math.max(maxY, y);
-        pixelsFound += 1;
-      }
-    }
-  }
-
-  if (pixelsFound < 220 || maxX <= minX || maxY <= minY) return fallbackFrame;
-
-  const detectedFrame: GarmentFrame = {
-    origin: {
-      x: (minX + maxX) / 2,
-      y: clamp(minY - 20, 232, 304),
-    },
-    uAxis: fallbackFrame.uAxis,
-    vAxis: fallbackFrame.vAxis,
-    width: clamp((maxX - minX) * 0.92, 170, 250),
-    height: clamp(maxY - minY + 28, 330, 448),
-  };
-
-  if (!previousFrame) return detectedFrame;
-
-  return {
-    origin: {
-      x: previousFrame.origin.x * 0.72 + detectedFrame.origin.x * 0.28,
-      y: previousFrame.origin.y * 0.78 + detectedFrame.origin.y * 0.22,
-    },
-    uAxis: fallbackFrame.uAxis,
-    vAxis: fallbackFrame.vAxis,
-    width: previousFrame.width * 0.72 + detectedFrame.width * 0.28,
-    height: previousFrame.height * 0.76 + detectedFrame.height * 0.24,
-  };
-}
-
-function formatTime(seconds: number) {
-  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainingSeconds = Math.floor(safeSeconds % 60);
-  const tenths = Math.floor((safeSeconds % 1) * 10);
-  return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}.${tenths}`;
 }
 
 function drawDressPath(context: CanvasRenderingContext2D, frame: GarmentFrame, points: DressPoint[], isCurved = false) {
@@ -1496,7 +1308,7 @@ function drawForegroundLayer(
   showMesh: boolean,
   hoverPoint: Vec2 | null,
 ) {
-  const activeMask = foregroundMask ?? drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
+  const activeMask = foregroundMask ?? drawChromaKeyedVideo(foregroundContext, foregroundVideo);
 
   foregroundContext.save();
   if (isEditing) {
@@ -1562,7 +1374,7 @@ function drawForegroundLayer(
   }
 }
 
-function calculateRevealProgress(points: DressPoint[], marks: ScratchMark[]) {
+function calculateRevealProgress(marks: ScratchMark[]) {
   const samplesAcross = 13;
   const samplesDown = 18;
   let revealed = 0;
@@ -1686,6 +1498,24 @@ function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
   return sample.verts[row * sample.cols + col];
 }
 
+// A cell is usable only if all four corners are visible this frame — this skips
+// off-body cells (never seeded) and occluded ones (e.g. an arm crossing).
+function cellVisible(sample: TrackedMeshSample, col: number, row: number) {
+  const { cols, vis } = sample;
+  return Boolean(
+    vis[row * cols + col] &&
+      vis[row * cols + col + 1] &&
+      vis[(row + 1) * cols + col] &&
+      vis[(row + 1) * cols + col + 1],
+  );
+}
+
+function trackedCellAt(sample: TrackedMeshSample, u: number, v: number) {
+  const col = Math.min(sample.cols - 2, Math.max(0, Math.floor(Math.max(0, Math.min(1, u)) * (sample.cols - 1))));
+  const row = Math.min(sample.rows - 2, Math.max(0, Math.floor(Math.max(0, Math.min(1, v)) * (sample.rows - 1))));
+  return { col, row };
+}
+
 // Bilinear map from mesh-UV (the static grid) to the current deformed canvas
 // position, so a scratch stored in UV rides the tracked fabric.
 function trackedUvToWorld(sample: TrackedMeshSample, u: number, v: number): Vec2 {
@@ -1728,6 +1558,7 @@ function barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) {
 function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
   for (let row = 0; row < sample.rows - 1; row += 1) {
     for (let col = 0; col < sample.cols - 1; col += 1) {
+      if (!cellVisible(sample, col, row)) continue;
       const topLeft = meshVertexAt(sample, col, row);
       const topRight = meshVertexAt(sample, col + 1, row);
       const bottomLeft = meshVertexAt(sample, col, row + 1);
@@ -1756,17 +1587,11 @@ function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
   return null;
 }
 
-function trackedMeshPerimeter(sample: TrackedMeshSample): Vec2[] {
-  const { cols, rows } = sample;
-  const perimeter: Vec2[] = [];
-  for (let col = 0; col < cols; col += 1) perimeter.push(meshVertexAt(sample, col, 0));
-  for (let row = 1; row < rows; row += 1) perimeter.push(meshVertexAt(sample, cols - 1, row));
-  for (let col = cols - 2; col >= 0; col -= 1) perimeter.push(meshVertexAt(sample, col, rows - 1));
-  for (let row = rows - 2; row >= 1; row -= 1) perimeter.push(meshVertexAt(sample, 0, row));
-  return perimeter;
-}
-
 function drawTrackedScratch(context: CanvasRenderingContext2D, sample: TrackedMeshSample, mark: ScratchMark) {
+  // Don't draw a hole whose fabric is off-body or occluded this frame.
+  const cell = trackedCellAt(sample, mark.u, mark.v);
+  if (!cellVisible(sample, cell.col, cell.row)) return;
+
   const center = trackedUvToWorld(sample, mark.u, mark.v);
   const uEdge = trackedUvToWorld(sample, mark.u + mark.radius, mark.v);
   const vEdge = trackedUvToWorld(sample, mark.u, mark.v + mark.radius);
@@ -1821,18 +1646,13 @@ function drawTrackedForegroundLayer(
   showMesh: boolean,
   hoverPoint: Vec2 | null,
 ) {
-  drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
+  drawChromaKeyedVideo(foregroundContext, foregroundVideo);
   void foregroundMask;
 
-  const perimeter = trackedMeshPerimeter(sample);
+  // No perimeter clip: with a masked grid the outer ring isn't a clean garment
+  // outline. Holes are constrained instead by per-cell validity in
+  // drawTrackedScratch, so scratches only cut where the fabric is tracked.
   foregroundContext.save();
-  foregroundContext.beginPath();
-  foregroundContext.moveTo(perimeter[0].x, perimeter[0].y);
-  for (let index = 1; index < perimeter.length; index += 1) {
-    foregroundContext.lineTo(perimeter[index].x, perimeter[index].y);
-  }
-  foregroundContext.closePath();
-  foregroundContext.clip();
   foregroundContext.globalCompositeOperation = "destination-out";
   for (const mark of marks) drawTrackedScratch(foregroundContext, sample, mark);
   foregroundContext.restore();
@@ -1862,27 +1682,20 @@ export function ScratchPrototype() {
   const marksRef = useRef<ScratchMark[]>([]);
   const hoverPointRef = useRef<Vec2 | null>(null);
   const drawingRef = useRef(false);
-  const activeDressPointRef = useRef<string | null>(null);
   const frameRef = useRef<GarmentFrame>(getSyntheticFrame(0));
   const renderedDressPointsRef = useRef<DressPoint[]>(DEFAULT_DRESS_POINTS);
   const trackedFrameRef = useRef<GarmentFrame | null>(null);
   const trackedDressPointsRef = useRef<DressPoint[] | null>(null);
-  const [dressPoints, setDressPoints] = useState(DEFAULT_DRESS_POINTS);
   const [keyframes, setKeyframes] = useState(DEFAULT_KEYFRAMES);
   const [trackedMesh, setTrackedMesh] = useState<TrackedMesh | null>(null);
   const trackedSampleRef = useRef<TrackedMeshSample | null>(null);
-  const [keyframeSource, setKeyframeSource] = useState("Default");
-  const [meshGenerator, setMeshGenerator] = useState("Default");
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
   const [selectedMeshFile, setSelectedMeshFile] = useState("");
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [isEditingShape, setIsEditingShape] = useState(false);
   const [isCurvedMask, setIsCurvedMask] = useState(true);
   const [showMesh, setShowMesh] = useState(true);
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
-  const [usingBottomVideo, setUsingBottomVideo] = useState(false);
-  const [usingForegroundVideo, setUsingForegroundVideo] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(18.8);
   const [isPaused, setIsPaused] = useState(false);
@@ -1922,7 +1735,7 @@ export function ScratchPrototype() {
       const videoTime = bottomVideo?.currentTime ?? time;
       const keyedForeground =
         foregroundVideo && hasForegroundFrame && foregroundCanvasRef.current
-          ? drawChromaKeyedVideo(foregroundCanvasRef.current, foregroundContext, foregroundVideo)
+          ? drawChromaKeyedVideo(foregroundContext, foregroundVideo)
           : null;
       // When a tracked deforming mesh is loaded it drives the garment directly,
       // so the per-frame silhouette tracking below is skipped.
@@ -1931,24 +1744,18 @@ export function ScratchPrototype() {
       const keyframedFrame = interpolateGarmentFrame(keyframes, videoTime);
       const frame =
         keyframedFrame ??
-        (keyedForeground && !isEditingShape && !trackedMesh
+        (keyedForeground && !trackedMesh
           ? trackBodyFrameFromForeground(keyedForeground, baseFrame, trackedFrameRef.current)
           : baseFrame);
-      if (keyedForeground && !isEditingShape && !keyframedFrame && !trackedMesh) {
+      if (keyedForeground && !keyframedFrame && !trackedMesh) {
         trackedFrameRef.current = frame;
       }
       const keyframedDressPoints = interpolateDressPoints(keyframes, videoTime);
       const renderDressPoints =
-        trackedMesh || isEditingShape || keyframedFrame || !keyedForeground
-          ? isEditingShape
-            ? dressPoints
-            : keyframedDressPoints
-          : trackBodyPointsFromForeground(
-              frame,
-              keyedForeground,
-              trackedDressPointsRef.current,
-            );
-      if (!isEditingShape && keyedForeground && !keyframedFrame && !trackedMesh) {
+        trackedMesh || keyframedFrame || !keyedForeground
+          ? keyframedDressPoints
+          : trackBodyPointsFromForeground(frame, keyedForeground, trackedDressPointsRef.current);
+      if (keyedForeground && !keyframedFrame && !trackedMesh) {
         trackedDressPointsRef.current = cloneDressPoints(renderDressPoints);
       }
       foregroundMaskRef.current = keyedForeground;
@@ -2012,10 +1819,10 @@ export function ScratchPrototype() {
             frame,
             renderDressPoints,
             marksRef.current,
-            isEditingShape,
+            false,
             isCurvedMask,
             showMesh,
-            isEditingShape ? null : hoverPointRef.current,
+            hoverPointRef.current,
           );
         }
       } else {
@@ -2027,11 +1834,7 @@ export function ScratchPrototype() {
       context.fillStyle = "#ffffff";
       context.font = "600 15px Inter, system-ui, sans-serif";
       context.fillText(
-        isEditingShape
-          ? "Drag dress handles to fit the video"
-          : claimedRef.current
-            ? "Dress reveal completed"
-            : "Scratch the foreground video",
+        claimedRef.current ? "Dress reveal completed" : "Scratch the foreground video",
         36,
         CANVAS_HEIGHT - 58,
       );
@@ -2043,7 +1846,7 @@ export function ScratchPrototype() {
 
     animationId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationId);
-  }, [dressPoints, isCurvedMask, isEditingShape, keyframes, showMesh, trackedMesh]);
+  }, [isCurvedMask, keyframes, showMesh, trackedMesh]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -2067,8 +1870,6 @@ export function ScratchPrototype() {
     if (!selectedMeshFile) {
       setKeyframes(DEFAULT_KEYFRAMES);
       setTrackedMesh(null);
-      setKeyframeSource("Default");
-      setMeshGenerator("Default");
       return;
     }
 
@@ -2084,29 +1885,16 @@ export function ScratchPrototype() {
         const tracked = parseTrackedMesh(data);
         if (tracked) {
           setTrackedMesh(tracked);
-          setKeyframeSource(selectedMeshFile);
-          setMeshGenerator(typeof (data as { generator?: unknown }).generator === "string" ? (data as { generator: string }).generator : "Tracked mesh");
           return;
         }
 
         setTrackedMesh(null);
         const generated = parseGeneratedKeyframes(data);
-        if (generated.keyframes.length === 0) {
-          setKeyframeSource("Invalid mesh JSON");
-          setMeshGenerator("Invalid");
-          return;
+        if (generated.keyframes.length > 0) {
+          setKeyframes(generated.keyframes);
         }
-
-        setKeyframes(generated.keyframes);
-        setKeyframeSource(selectedMeshFile);
-        setMeshGenerator(generated.generator ?? "Generated");
       })
-      .catch(() => {
-        if (!isCancelled) {
-          setKeyframeSource("Mesh load failed");
-          setMeshGenerator("Load failed");
-        }
-      });
+      .catch(() => undefined);
 
     return () => {
       isCancelled = true;
@@ -2119,7 +1907,6 @@ export function ScratchPrototype() {
     if (!bottomVideo || !foregroundVideo) return;
 
     const onBottomCanPlay = () => {
-      setUsingBottomVideo(true);
       const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
       uiStateRef.current = {
         ...uiStateRef.current,
@@ -2127,25 +1914,18 @@ export function ScratchPrototype() {
         isPaused: bottomVideo.paused,
       };
       setDuration(nextDuration);
-      void bottomVideo.play().catch(() => setUsingBottomVideo(false));
+      void bottomVideo.play().catch(() => undefined);
     };
     const onForegroundCanPlay = () => {
-      setUsingForegroundVideo(true);
-      void foregroundVideo.play().catch(() => setUsingForegroundVideo(false));
+      void foregroundVideo.play().catch(() => undefined);
     };
-    const onBottomError = () => setUsingBottomVideo(false);
-    const onForegroundError = () => setUsingForegroundVideo(false);
 
     bottomVideo.addEventListener("canplay", onBottomCanPlay);
-    bottomVideo.addEventListener("error", onBottomError);
     foregroundVideo.addEventListener("canplay", onForegroundCanPlay);
-    foregroundVideo.addEventListener("error", onForegroundError);
 
     return () => {
       bottomVideo.removeEventListener("canplay", onBottomCanPlay);
-      bottomVideo.removeEventListener("error", onBottomError);
       foregroundVideo.removeEventListener("canplay", onForegroundCanPlay);
-      foregroundVideo.removeEventListener("error", onForegroundError);
     };
   }, []);
 
@@ -2173,41 +1953,6 @@ export function ScratchPrototype() {
     };
   }
 
-  function getNearestDressPointId(point: Vec2) {
-    const frame = frameRef.current;
-    let nearest: { id: string; distance: number } | null = null;
-
-    for (const dressPoint of dressPoints) {
-      const world = projectLocalToWorld(frame, dressPoint.u, dressPoint.v, isCurvedMask);
-      const distance = Math.hypot(world.x - point.x, world.y - point.y);
-      if (distance <= 18 && (!nearest || distance < nearest.distance)) {
-        nearest = { id: dressPoint.id, distance };
-      }
-    }
-
-    return nearest?.id ?? null;
-  }
-
-  function moveDressPoint(clientX: number, clientY: number) {
-    const activeId = activeDressPointRef.current;
-    const point = getCanvasPoint(clientX, clientY);
-    if (!activeId || !point) return;
-
-    const frame = frameRef.current;
-    const local = worldToSurfaceLocal(frame, point, isCurvedMask);
-    setDressPoints((currentPoints) =>
-      currentPoints.map((dressPoint) =>
-        dressPoint.id === activeId
-          ? {
-              ...dressPoint,
-              u: Math.max(0, Math.min(1, local.u)),
-              v: Math.max(0, Math.min(1, local.v)),
-            }
-          : dressPoint,
-      ),
-    );
-  }
-
   function addScratch(clientX: number, clientY: number) {
     const point = getCanvasPoint(clientX, clientY);
     if (!point) return;
@@ -2218,7 +1963,7 @@ export function ScratchPrototype() {
       const uv = trackedWorldToUv(trackedSample, point);
       if (!uv) return;
       marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: 0.045 }].slice(-180);
-      const nextProgressTracked = calculateRevealProgress(renderedDressPointsRef.current, marksRef.current);
+      const nextProgressTracked = calculateRevealProgress(marksRef.current);
       progressRef.current = nextProgressTracked;
       setProgress(nextProgressTracked);
       if (nextProgressTracked >= CLAIM_THRESHOLD) {
@@ -2248,7 +1993,7 @@ export function ScratchPrototype() {
       },
     ].slice(-180);
 
-    const nextProgress = calculateRevealProgress(renderDressPoints, marksRef.current);
+    const nextProgress = calculateRevealProgress(marksRef.current);
     progressRef.current = nextProgress;
     setProgress(nextProgress);
     if (nextProgress >= CLAIM_THRESHOLD) {
@@ -2292,35 +2037,6 @@ export function ScratchPrototype() {
     }
   }
 
-  function toggleEditMode() {
-    activeDressPointRef.current = null;
-
-    if (!isEditingShape) {
-      const bottomVideo = bottomVideoRef.current;
-      const foregroundVideo = foregroundVideoRef.current;
-      bottomVideo?.pause();
-      foregroundVideo?.pause();
-      uiStateRef.current = { ...uiStateRef.current, isPaused: true };
-      setIsPaused(true);
-      setDressPoints(cloneDressPoints(renderedDressPointsRef.current));
-      setIsEditingShape(true);
-      return;
-    }
-
-    setIsEditingShape(false);
-  }
-
-  function saveKeyframe() {
-    const time = Number((bottomVideoRef.current?.currentTime ?? currentTime).toFixed(2));
-    const points = isEditingShape ? dressPoints : renderedDressPointsRef.current;
-    setKeyframes((currentKeyframes) => {
-      const nextKeyframes = currentKeyframes.filter((keyframe) => Math.abs(keyframe.time - time) > 0.08);
-      nextKeyframes.push({ time, frame: cloneGarmentFrame(frameRef.current), points: cloneDressPoints(points) });
-      return nextKeyframes.sort((a, b) => a.time - b.time);
-    });
-    setKeyframeSource("Manual");
-  }
-
   return (
     <main className="app-shell">
       <section className="prototype">
@@ -2352,37 +2068,25 @@ export function ScratchPrototype() {
               const point = getCanvasPoint(event.clientX, event.clientY);
               hoverPointRef.current = point;
               event.currentTarget.setPointerCapture(event.pointerId);
-              if (isEditingShape) {
-                activeDressPointRef.current = point ? getNearestDressPointId(point) : null;
-                moveDressPoint(event.clientX, event.clientY);
-              } else {
-                if (point) applyScratchZoom(point);
-                addScratch(event.clientX, event.clientY);
-              }
+              if (point) applyScratchZoom(point);
+              addScratch(event.clientX, event.clientY);
             }}
             onPointerMove={(event) => {
               hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
               if (!drawingRef.current) return;
-              if (isEditingShape) {
-                moveDressPoint(event.clientX, event.clientY);
-              } else {
-                addScratch(event.clientX, event.clientY);
-              }
+              addScratch(event.clientX, event.clientY);
             }}
             onPointerUp={() => {
               drawingRef.current = false;
-              activeDressPointRef.current = null;
               clearScratchZoom();
             }}
             onPointerLeave={() => {
               drawingRef.current = false;
-              activeDressPointRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
             onPointerCancel={() => {
               drawingRef.current = false;
-              activeDressPointRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
@@ -2393,62 +2097,8 @@ export function ScratchPrototype() {
             <p className="eyebrow">Milestone 1</p>
             <h1>Full Dress Scratch Test</h1>
           </div>
-          <dl className="metrics">
-            <div>
-              <dt>Region</dt>
-              <dd>Full dress</dd>
-            </div>
-            <div>
-              <dt>Mask Space</dt>
-              <dd>Garment UV</dd>
-            </div>
-            <div>
-              <dt>Reveal</dt>
-              <dd>{Math.round(progress * 100)}%</dd>
-            </div>
-            <div>
-              <dt>Reward</dt>
-              <dd>{claimed ? "Claimed" : "Pending"}</dd>
-            </div>
-            <div>
-              <dt>Mode</dt>
-              <dd>{isEditingShape ? "Edit shape" : "Scratch"}</dd>
-            </div>
-            <div>
-              <dt>Surface</dt>
-              <dd>{isCurvedMask ? "3D UV mesh" : "Flat"}</dd>
-            </div>
-            <div>
-              <dt>Mesh</dt>
-              <dd>{showMesh ? "Shown" : "Hidden"}</dd>
-            </div>
-            <div>
-              <dt>Time</dt>
-              <dd>
-                {formatTime(currentTime)} / {formatTime(duration)}
-              </dd>
-            </div>
-            <div>
-              <dt>Keys</dt>
-              <dd>
-                {keyframes.length} {keyframeSource}
-              </dd>
-            </div>
-            <div>
-              <dt>Generator</dt>
-              <dd>{meshGenerator}</dd>
-            </div>
-            <div>
-              <dt>Bottom</dt>
-              <dd>{usingBottomVideo ? "MP4 source" : "Fallback"}</dd>
-            </div>
-            <div>
-              <dt>Foreground</dt>
-              <dd>{usingForegroundVideo ? "MP4 source" : "Missing"}</dd>
-            </div>
-          </dl>
           <label>
-            Mesh keyframes
+            Mesh
             <select
               aria-label="Mesh keyframe JSON"
               disabled={meshFiles.length === 0}
@@ -2490,9 +2140,31 @@ export function ScratchPrototype() {
             <button
               type="button"
               className="secondary-button"
-              onClick={saveKeyframe}
+              onClick={() => {
+                marksRef.current = [];
+                progressRef.current = 0;
+                claimedRef.current = false;
+                setProgress(0);
+                setClaimed(false);
+              }}
             >
-              Save keyframe
+              Reset scratch
+            </button>
+          </div>
+          <div className="button-row">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setIsCurvedMask((current) => !current)}
+            >
+              {isCurvedMask ? "Use flat mask" : "Use 3D mesh"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setShowMesh((current) => !current)}
+            >
+              {showMesh ? "Hide mesh" : "Show mesh"}
             </button>
           </div>
           <button
@@ -2501,100 +2173,6 @@ export function ScratchPrototype() {
             onClick={() => setMeshReloadToken((current) => current + 1)}
           >
             Reload mesh
-          </button>
-          <div className="button-row">
-            <button
-              type="button"
-              onClick={toggleEditMode}
-            >
-              {isEditingShape ? "Use scratch mode" : "Edit dress shape"}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setIsCurvedMask((current) => !current)}
-            >
-              {isCurvedMask ? "Use flat mask" : "Use 3D mesh"}
-            </button>
-          </div>
-          <div className="button-row">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setShowMesh((current) => !current)}
-            >
-              {showMesh ? "Hide mesh" : "Show mesh"}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => {
-                activeDressPointRef.current = null;
-                marksRef.current = [];
-                progressRef.current = 0;
-                claimedRef.current = false;
-                setProgress(0);
-                setClaimed(false);
-                setDressPoints(DEFAULT_DRESS_POINTS);
-              }}
-            >
-              Reset shape
-            </button>
-          </div>
-          <div className="json-stack">
-            <label>
-              Current shape
-              <textarea
-                aria-label="Dress shape JSON"
-                readOnly
-                value={JSON.stringify(
-                  dressPoints.map(({ id, u, v }) => ({ id, u: Number(u.toFixed(3)), v: Number(v.toFixed(3)) })),
-                  null,
-                  2,
-                )}
-              />
-            </label>
-            <label>
-              Keyframes
-              <textarea
-                aria-label="Dress keyframes JSON"
-                readOnly
-                value={JSON.stringify(
-                  keyframes.map((keyframe) => ({
-                    time: Number(keyframe.time.toFixed(2)),
-                    frame: keyframe.frame
-                      ? {
-                          origin: {
-                            x: Number(keyframe.frame.origin.x.toFixed(1)),
-                            y: Number(keyframe.frame.origin.y.toFixed(1)),
-                          },
-                          width: Number(keyframe.frame.width.toFixed(1)),
-                          height: Number(keyframe.frame.height.toFixed(1)),
-                        }
-                      : undefined,
-                    points: keyframe.points.map(({ id, u, v }) => ({
-                      id,
-                      u: Number(u.toFixed(3)),
-                      v: Number(v.toFixed(3)),
-                    })),
-                  })),
-                  null,
-                  2,
-                )}
-              />
-            </label>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              marksRef.current = [];
-              progressRef.current = 0;
-              claimedRef.current = false;
-              setProgress(0);
-              setClaimed(false);
-            }}
-          >
-            Reset scratch
           </button>
         </aside>
       </section>
