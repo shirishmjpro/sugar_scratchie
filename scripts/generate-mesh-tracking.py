@@ -56,6 +56,10 @@ LOOP_CLOSE = float(os.environ.get("LOOP_CLOSE", "1"))
 # or get occluded by an arm). Off by default: clothes parsing is unreliable on
 # translucent/turning fabric and was dropping valid arm/side tracks.
 PER_FRAME_MASK = os.environ.get("PER_FRAME_MASK", "0") != "0"
+# Temporal visibility stabilization (frames): close short dropouts that make
+# scratched holes flicker; open away isolated single-frame blips.
+VIS_CLOSE = int(os.environ.get("VIS_CLOSE", "7"))
+VIS_OPEN = int(os.environ.get("VIS_OPEN", "3"))
 # Frame to seed the grid from. "auto" picks the most frontal frame (max body
 # area) so sides that rotate into view later are captured; or set an index.
 REF_FRAME = os.environ.get("REF_FRAME", "auto")
@@ -260,6 +264,18 @@ def close_loop(tracks, strength):
     return tracks - ramp * residual[None] * strength, mean_drift
 
 
+def stabilize_visibility(vis, close_len, open_len):
+    """Temporally close short visibility gaps (brief CoTracker dropouts that make
+    scratched holes flicker back to foreground) and open away isolated 1-frame
+    blips. Genuine long occlusions (> close_len frames) are preserved."""
+    b = vis.astype(bool)
+    if close_len > 1:
+        b = ndimage.binary_closing(b, structure=np.ones((close_len, 1), bool))
+    if open_len > 1:
+        b = ndimage.binary_opening(b, structure=np.ones((open_len, 1), bool))
+    return b.astype(np.uint8)
+
+
 def visibility_from_masks(tracks, masks, base_vis, tolerance=4):
     """A vertex stays visible only if it also lands on the garment mask that
     frame (within `tolerance` px), dropping points that slide onto skin/bg or
@@ -348,6 +364,12 @@ def main():
         vis = visibility_from_masks(tracks, masks, vis)
         print(f"Refined mean visibility {vis.mean():.2f}")
 
+    if VIS_CLOSE > 1 or VIS_OPEN > 1:
+        before = int(np.abs(np.diff(vis.astype(np.int16), axis=0)).sum())
+        vis = stabilize_visibility(vis, VIS_CLOSE, VIS_OPEN)
+        after = int(np.abs(np.diff(vis.astype(np.int16), axis=0)).sum())
+        print(f"Visibility stabilized: {before} -> {after} transitions")
+
     if DEBUG_OVERLAY:
         write_overlay(frames, tracks, vis)
         print(f"Wrote tracked overlays to {DEBUG_OVERLAY_DIR}")
@@ -365,7 +387,7 @@ def main():
     OUTPUT_JSON.write_text(json.dumps({
         "source": "public/cards/Green bg sample 2 swap.mp4",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "generator": "cotracker3-grid-v4",
+        "generator": "cotracker3-grid-v5",
         "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
         "fps": FPS,
         "durationSeconds": round(duration, 3),
@@ -373,6 +395,8 @@ def main():
         "smoothSigma": SMOOTH_SIGMA,
         "loopClose": LOOP_CLOSE,
         "perFrameMask": PER_FRAME_MASK,
+        "visClose": VIS_CLOSE,
+        "visOpen": VIS_OPEN,
         "mesh": {"cols": GRID_COLS, "rows": GRID_ROWS},
         "uv": [[round(float(u), 4), round(float(v), 4)] for u, v in uv],
         "frames": out_frames,
