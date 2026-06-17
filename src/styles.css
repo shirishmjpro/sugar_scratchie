@@ -205,6 +205,57 @@ h1 {
   border-bottom: 1px solid rgba(23, 21, 19, 0.14);
 }
 
+/* Phones: hide the dev panel and fill the whole browser surface with the
+   scratch canvas (cover, aspect preserved — the canvas keeps 390:672 so
+   pointer mapping stays linear). */
+@media (max-width: 700px) {
+  body {
+    overflow: hidden;
+  }
+
+  .app-shell {
+    min-height: 100dvh;
+    padding: 0;
+  }
+
+  .prototype {
+    display: block;
+    gap: 0;
+    margin: 0;
+    max-width: none;
+  }
+
+  .panel {
+    display: none;
+  }
+
+  .stage {
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    height: 100dvh;
+    left: 0;
+    position: fixed;
+    top: 0;
+    width: 100dvw;
+  }
+
+  .stage canvas {
+    height: max(100dvh, 100dvw * 672 / 390);
+    left: 50%;
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    transition: none;
+    width: max(100dvw, 100dvh * 390 / 672);
+  }
+
+  .stage-status {
+    bottom: max(24px, env(safe-area-inset-bottom));
+  }
+}
+
 dt,
 dd {
   margin: 0;

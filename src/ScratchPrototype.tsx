@@ -252,7 +252,11 @@ export function ScratchPrototype() {
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
   const [selectedMeshFile, setSelectedMeshFile] = useState("");
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [showMesh, setShowMesh] = useState(true);
+  // The mesh lattice is a dev overlay — default it off on phones (where the
+  // toggle is hidden).
+  const [showMesh, setShowMesh] = useState(
+    () => !(typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches),
+  );
   const showMeshRef = useRef(showMesh);
   showMeshRef.current = showMesh;
   const [progress, setProgress] = useState(0);
@@ -402,16 +406,22 @@ export function ScratchPrototype() {
     };
   }, []);
 
+  function isPhoneLayout() {
+    return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
+  }
+
   function applyScratchZoom(point: Vec2) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    // On phones the canvas is centered with a transform and fills the screen —
+    // don't override it (and skip the magnify effect).
+    if (!canvas || isPhoneLayout()) return;
     canvas.style.transformOrigin = `${(point.x / CANVAS_WIDTH) * 100}% ${(point.y / CANVAS_HEIGHT) * 100}%`;
     canvas.style.transform = "scale(1.35)";
   }
 
   function clearScratchZoom() {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || isPhoneLayout()) return;
     canvas.style.transform = "scale(1)";
   }
 
@@ -490,6 +500,7 @@ export function ScratchPrototype() {
           <video
             ref={bottomVideoRef}
             className="source-video"
+            autoPlay
             muted
             loop
             playsInline
@@ -499,6 +510,7 @@ export function ScratchPrototype() {
           <video
             ref={foregroundVideoRef}
             className="source-video"
+            autoPlay
             muted
             loop
             playsInline
