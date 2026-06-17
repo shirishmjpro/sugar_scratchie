@@ -82,7 +82,7 @@ textarea:focus-visible {
 }
 
 .prototype {
-  align-items: stretch;
+  align-items: start;
   display: grid;
   gap: 28px;
   grid-template-columns: minmax(280px, 390px) minmax(260px, 360px);

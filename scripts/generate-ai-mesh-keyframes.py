@@ -1,14 +1,18 @@
 """
-Generate mesh keyframes with AI pose anchors plus the foreground mask.
+Generate mesh keyframes with AI pose anchors plus the foreground silhouette.
 
 Usage:
-  .venv311/bin/python scripts/generate-ai-mesh-keyframes.py
+  .venv/bin/python scripts/generate-ai-mesh-keyframes.py
 
 Install:
   scripts/install-ai-mesh-deps.sh
 
 Output:
   public/mesh/generated-ai-mesh-keyframes.json
+
+Env knobs:
+  MAX_FRAMES       process only the first N frames (debugging)
+  DEBUG_OVERLAY=1  also write per-frame cage overlays to .tmp/gen_overlay
 """
 
 import json
@@ -21,13 +25,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
+from scipy import ndimage
 
 
 REPO_ROOT = Path(__file__).parent.parent
 INPUT_VIDEO = REPO_ROOT / "public/cards/Green bg sample 2 swap.mp4"
 OUTPUT_JSON = Path(os.environ.get("OUTPUT_JSON", REPO_ROOT / "public/mesh/generated-ai-mesh-keyframes.json"))
 MPL_CONFIG_DIR = REPO_ROOT / ".tmp" / "matplotlib"
+DEBUG_OVERLAY_DIR = REPO_ROOT / ".tmp" / "gen_overlay"
 
 CANVAS_WIDTH = 390
 CANVAS_HEIGHT = 672
@@ -35,9 +41,12 @@ SAMPLE_INTERVAL_SECONDS = float(os.environ.get("SAMPLE_INTERVAL_SECONDS", "0.25"
 FPS = 1 / SAMPLE_INTERVAL_SECONDS
 FRAME_BYTES = CANVAS_WIDTH * CANVAS_HEIGHT * 4
 MAX_FRAMES = int(os.environ["MAX_FRAMES"]) if os.environ.get("MAX_FRAMES") else None
+DEBUG_OVERLAY = bool(os.environ.get("DEBUG_OVERLAY"))
 POSE_MODEL = os.environ.get("POSE_MODEL", "rtmw-x_8xb320-270e_cocktail14-384x288")
 POSE_DEVICE = os.environ.get("POSE_DEVICE")
 
+# Body-cage rows, from the neck (v=0) down to the legs (v~1). These mirror the
+# rows the prototype renderer expects in src/ScratchPrototype.tsx.
 BODY_MESH_ROWS = [
     {"id": "neck", "label": "Neck", "v": 0.025},
     {"id": "shoulder", "label": "Shoulder", "v": 0.075},
@@ -57,6 +66,21 @@ BODY_MESH_ROWS = [
     {"id": "leg", "label": "Leg", "v": 0.985},
 ]
 
+# Fallback silhouette used only when the mask fails for a row (matches the
+# prototype's STABLE_BODY_CAGE_PROFILE so behaviour degrades gracefully).
+FALLBACK_PROFILE = [
+    (0.0, 0.39, 0.61),
+    (0.05, 0.31, 0.69),
+    (0.12, 0.20, 0.80),
+    (0.22, 0.18, 0.82),
+    (0.34, 0.23, 0.77),
+    (0.48, 0.29, 0.71),
+    (0.62, 0.22, 0.78),
+    (0.78, 0.27, 0.73),
+    (0.92, 0.32, 0.68),
+    (1.0, 0.36, 0.64),
+]
+
 KEYPOINTS = {
     "nose": 0,
     "left_shoulder": 5,
@@ -72,6 +96,18 @@ KEYPOINTS = {
     "left_ankle": 15,
     "right_ankle": 16,
 }
+
+# v at which each landmark sits inside the cage, used to derive frame height.
+LANDMARK_V = {"ankle_center": 0.985, "knee_center": 0.93, "hip_center": 0.66}
+
+# How much of the frame width the widest body row should occupy. A value of
+# 0.64 places the widest silhouette edges near u=0.18 / u=0.82, matching the
+# range the renderer's curved body-wrap expects.
+WIDEST_ROW_U_SPAN = 0.64
+NECK_LIFT_RATIO = 0.10  # lift origin above the shoulders by this fraction of the torso
+MAX_TILT = math.radians(14)  # clamp body lean so the cage never flips sideways
+FRAME_SMOOTHING = 0.5  # how strongly each frame follows the new detection
+EDGE_SMOOTHING = 0.55
 
 
 def clamp(value, minimum, maximum):
@@ -91,14 +127,32 @@ def mix(a, b, amount):
     return a * (1 - amount) + b * amount
 
 
+def perpendicular_down(u_axis):
+    # Rotate +90 degrees; for a near-horizontal u-axis this points downward.
+    return normalize({"x": -u_axis["y"], "y": u_axis["x"]})
+
+
 def fallback_frame():
     return {
-        "origin": {"x": 210, "y": 236},
-        "uAxis": normalize({"x": 1, "y": 0.02}),
-        "vAxis": normalize({"x": -0.05, "y": 1}),
-        "width": 220,
-        "height": 410,
+        "origin": {"x": CANVAS_WIDTH / 2, "y": CANVAS_HEIGHT * 0.15},
+        "uAxis": {"x": 1.0, "y": 0.0},
+        "vAxis": {"x": 0.0, "y": 1.0},
+        "width": 300.0,
+        "height": 540.0,
     }
+
+
+def fallback_edges(v):
+    profile = FALLBACK_PROFILE
+    if v <= profile[0][0]:
+        return profile[0][1], profile[0][2]
+    if v >= profile[-1][0]:
+        return profile[-1][1], profile[-1][2]
+    for first, second in zip(profile, profile[1:]):
+        if first[0] <= v <= second[0]:
+            blend = (v - first[0]) / ((second[0] - first[0]) or 1)
+            return mix(first[1], second[1], blend), mix(first[2], second[2], blend)
+    return profile[0][1], profile[0][2]
 
 
 def local_to_world(frame, u, v):
@@ -153,7 +207,12 @@ def load_video_frames():
             "-i",
             str(INPUT_VIDEO),
             "-vf",
-            f"fps={FPS},scale={CANVAS_WIDTH}:{CANVAS_HEIGHT},format=rgba",
+            (
+                f"fps={FPS},"
+                f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={CANVAS_WIDTH}:{CANVAS_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=0x00ff00,"
+                "format=rgba"
+            ),
             "-f",
             "rawvideo",
             "pipe:1",
@@ -182,29 +241,55 @@ def chroma_key_mask(rgba):
     return keyed_alpha > 72
 
 
-def garment_mask(rgba):
-    red = rgba[:, :, 0].astype(np.int16)
-    green = rgba[:, :, 1].astype(np.int16)
-    blue = rgba[:, :, 2].astype(np.int16)
-    foreground = chroma_key_mask(rgba)
+def clean_silhouette(rgba):
+    """Chroma-key foreground, hole-filled and reduced to its largest blob.
 
-    is_likely_skin = (red > 145) & (green > 86) & (green < 178) & (blue < 145) & ((red - blue) > 26)
-    is_bright_garment = (red > 118) & (green > 118) & (blue > 118)
-    is_cool_garment = (blue > 118) & (green > 86) & (blue >= red - 8)
-    return foreground & ~is_likely_skin & (is_bright_garment | is_cool_garment)
+    The green screen makes the foreground a reliable body silhouette; cleaning
+    it removes green spill speckle and the dark gaps inside the glowing garment
+    so per-row edge scans stay on the true body outline.
+    """
+    mask = chroma_key_mask(rgba)
+    mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), bool), iterations=1)
+    filled = ndimage.binary_fill_holes(mask)
+    labels, count = ndimage.label(filled)
+    if count == 0:
+        return filled
+    counts = np.bincount(labels.ravel())
+    counts[0] = 0
+    return labels == int(counts.argmax())
 
 
-def mask_bounds(mask):
-    ys, xs = np.where(mask)
-    if len(xs) < 420:
+def silhouette_span(mask, y, center_x, band):
+    """Left/right edge of the silhouette blob nearest ``center_x`` at row ``y``."""
+    top = max(0, int(round(y - band)))
+    bottom = min(CANVAS_HEIGHT - 1, int(round(y + band)))
+    strip = mask[top : bottom + 1, :]
+    if strip.shape[0] == 0:
         return None
-    return {
-        "left": float(xs.min()),
-        "right": float(xs.max()),
-        "top": float(ys.min()),
-        "bottom": float(ys.max()),
-        "centerX": float(xs.mean()),
-    }
+    hits = strip.sum(axis=0)
+    threshold = max(1, round(strip.shape[0] * 0.34))
+    columns = np.where(hits >= threshold)[0]
+    if len(columns) < 4:
+        return None
+
+    spans = []
+    start = previous = columns[0]
+    for column in columns[1:]:
+        if column - previous > 6:
+            spans.append((start, previous))
+            start = column
+        previous = column
+    spans.append((start, previous))
+    spans = [(left, right) for left, right in spans if right - left >= 3]
+    if not spans:
+        return None
+
+    inside = [span for span in spans if span[0] - 5 <= center_x <= span[1] + 5]
+    if inside:
+        left, right = max(inside, key=lambda span: span[1] - span[0])
+    else:
+        left, right = min(spans, key=lambda span: abs((span[0] + span[1]) / 2 - center_x))
+    return float(left), float(right)
 
 
 def keypoint(instance, name, min_score=0.15):
@@ -254,130 +339,110 @@ def choose_pose(instances):
     return max(instances, key=score)
 
 
-def estimate_frame_from_pose(instance, bounds, previous_frame):
-    base = previous_frame or fallback_frame()
+def pose_anchor(instance):
     left_shoulder = keypoint(instance, "left_shoulder")
     right_shoulder = keypoint(instance, "right_shoulder")
-    left_hip = keypoint(instance, "left_hip")
-    right_hip = keypoint(instance, "right_hip")
-    left_knee = keypoint(instance, "left_knee")
-    right_knee = keypoint(instance, "right_knee")
+    return {
+        "left_shoulder": left_shoulder,
+        "right_shoulder": right_shoulder,
+        "shoulder_center": midpoint(left_shoulder, right_shoulder),
+        "hip_center": midpoint(keypoint(instance, "left_hip"), keypoint(instance, "right_hip")),
+        "knee_center": midpoint(keypoint(instance, "left_knee"), keypoint(instance, "right_knee")),
+        "ankle_center": midpoint(keypoint(instance, "left_ankle"), keypoint(instance, "right_ankle")),
+    }
 
-    shoulder_center = midpoint(left_shoulder, right_shoulder)
-    hip_center = midpoint(left_hip, right_hip)
-    knee_center = midpoint(left_knee, right_knee)
-    torso_center = midpoint(shoulder_center, hip_center) or shoulder_center or hip_center
 
+def estimate_frame(anchor, mask, previous_frame):
+    """Build an orthonormal body box from the pose, scaled by the silhouette."""
+    base = previous_frame or fallback_frame()
+    shoulder_center = anchor["shoulder_center"]
+    hip_center = anchor["hip_center"]
+    if not shoulder_center:
+        return base
+
+    left_shoulder = anchor["left_shoulder"]
+    right_shoulder = anchor["right_shoulder"]
     if left_shoulder and right_shoulder:
-        raw_u_axis = normalize({"x": left_shoulder["x"] - right_shoulder["x"], "y": left_shoulder["y"] - right_shoulder["y"]})
-        u_axis = normalize({"x": mix(base["uAxis"]["x"], raw_u_axis["x"], 0.35), "y": mix(base["uAxis"]["y"], raw_u_axis["y"], 0.35)})
+        raw = normalize({"x": left_shoulder["x"] - right_shoulder["x"], "y": left_shoulder["y"] - right_shoulder["y"]})
+        angle = clamp(math.atan2(raw["y"], raw["x"]), -MAX_TILT, MAX_TILT)
+        u_axis = {"x": math.cos(angle), "y": math.sin(angle)}
     else:
         u_axis = base["uAxis"]
+    v_axis = perpendicular_down(u_axis)
 
-    if shoulder_center and (knee_center or hip_center):
-        lower_center = knee_center or hip_center
-        raw_v_axis = normalize({"x": lower_center["x"] - shoulder_center["x"], "y": lower_center["y"] - shoulder_center["y"]})
-        v_axis = normalize({"x": mix(base["vAxis"]["x"], raw_v_axis["x"], 0.45), "y": mix(base["vAxis"]["y"], raw_v_axis["y"], 0.45)})
-    else:
-        v_axis = base["vAxis"]
+    torso = math.hypot(hip_center["x"] - shoulder_center["x"], hip_center["y"] - shoulder_center["y"]) if hip_center else 150.0
+    neck_lift = max(12.0, torso * NECK_LIFT_RATIO)
+    origin = {
+        "x": shoulder_center["x"] - v_axis["x"] * neck_lift,
+        "y": shoulder_center["y"] - v_axis["y"] * neck_lift,
+    }
 
-    origin_x = torso_center["x"] if torso_center else base["origin"]["x"]
-    if bounds:
-        origin_x = mix(origin_x, bounds["centerX"], 0.35)
-
-    origin_y = (shoulder_center["y"] - 10) if shoulder_center else (bounds["top"] - 8 if bounds else base["origin"]["y"])
-    if bounds:
-        origin_y = mix(origin_y, bounds["top"] - 8, 0.3)
-
-    shoulder_width = abs(left_shoulder["x"] - right_shoulder["x"]) if left_shoulder and right_shoulder else base["width"] * 0.45
-    mask_width = (bounds["right"] - bounds["left"]) if bounds else base["width"]
-    width = max(shoulder_width * 2.55, mask_width * 0.96)
-
-    if bounds:
-        height = bounds["bottom"] - origin_y + 18
-    elif knee_center and shoulder_center:
-        height = (knee_center["y"] - shoulder_center["y"]) * 1.28
+    bottom = anchor["ankle_center"] or anchor["knee_center"] or hip_center
+    bottom_v = (
+        LANDMARK_V["ankle_center"]
+        if anchor["ankle_center"]
+        else LANDMARK_V["knee_center"]
+        if anchor["knee_center"]
+        else LANDMARK_V["hip_center"]
+    )
+    if bottom:
+        projection = (bottom["x"] - origin["x"]) * v_axis["x"] + (bottom["y"] - origin["y"]) * v_axis["y"]
+        height = projection / bottom_v
     else:
         height = base["height"]
 
+    widths = []
+    if shoulder_center and hip_center:
+        for fraction in (0.15, 0.35, 0.55, 0.75, 0.95):
+            sample_y = shoulder_center["y"] + (hip_center["y"] - shoulder_center["y"]) * fraction
+            span = silhouette_span(mask, sample_y, shoulder_center["x"], 6)
+            if span:
+                widths.append(span[1] - span[0])
+    body_width = float(np.percentile(widths, 75)) if widths else base["width"] * WIDEST_ROW_U_SPAN
+    width = body_width / WIDEST_ROW_U_SPAN
+
     detected = {
-        "origin": {"x": clamp(origin_x, 120, 270), "y": clamp(origin_y, 198, 260)},
+        "origin": origin,
         "uAxis": u_axis,
         "vAxis": v_axis,
-        "width": clamp(width, 240, 370),
-        "height": clamp(height, 420, 560),
+        "width": clamp(width, 220.0, 470.0),
+        "height": clamp(height, 360.0, 760.0),
     }
 
     if not previous_frame:
         return detected
 
+    blended_u = normalize(
+        {
+            "x": mix(previous_frame["uAxis"]["x"], detected["uAxis"]["x"], FRAME_SMOOTHING),
+            "y": mix(previous_frame["uAxis"]["y"], detected["uAxis"]["y"], FRAME_SMOOTHING),
+        }
+    )
     return {
         "origin": {
-            "x": mix(previous_frame["origin"]["x"], detected["origin"]["x"], 0.34),
-            "y": mix(previous_frame["origin"]["y"], detected["origin"]["y"], 0.3),
+            "x": mix(previous_frame["origin"]["x"], detected["origin"]["x"], FRAME_SMOOTHING),
+            "y": mix(previous_frame["origin"]["y"], detected["origin"]["y"], FRAME_SMOOTHING),
         },
-        "uAxis": normalize(
-            {
-                "x": mix(previous_frame["uAxis"]["x"], detected["uAxis"]["x"], 0.22),
-                "y": mix(previous_frame["uAxis"]["y"], detected["uAxis"]["y"], 0.22),
-            }
-        ),
-        "vAxis": normalize(
-            {
-                "x": mix(previous_frame["vAxis"]["x"], detected["vAxis"]["x"], 0.22),
-                "y": mix(previous_frame["vAxis"]["y"], detected["vAxis"]["y"], 0.22),
-            }
-        ),
-        "width": mix(previous_frame["width"], detected["width"], 0.34),
-        "height": mix(previous_frame["height"], detected["height"], 0.3),
+        "uAxis": blended_u,
+        "vAxis": perpendicular_down(blended_u),
+        "width": mix(previous_frame["width"], detected["width"], FRAME_SMOOTHING),
+        "height": mix(previous_frame["height"], detected["height"], FRAME_SMOOTHING),
     }
 
 
-def bounds_at_row(mask, y, expected_center_x, band):
-    min_y = max(0, int(y - band))
-    max_y = min(CANVAS_HEIGHT - 1, int(y + band))
-    row_band = mask[min_y : max_y + 1, :]
-    hits = row_band.sum(axis=0)
-    threshold = max(2, round(row_band.shape[0] * 0.16))
-    columns = np.where(hits >= threshold)[0]
-    if len(columns) < 6:
-        return None
+def estimate_edges(frame, mask, anchor, previous_points):
+    previous_by_id = {point["id"]: point for point in previous_points} if previous_points else {}
 
-    spans = []
-    start = columns[0]
-    previous = columns[0]
-    for column in columns[1:]:
-        if column - previous > 4:
-            spans.append((start, previous))
-            start = column
-        previous = column
-    spans.append((start, previous))
+    left_shoulder = anchor.get("left_shoulder")
+    right_shoulder = anchor.get("right_shoulder")
+    shoulder_left_u = world_to_local(frame, left_shoulder)["u"] if left_shoulder else None
+    shoulder_right_u = world_to_local(frame, right_shoulder)["u"] if right_shoulder else None
 
-    spans = [(left, right) for left, right in spans if right - left >= 5]
-    if not spans:
-        return None
-
-    def span_score(span):
-        left, right = span
-        center = (left + right) / 2
-        width = right - left
-        too_wide_penalty = max(0, width - 210) * 1.9
-        return width * 4 - abs(center - expected_center_x) * 5 - too_wide_penalty
-
-    left, right = max(spans, key=span_score)
-    samples = columns[(columns >= left) & (columns <= right)]
-    if len(samples) < 6:
-        return None
-    trim = 0.08 if right - left > 96 else 0.04
-    return {"left": float(np.quantile(samples, trim)), "right": float(np.quantile(samples, 1 - trim))}
-
-
-def estimate_points(frame, mask, previous_points):
+    band = max(4.0, frame["height"] * 0.018)
+    center_x = local_to_world(frame, 0.5, 0.4)["x"]
     left_points = []
     right_points = []
-    previous_by_id = {point["id"]: point for point in previous_points} if previous_points else {}
-    expected_center_x = local_to_world(frame, 0.5, BODY_MESH_ROWS[0]["v"])["x"]
-    tracked_rows = 0
+    tracked = 0
 
     for row in BODY_MESH_ROWS:
         row_center = local_to_world(frame, 0.5, row["v"])
@@ -386,66 +451,38 @@ def estimate_points(frame, mask, previous_points):
         if previous_left and previous_right:
             left_world = local_to_world(frame, previous_left["u"], row["v"])
             right_world = local_to_world(frame, previous_right["u"], row["v"])
-            expected_center_x = (left_world["x"] + right_world["x"]) / 2
+            center_x = (left_world["x"] + right_world["x"]) / 2
 
-        bounds = bounds_at_row(mask, row_center["y"], expected_center_x, 9 if row["v"] < 0.2 else 12)
-        if not bounds:
-            fallback_left = 0.08 + abs(row["v"] - 0.45) * 0.18
-            fallback_right = 0.92 - abs(row["v"] - 0.45) * 0.18
-            left_points.append({"id": f"left-{row['id']}", "label": f"L {row['label']}", "u": fallback_left, "v": row["v"]})
-            right_points.append({"id": f"right-{row['id']}", "label": f"R {row['label']}", "u": fallback_right, "v": row["v"]})
-            continue
+        span = silhouette_span(mask, row_center["y"], center_x, band)
+        if span:
+            left_u = world_to_local(frame, {"x": span[0], "y": row_center["y"]})["u"]
+            right_u = world_to_local(frame, {"x": span[1], "y": row_center["y"]})["u"]
+            center_x = (span[0] + span[1]) / 2
+            tracked += 1
+        else:
+            left_u, right_u = fallback_edges(row["v"])
 
-        edge_padding = 0.006 if row["v"] < 0.24 else 0.012
-        left_local = world_to_local(frame, {"x": bounds["left"], "y": row_center["y"]})
-        right_local = world_to_local(frame, {"x": bounds["right"], "y": row_center["y"]})
-        expected_center_x = (bounds["left"] + bounds["right"]) / 2
-        left_points.append(
-            {
-                "id": f"left-{row['id']}",
-                "label": f"L {row['label']}",
-                "u": clamp(left_local["u"] + edge_padding, -0.25, 0.42),
-                "v": row["v"],
-            }
-        )
-        right_points.append(
-            {
-                "id": f"right-{row['id']}",
-                "label": f"R {row['label']}",
-                "u": clamp(right_local["u"] - edge_padding, 0.58, 1.25),
-                "v": row["v"],
-            }
-        )
-        tracked_rows += 1
+        # Hair drapes over the shoulders, so cap the top rows to the shoulder
+        # keypoints to keep the cage on the body instead of the hair.
+        if row["v"] <= 0.105 and shoulder_left_u is not None and shoulder_right_u is not None:
+            inner = min(shoulder_left_u, shoulder_right_u)
+            outer = max(shoulder_left_u, shoulder_right_u)
+            left_u = max(left_u, inner - 0.04)
+            right_u = min(right_u, outer + 0.04)
 
-    points = stabilize_top_points([*left_points, *reversed(right_points)])
-    if tracked_rows < 3:
-        return previous_points or points
-    if not previous_points or len(previous_points) != len(points):
-        return points
+        left_u = clamp(left_u, -0.2, 0.45)
+        right_u = clamp(right_u, 0.55, 1.2)
+        if previous_left:
+            left_u = mix(previous_left["u"], left_u, EDGE_SMOOTHING)
+        if previous_right:
+            right_u = mix(previous_right["u"], right_u, EDGE_SMOOTHING)
 
-    smoothed = []
-    for point in points:
-        previous = previous_by_id.get(point["id"])
-        if not previous:
-            smoothed.append(point)
-            continue
-        smoothed.append({**point, "u": mix(previous["u"], point["u"], 0.42), "v": mix(previous["v"], point["v"], 0.28)})
-    return smoothed
+        left_points.append({"id": f"left-{row['id']}", "label": f"L {row['label']}", "u": left_u, "v": row["v"]})
+        right_points.append({"id": f"right-{row['id']}", "label": f"R {row['label']}", "u": right_u, "v": row["v"]})
 
-
-def stabilize_top_points(points):
-    by_id = {point["id"]: point for point in points}
-    left_neck = by_id.get("left-neck")
-    right_neck = by_id.get("right-neck")
-    left_shoulder = by_id.get("left-shoulder")
-    right_shoulder = by_id.get("right-shoulder")
-
-    if left_neck and left_shoulder:
-        left_neck["u"] = min(left_neck["u"], left_shoulder["u"] + 0.04)
-    if right_neck and right_shoulder:
-        right_neck["u"] = max(right_neck["u"], right_shoulder["u"] - 0.04)
-
+    points = [*left_points, *reversed(right_points)]
+    if tracked < 3 and previous_points:
+        return previous_points
     return points
 
 
@@ -461,6 +498,24 @@ def round_frame(frame):
 
 def round_points(points):
     return [{"id": point["id"], "label": point["label"], "u": round(point["u"], 4), "v": round(point["v"], 4)} for point in points]
+
+
+def write_debug_overlay(frame_index, rgba, frame, points):
+    DEBUG_OVERLAY_DIR.mkdir(parents=True, exist_ok=True)
+    image = Image.fromarray(rgba, mode="RGBA").convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    quad = [local_to_world(frame, u, v) for u, v in ((0, 0), (1, 0), (1, 1), (0, 1))]
+    draw.polygon([(p["x"], p["y"]) for p in quad], outline=(255, 235, 0))
+    origin = frame["origin"]
+    draw.ellipse([origin["x"] - 3, origin["y"] - 3, origin["x"] + 3, origin["y"] + 3], fill=(255, 235, 0))
+
+    cage = [local_to_world(frame, point["u"], point["v"]) for point in points]
+    draw.line([(p["x"], p["y"]) for p in cage] + [(cage[0]["x"], cage[0]["y"])], fill=(255, 40, 40), width=2)
+    for point in cage:
+        draw.ellipse([point["x"] - 2, point["y"] - 2, point["x"] + 2, point["y"] + 2], fill=(0, 200, 255))
+
+    image.save(DEBUG_OVERLAY_DIR / f"ov{frame_index:03d}.png")
 
 
 def prepare_mmpose_runtime():
@@ -525,18 +580,20 @@ def main():
 
         rgb = np.array(Image.fromarray(rgba, mode="RGBA").convert("RGB"))
         pose = detect_pose(inferencer, rgb)
-        foreground = chroma_key_mask(rgba)
-        garment = garment_mask(rgba)
-        bounds = mask_bounds(garment) or mask_bounds(foreground)
+        silhouette = clean_silhouette(rgba)
 
         if pose:
             ai_pose_hits += 1
-            frame = estimate_frame_from_pose(pose, bounds, previous_frame)
+            anchor = pose_anchor(pose)
+            frame = estimate_frame(anchor, silhouette, previous_frame)
         else:
+            anchor = {"left_shoulder": None, "right_shoulder": None}
             frame = previous_frame or fallback_frame()
 
-        points = estimate_points(frame, garment, previous_points)
+        points = estimate_edges(frame, silhouette, anchor, previous_points)
         keyframes.append({"time": time, "frame": round_frame(frame), "points": round_points(points)})
+        if DEBUG_OVERLAY:
+            write_debug_overlay(frame_index, rgba, frame, points)
         previous_frame = frame
         previous_points = points
 
@@ -546,7 +603,7 @@ def main():
             {
                 "source": "public/cards/Green bg sample 2 swap.mp4",
                 "generatedAt": datetime.now(timezone.utc).isoformat(),
-                "generator": "ai-rtmw-garment-mask-v2",
+                "generator": "ai-rtmw-silhouette-cage-v4",
                 "poseModel": POSE_MODEL,
                 "sampleIntervalSeconds": SAMPLE_INTERVAL_SECONDS,
                 "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},

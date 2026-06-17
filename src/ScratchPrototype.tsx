@@ -58,11 +58,15 @@ const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "generated-ai-mesh-keyframes.json";
 const CLAIM_THRESHOLD = 0.35;
-const FRONT_SURFACE_MIN_WEIGHT = 0.28;
+const FRONT_SURFACE_MIN_WEIGHT = 0.12;
 const FRONT_SURFACE_U_IS_MIRRORED = true;
-const BODY_WRAP_RADIANS = Math.PI * 1.22;
-const BODY_WRAP_WIDTH_SCALE = 0.72;
-const BODY_WRAP_DEPTH = 132;
+// Front face spans a touch under a half-cylinder so the left/right edges land
+// on the silhouette rather than curling around the back.
+const BODY_WRAP_RADIANS = Math.PI * 0.92;
+// How strongly the horizontal mapping bows away from the flat silhouette
+// mapping. 0 = flat, 1 = full sine wrap. Kept low so the cage hugs the body.
+const BODY_WRAP_FORESHORTEN = 0.22;
+const BODY_WRAP_DEPTH = 96;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const HOVER_REVEAL_RADIUS = 46;
 const CURVED_MESH_COLUMNS = 26;
@@ -131,6 +135,28 @@ function getReusableCanvas(id: string) {
   if (canvas.height !== CANVAS_HEIGHT) canvas.height = CANVAS_HEIGHT;
 
   return canvas;
+}
+
+function getContainRect(sourceWidth: number, sourceHeight: number, targetWidth: number, targetHeight: number) {
+  if (sourceWidth <= 0 || sourceHeight <= 0) {
+    return { x: 0, y: 0, width: targetWidth, height: targetHeight };
+  }
+
+  const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+
+  return {
+    x: (targetWidth - width) / 2,
+    y: (targetHeight - height) / 2,
+    width,
+    height,
+  };
+}
+
+function drawVideoContain(context: CanvasRenderingContext2D, video: HTMLVideoElement) {
+  const rect = getContainRect(video.videoWidth, video.videoHeight, CANVAS_WIDTH, CANVAS_HEIGHT);
+  context.drawImage(video, rect.x, rect.y, rect.width, rect.height);
 }
 
 const DEFAULT_KEYFRAMES: DressKeyframe[] = [
@@ -331,20 +357,27 @@ function projectSurfacePoint(frame: GarmentFrame, u: number, v: number, isCurved
   const widthRatio = Math.max(0.2, getBodyProfileWidth(v) / BODY_PROFILE_MAX_WIDTH);
   const endTaper = Math.max(0.32, 1 - Math.abs(v - 0.5) * 0.35);
   const depthFalloff = widthRatio * endTaper;
+  // Horizontal: blend the flat silhouette offset with a sine bow. Both reach the
+  // same half-width at the edges, so the cage stays on the body and only the
+  // interior bows, instead of ballooning past the silhouette.
+  const flatOffset = (clampedU - 0.5) * frame.width;
+  const bowOffset = Math.sin(theta) * frame.width * 0.5;
   const surface: Vec3 = {
-    x: Math.sin(theta) * frame.width * BODY_WRAP_WIDTH_SCALE + overflowU * frame.width * 0.34,
+    x: flatOffset * (1 - BODY_WRAP_FORESHORTEN) + bowOffset * BODY_WRAP_FORESHORTEN + overflowU * frame.width * 0.34,
     y: (v - 0.5) * frame.height,
     z: Math.cos(theta) * BODY_WRAP_DEPTH * depthFalloff,
   };
-  const cameraDistance = 560;
+  // Mild perspective on the wrap axis only gives roundness without stretching
+  // the cage vertically or lifting it off the body.
+  const cameraDistance = 820;
   const perspective = cameraDistance / (cameraDistance - surface.z);
   const center = localToWorld(frame, 0.5, 0.5);
   const frontWeight = Math.max(0, Math.cos(theta)) * depthFalloff;
 
   return {
     point: {
-      x: center.x + frame.uAxis.x * surface.x * perspective + frame.vAxis.x * surface.y * perspective,
-      y: center.y + frame.uAxis.y * surface.x * perspective + frame.vAxis.y * surface.y * perspective - surface.z * 0.13,
+      x: center.x + frame.uAxis.x * surface.x * perspective + frame.vAxis.x * surface.y,
+      y: center.y + frame.uAxis.y * surface.x * perspective + frame.vAxis.y * surface.y - surface.z * 0.05,
     },
     z: surface.z,
     frontWeight,
@@ -477,7 +510,7 @@ function drawChromaKeyedVideo(
   video: HTMLVideoElement,
 ) {
   foregroundContext.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-  foregroundContext.drawImage(video, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  drawVideoContain(foregroundContext, video);
 
   const image = foregroundContext.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
   const pixels = image.data;
@@ -562,7 +595,43 @@ function getBodyProfileWidth(v: number) {
   return widthAt(sorted[0]);
 }
 
+function getTrackedBodyRows(points: DressPoint[]) {
+  const rows = BODY_MESH_ROWS.map((row) => {
+    const left = points.find((point) => point.id === `left-${row.id}`);
+    const right = points.find((point) => point.id === `right-${row.id}`);
+    return left && right ? { v: row.v, left: left.u, right: right.u } : null;
+  }).filter((row): row is { v: number; left: number; right: number } => Boolean(row));
+
+  return rows.length >= 4 ? rows : [];
+}
+
+function getTrackedBodySideU(side: "left" | "right", v: number, points: DressPoint[]) {
+  const rows = getTrackedBodyRows(points);
+  if (rows.length === 0) return null;
+
+  const clampedV = Math.max(0, Math.min(1, v));
+  const clampU = (value: number) => Math.max(-0.25, Math.min(1.25, value));
+
+  if (clampedV <= rows[0].v) return clampU(rows[0][side]);
+  if (clampedV >= rows[rows.length - 1].v) return clampU(rows[rows.length - 1][side]);
+
+  for (let index = 0; index < rows.length - 1; index += 1) {
+    const current = rows[index];
+    const next = rows[index + 1];
+    if (clampedV >= current.v && clampedV <= next.v) {
+      const span = next.v - current.v || 1;
+      const blend = (clampedV - current.v) / span;
+      return clampU(current[side] + (next[side] - current[side]) * blend);
+    }
+  }
+
+  return clampU(rows[0][side]);
+}
+
 function getStableBodyCageU(side: "left" | "right", v: number, points: DressPoint[] = []) {
+  const trackedU = getTrackedBodySideU(side, v, points);
+  if (trackedU !== null) return trackedU;
+
   const sorted = STABLE_BODY_CAGE_PROFILE;
   const clampedV = Math.max(0, Math.min(1, v));
   const centerU = getTrackedBodyCenterU(points, clampedV);
@@ -585,10 +654,12 @@ function getStableBodyCageU(side: "left" | "right", v: number, points: DressPoin
 }
 
 function getStableBodyCageWorldPoints(frame: GarmentFrame, points: DressPoint[] = [], isCurved = false) {
-  const leftPoints = STABLE_BODY_CAGE_PROFILE.map((profile) =>
+  const rows = getTrackedBodyRows(points);
+  const profileRows = rows.length > 0 ? rows : STABLE_BODY_CAGE_PROFILE;
+  const leftPoints = profileRows.map((profile) =>
     projectLocalToWorld(frame, getStableBodyCageU("left", profile.v, points), profile.v, isCurved),
   );
-  const rightPoints = [...STABLE_BODY_CAGE_PROFILE]
+  const rightPoints = [...profileRows]
     .reverse()
     .map((profile) => projectLocalToWorld(frame, getStableBodyCageU("right", profile.v, points), profile.v, isCurved));
 
@@ -1515,6 +1586,273 @@ function calculateRevealProgress(points: DressPoint[], marks: ScratchMark[]) {
   return Math.min(1, revealed / Math.max(total, 1));
 }
 
+type TrackedMeshFrame = {
+  t: number;
+  verts: Vec2[];
+  vis: number[];
+};
+
+type TrackedMesh = {
+  cols: number;
+  rows: number;
+  fps: number;
+  uv: Vec2[];
+  frames: TrackedMeshFrame[];
+};
+
+// A live mesh sampled at the current video time: per-vertex canvas positions
+// plus visibility, sharing the static UV grid from the source TrackedMesh.
+type TrackedMeshSample = {
+  cols: number;
+  rows: number;
+  uv: Vec2[];
+  verts: Vec2[];
+  vis: number[];
+};
+
+function parseTrackedMesh(value: unknown): TrackedMesh | null {
+  if (!value || typeof value !== "object") return null;
+  const data = value as {
+    mesh?: { cols?: unknown; rows?: unknown };
+    fps?: unknown;
+    uv?: unknown;
+    frames?: unknown;
+  };
+  const cols = Number(data.mesh?.cols);
+  const rows = Number(data.mesh?.rows);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 2 || rows < 2) return null;
+  if (!Array.isArray(data.uv) || !Array.isArray(data.frames) || data.frames.length === 0) return null;
+
+  const expected = cols * rows;
+  const uv = data.uv as unknown[];
+  if (uv.length !== expected) return null;
+  const parsedUv = uv.map((pair) => {
+    const point = pair as number[];
+    return { x: Number(point?.[0]), y: Number(point?.[1]) };
+  });
+  if (parsedUv.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+
+  const frames: TrackedMeshFrame[] = [];
+  for (const rawFrame of data.frames as unknown[]) {
+    const frame = rawFrame as { t?: unknown; verts?: unknown; vis?: unknown };
+    if (typeof frame.t !== "number" || !Array.isArray(frame.verts) || frame.verts.length !== expected) {
+      return null;
+    }
+    const verts = (frame.verts as unknown[]).map((pair) => {
+      const point = pair as number[];
+      return { x: Number(point?.[0]), y: Number(point?.[1]) };
+    });
+    if (verts.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+    const visSource = Array.isArray(frame.vis) ? (frame.vis as unknown[]) : [];
+    const vis = verts.map((_, index) => (Number(visSource[index]) ? 1 : 0));
+    frames.push({ t: frame.t, verts, vis });
+  }
+
+  return {
+    cols,
+    rows,
+    fps: Number(data.fps) || 10,
+    uv: parsedUv,
+    frames: frames.sort((a, b) => a.t - b.t),
+  };
+}
+
+// Interpolate vertex positions between the two source frames bracketing `time`.
+function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
+  const frames = mesh.frames;
+  const loopTime = frames.length > 1 ? time % (frames[frames.length - 1].t || 1) : time;
+  let previous = frames[0];
+  let next = frames[frames.length - 1];
+  for (let index = 0; index < frames.length; index += 1) {
+    if (frames[index].t <= loopTime) previous = frames[index];
+    if (frames[index].t >= loopTime) {
+      next = frames[index];
+      break;
+    }
+  }
+
+  const span = next.t - previous.t;
+  const blend = span > 0 ? (loopTime - previous.t) / span : 0;
+  const verts = previous.verts.map((point, index) => {
+    const target = next.verts[index] ?? point;
+    return { x: point.x + (target.x - point.x) * blend, y: point.y + (target.y - point.y) * blend };
+  });
+  const vis = previous.vis.map((value, index) => (value && next.vis[index] ? 1 : 0));
+
+  return { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis };
+}
+
+function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
+  return sample.verts[row * sample.cols + col];
+}
+
+// Bilinear map from mesh-UV (the static grid) to the current deformed canvas
+// position, so a scratch stored in UV rides the tracked fabric.
+function trackedUvToWorld(sample: TrackedMeshSample, u: number, v: number): Vec2 {
+  const fx = Math.max(0, Math.min(1, u)) * (sample.cols - 1);
+  const fy = Math.max(0, Math.min(1, v)) * (sample.rows - 1);
+  const col = Math.min(sample.cols - 2, Math.floor(fx));
+  const row = Math.min(sample.rows - 2, Math.floor(fy));
+  const sx = fx - col;
+  const sy = fy - row;
+  const topLeft = meshVertexAt(sample, col, row);
+  const topRight = meshVertexAt(sample, col + 1, row);
+  const bottomLeft = meshVertexAt(sample, col, row + 1);
+  const bottomRight = meshVertexAt(sample, col + 1, row + 1);
+  const top = { x: topLeft.x + (topRight.x - topLeft.x) * sx, y: topLeft.y + (topRight.y - topLeft.y) * sx };
+  const bottom = {
+    x: bottomLeft.x + (bottomRight.x - bottomLeft.x) * sx,
+    y: bottomLeft.y + (bottomRight.y - bottomLeft.y) * sx,
+  };
+  return { x: top.x + (bottom.x - top.x) * sy, y: top.y + (bottom.y - top.y) * sy };
+}
+
+function barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) {
+  const v0x = b.x - a.x;
+  const v0y = b.y - a.y;
+  const v1x = c.x - a.x;
+  const v1y = c.y - a.y;
+  const v2x = point.x - a.x;
+  const v2y = point.y - a.y;
+  const denominator = v0x * v1y - v1x * v0y;
+  if (Math.abs(denominator) < 1e-6) return null;
+  const v = (v2x * v1y - v1x * v2y) / denominator;
+  const w = (v0x * v2y - v2x * v0y) / denominator;
+  const u = 1 - v - w;
+  if (u < -0.001 || v < -0.001 || w < -0.001) return null;
+  return { u, v, w };
+}
+
+// Inverse of trackedUvToWorld: find which deformed cell holds `point` and
+// return its mesh-UV via barycentric interpolation across the cell triangles.
+function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
+  for (let row = 0; row < sample.rows - 1; row += 1) {
+    for (let col = 0; col < sample.cols - 1; col += 1) {
+      const topLeft = meshVertexAt(sample, col, row);
+      const topRight = meshVertexAt(sample, col + 1, row);
+      const bottomLeft = meshVertexAt(sample, col, row + 1);
+      const bottomRight = meshVertexAt(sample, col + 1, row + 1);
+      const uvTL = sample.uv[row * sample.cols + col];
+      const uvTR = sample.uv[row * sample.cols + col + 1];
+      const uvBL = sample.uv[(row + 1) * sample.cols + col];
+      const uvBR = sample.uv[(row + 1) * sample.cols + col + 1];
+
+      const first = barycentric(point, topLeft, topRight, bottomRight);
+      if (first) {
+        return {
+          x: uvTL.x * first.u + uvTR.x * first.v + uvBR.x * first.w,
+          y: uvTL.y * first.u + uvTR.y * first.v + uvBR.y * first.w,
+        };
+      }
+      const second = barycentric(point, topLeft, bottomRight, bottomLeft);
+      if (second) {
+        return {
+          x: uvTL.x * second.u + uvBR.x * second.v + uvBL.x * second.w,
+          y: uvTL.y * second.u + uvBR.y * second.v + uvBL.y * second.w,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function trackedMeshPerimeter(sample: TrackedMeshSample): Vec2[] {
+  const { cols, rows } = sample;
+  const perimeter: Vec2[] = [];
+  for (let col = 0; col < cols; col += 1) perimeter.push(meshVertexAt(sample, col, 0));
+  for (let row = 1; row < rows; row += 1) perimeter.push(meshVertexAt(sample, cols - 1, row));
+  for (let col = cols - 2; col >= 0; col -= 1) perimeter.push(meshVertexAt(sample, col, rows - 1));
+  for (let row = rows - 2; row >= 1; row -= 1) perimeter.push(meshVertexAt(sample, 0, row));
+  return perimeter;
+}
+
+function drawTrackedScratch(context: CanvasRenderingContext2D, sample: TrackedMeshSample, mark: ScratchMark) {
+  const center = trackedUvToWorld(sample, mark.u, mark.v);
+  const uEdge = trackedUvToWorld(sample, mark.u + mark.radius, mark.v);
+  const vEdge = trackedUvToWorld(sample, mark.u, mark.v + mark.radius);
+  const xRadius = Math.max(5, Math.hypot(uEdge.x - center.x, uEdge.y - center.y));
+  const yRadius = Math.max(5, Math.hypot(vEdge.x - center.x, vEdge.y - center.y));
+  const angle = Math.atan2(uEdge.y - center.y, uEdge.x - center.x);
+
+  context.save();
+  context.translate(center.x, center.y);
+  context.rotate(angle);
+  context.scale(xRadius, yRadius);
+  context.beginPath();
+  context.arc(0, 0, 1, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+}
+
+function drawTrackedMeshLattice(context: CanvasRenderingContext2D, sample: TrackedMeshSample) {
+  context.save();
+  context.strokeStyle = "rgba(255, 255, 255, 0.2)";
+  context.lineWidth = 0.85;
+  const { cols, rows } = sample;
+  const stroke = (a: Vec2, b: Vec2, visA: number, visB: number) => {
+    if (!visA || !visB) return;
+    context.beginPath();
+    context.moveTo(a.x, a.y);
+    context.lineTo(b.x, b.y);
+    context.stroke();
+  };
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const index = row * cols + col;
+      if (col + 1 < cols) {
+        stroke(sample.verts[index], sample.verts[index + 1], sample.vis[index], sample.vis[index + 1]);
+      }
+      if (row + 1 < rows) {
+        stroke(sample.verts[index], sample.verts[index + cols], sample.vis[index], sample.vis[index + cols]);
+      }
+    }
+  }
+  context.restore();
+}
+
+function drawTrackedForegroundLayer(
+  context: CanvasRenderingContext2D,
+  foregroundCanvas: HTMLCanvasElement,
+  foregroundContext: CanvasRenderingContext2D,
+  foregroundVideo: HTMLVideoElement,
+  foregroundMask: ImageData | null,
+  sample: TrackedMeshSample,
+  marks: ScratchMark[],
+  showMesh: boolean,
+  hoverPoint: Vec2 | null,
+) {
+  drawChromaKeyedVideo(foregroundCanvas, foregroundContext, foregroundVideo);
+  void foregroundMask;
+
+  const perimeter = trackedMeshPerimeter(sample);
+  foregroundContext.save();
+  foregroundContext.beginPath();
+  foregroundContext.moveTo(perimeter[0].x, perimeter[0].y);
+  for (let index = 1; index < perimeter.length; index += 1) {
+    foregroundContext.lineTo(perimeter[index].x, perimeter[index].y);
+  }
+  foregroundContext.closePath();
+  foregroundContext.clip();
+  foregroundContext.globalCompositeOperation = "destination-out";
+  for (const mark of marks) drawTrackedScratch(foregroundContext, sample, mark);
+  foregroundContext.restore();
+  foregroundContext.globalCompositeOperation = "source-over";
+
+  context.drawImage(foregroundCanvas, 0, 0);
+
+  if (hoverPoint) {
+    context.save();
+    context.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.arc(hoverPoint.x, hoverPoint.y, HOVER_REVEAL_RADIUS, 0, Math.PI * 2);
+    context.stroke();
+    context.restore();
+  }
+
+  if (showMesh) drawTrackedMeshLattice(context, sample);
+}
+
 export function ScratchPrototype() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const bottomVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -1531,6 +1869,8 @@ export function ScratchPrototype() {
   const trackedDressPointsRef = useRef<DressPoint[] | null>(null);
   const [dressPoints, setDressPoints] = useState(DEFAULT_DRESS_POINTS);
   const [keyframes, setKeyframes] = useState(DEFAULT_KEYFRAMES);
+  const [trackedMesh, setTrackedMesh] = useState<TrackedMesh | null>(null);
+  const trackedSampleRef = useRef<TrackedMeshSample | null>(null);
   const [keyframeSource, setKeyframeSource] = useState("Default");
   const [meshGenerator, setMeshGenerator] = useState("Default");
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
@@ -1584,18 +1924,22 @@ export function ScratchPrototype() {
         foregroundVideo && hasForegroundFrame && foregroundCanvasRef.current
           ? drawChromaKeyedVideo(foregroundCanvasRef.current, foregroundContext, foregroundVideo)
           : null;
+      // When a tracked deforming mesh is loaded it drives the garment directly,
+      // so the per-frame silhouette tracking below is skipped.
+      const trackedSample = trackedMesh && hasForegroundFrame ? sampleTrackedMesh(trackedMesh, videoTime) : null;
+      trackedSampleRef.current = trackedSample;
       const keyframedFrame = interpolateGarmentFrame(keyframes, videoTime);
       const frame =
         keyframedFrame ??
-        (keyedForeground && !isEditingShape
+        (keyedForeground && !isEditingShape && !trackedMesh
           ? trackBodyFrameFromForeground(keyedForeground, baseFrame, trackedFrameRef.current)
           : baseFrame);
-      if (keyedForeground && !isEditingShape && !keyframedFrame) {
+      if (keyedForeground && !isEditingShape && !keyframedFrame && !trackedMesh) {
         trackedFrameRef.current = frame;
       }
       const keyframedDressPoints = interpolateDressPoints(keyframes, videoTime);
       const renderDressPoints =
-        isEditingShape || keyframedFrame || !keyedForeground
+        trackedMesh || isEditingShape || keyframedFrame || !keyedForeground
           ? isEditingShape
             ? dressPoints
             : keyframedDressPoints
@@ -1604,7 +1948,7 @@ export function ScratchPrototype() {
               keyedForeground,
               trackedDressPointsRef.current,
             );
-      if (!isEditingShape && keyedForeground && !keyframedFrame) {
+      if (!isEditingShape && keyedForeground && !keyframedFrame && !trackedMesh) {
         trackedDressPointsRef.current = cloneDressPoints(renderDressPoints);
       }
       foregroundMaskRef.current = keyedForeground;
@@ -1639,14 +1983,26 @@ export function ScratchPrototype() {
         if (foregroundVideo && foregroundVideo.readyState >= 1) {
           syncVideoTime(bottomVideo, foregroundVideo);
         }
-        context.drawImage(bottomVideo, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        drawVideoContain(context, bottomVideo);
       } else {
         drawSyntheticVideoFrame(context, frame, time);
       }
 
       if (foregroundVideo && hasForegroundFrame) {
         const foregroundLayer = foregroundCanvasRef.current;
-        if (foregroundLayer) {
+        if (foregroundLayer && trackedSample) {
+          drawTrackedForegroundLayer(
+            context,
+            foregroundLayer,
+            foregroundContext,
+            foregroundVideo,
+            keyedForeground,
+            trackedSample,
+            marksRef.current,
+            showMesh,
+            hoverPointRef.current,
+          );
+        } else if (foregroundLayer) {
           drawForegroundLayer(
             context,
             foregroundLayer,
@@ -1687,7 +2043,7 @@ export function ScratchPrototype() {
 
     animationId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationId);
-  }, [dressPoints, isCurvedMask, isEditingShape, keyframes, showMesh]);
+  }, [dressPoints, isCurvedMask, isEditingShape, keyframes, showMesh, trackedMesh]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1710,6 +2066,7 @@ export function ScratchPrototype() {
   useEffect(() => {
     if (!selectedMeshFile) {
       setKeyframes(DEFAULT_KEYFRAMES);
+      setTrackedMesh(null);
       setKeyframeSource("Default");
       setMeshGenerator("Default");
       return;
@@ -1721,6 +2078,18 @@ export function ScratchPrototype() {
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (isCancelled || !data) return;
+
+        // A tracked deforming mesh (CoTracker grid) takes priority over the
+        // pose/silhouette keyframe format when the file matches its schema.
+        const tracked = parseTrackedMesh(data);
+        if (tracked) {
+          setTrackedMesh(tracked);
+          setKeyframeSource(selectedMeshFile);
+          setMeshGenerator(typeof (data as { generator?: unknown }).generator === "string" ? (data as { generator: string }).generator : "Tracked mesh");
+          return;
+        }
+
+        setTrackedMesh(null);
         const generated = parseGeneratedKeyframes(data);
         if (generated.keyframes.length === 0) {
           setKeyframeSource("Invalid mesh JSON");
@@ -1842,6 +2211,22 @@ export function ScratchPrototype() {
   function addScratch(clientX: number, clientY: number) {
     const point = getCanvasPoint(clientX, clientY);
     if (!point) return;
+
+    // Tracked-mesh path: invert the deforming lattice to get garment UV.
+    const trackedSample = trackedSampleRef.current;
+    if (trackedSample) {
+      const uv = trackedWorldToUv(trackedSample, point);
+      if (!uv) return;
+      marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: 0.045 }].slice(-180);
+      const nextProgressTracked = calculateRevealProgress(renderedDressPointsRef.current, marksRef.current);
+      progressRef.current = nextProgressTracked;
+      setProgress(nextProgressTracked);
+      if (nextProgressTracked >= CLAIM_THRESHOLD) {
+        claimedRef.current = true;
+        setClaimed(true);
+      }
+      return;
+    }
 
     const frame = frameRef.current;
     const renderDressPoints = renderedDressPointsRef.current;
