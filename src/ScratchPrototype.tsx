@@ -44,11 +44,19 @@ type DressKeyframe = {
   points: DressPoint[];
 };
 
+type MeshKeyframeData = {
+  generator?: string;
+  poseModel?: string;
+  keyframes: DressKeyframe[];
+};
+
 const CANVAS_WIDTH = 390;
 const CANVAS_HEIGHT = 672;
 const BOTTOM_VIDEO_SRC = "/cards/ai%20girl%202.mp4";
 const FOREGROUND_VIDEO_SRC = "/cards/Green%20bg%20sample%202%20swap.mp4";
-const GENERATED_KEYFRAMES_SRC = "/cards/generated-mesh-keyframes.json";
+const MESH_INDEX_SRC = "/mesh/index.json";
+const MESH_DIRECTORY_SRC = "/mesh";
+const DEFAULT_MESH_FILE = "generated-ai-mesh-keyframes.json";
 const CLAIM_THRESHOLD = 0.35;
 const FRONT_SURFACE_MIN_WEIGHT = 0.28;
 const FRONT_SURFACE_U_IS_MIRRORED = true;
@@ -682,14 +690,14 @@ function isValidGarmentFrame(value: unknown): value is GarmentFrame {
   );
 }
 
-function parseGeneratedKeyframes(value: unknown) {
+function parseGeneratedKeyframes(value: unknown): MeshKeyframeData {
   const keyframeValues = Array.isArray(value)
     ? value
     : value && typeof value === "object" && Array.isArray((value as { keyframes?: unknown }).keyframes)
       ? (value as { keyframes: unknown[] }).keyframes
       : [];
 
-  return keyframeValues
+  const keyframes = keyframeValues
     .filter((keyframe): keyframe is { time: number; frame?: unknown; points: unknown[] } => {
       return (
         keyframe !== null &&
@@ -710,6 +718,30 @@ function parseGeneratedKeyframes(value: unknown) {
     }))
     .filter((keyframe) => keyframe.points.length >= 6)
     .sort((a, b) => a.time - b.time);
+
+  return {
+    generator:
+      value && typeof value === "object" && typeof (value as { generator?: unknown }).generator === "string"
+        ? (value as { generator: string }).generator
+        : undefined,
+    poseModel:
+      value && typeof value === "object" && typeof (value as { poseModel?: unknown }).poseModel === "string"
+        ? (value as { poseModel: string }).poseModel
+        : undefined,
+    keyframes,
+  };
+}
+
+function parseMeshIndex(value: unknown) {
+  if (!value || typeof value !== "object" || !Array.isArray((value as { files?: unknown }).files)) {
+    return [];
+  }
+
+  return (value as { files: unknown[] }).files
+    .filter((file): file is string => {
+      return typeof file === "string" && file.toLowerCase().endsWith(".json") && !file.includes("/");
+    })
+    .sort((a, b) => a.localeCompare(b));
 }
 
 function isTrackableGarmentPixel(image: ImageData, index: number) {
@@ -1500,6 +1532,10 @@ export function ScratchPrototype() {
   const [dressPoints, setDressPoints] = useState(DEFAULT_DRESS_POINTS);
   const [keyframes, setKeyframes] = useState(DEFAULT_KEYFRAMES);
   const [keyframeSource, setKeyframeSource] = useState("Default");
+  const [meshGenerator, setMeshGenerator] = useState("Default");
+  const [meshFiles, setMeshFiles] = useState<string[]>([]);
+  const [selectedMeshFile, setSelectedMeshFile] = useState("");
+  const [meshReloadToken, setMeshReloadToken] = useState(0);
   const [isEditingShape, setIsEditingShape] = useState(false);
   const [isCurvedMask, setIsCurvedMask] = useState(true);
   const [showMesh, setShowMesh] = useState(true);
@@ -1656,22 +1692,57 @@ export function ScratchPrototype() {
   useEffect(() => {
     let isCancelled = false;
 
-    fetch(GENERATED_KEYFRAMES_SRC)
+    fetch(`${MESH_INDEX_SRC}?v=${meshReloadToken}`, { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (isCancelled || !data) return;
-        const generatedKeyframes = parseGeneratedKeyframes(data);
-        if (generatedKeyframes.length === 0) return;
-
-        setKeyframes(generatedKeyframes);
-        setKeyframeSource("Generated");
+        const files = parseMeshIndex(data);
+        setMeshFiles(files);
+        setSelectedMeshFile((currentFile) => currentFile || (files.includes(DEFAULT_MESH_FILE) ? DEFAULT_MESH_FILE : files[0]) || "");
       })
       .catch(() => undefined);
 
     return () => {
       isCancelled = true;
     };
-  }, []);
+  }, [meshReloadToken]);
+
+  useEffect(() => {
+    if (!selectedMeshFile) {
+      setKeyframes(DEFAULT_KEYFRAMES);
+      setKeyframeSource("Default");
+      setMeshGenerator("Default");
+      return;
+    }
+
+    let isCancelled = false;
+
+    fetch(`${MESH_DIRECTORY_SRC}/${encodeURIComponent(selectedMeshFile)}?v=${meshReloadToken}`, { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (isCancelled || !data) return;
+        const generated = parseGeneratedKeyframes(data);
+        if (generated.keyframes.length === 0) {
+          setKeyframeSource("Invalid mesh JSON");
+          setMeshGenerator("Invalid");
+          return;
+        }
+
+        setKeyframes(generated.keyframes);
+        setKeyframeSource(selectedMeshFile);
+        setMeshGenerator(generated.generator ?? "Generated");
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setKeyframeSource("Mesh load failed");
+          setMeshGenerator("Load failed");
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [meshReloadToken, selectedMeshFile]);
 
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
@@ -1979,6 +2050,10 @@ export function ScratchPrototype() {
               </dd>
             </div>
             <div>
+              <dt>Generator</dt>
+              <dd>{meshGenerator}</dd>
+            </div>
+            <div>
               <dt>Bottom</dt>
               <dd>{usingBottomVideo ? "MP4 source" : "Fallback"}</dd>
             </div>
@@ -1987,6 +2062,28 @@ export function ScratchPrototype() {
               <dd>{usingForegroundVideo ? "MP4 source" : "Missing"}</dd>
             </div>
           </dl>
+          <label>
+            Mesh keyframes
+            <select
+              aria-label="Mesh keyframe JSON"
+              disabled={meshFiles.length === 0}
+              onChange={(event) => setSelectedMeshFile(event.currentTarget.value)}
+              value={selectedMeshFile}
+            >
+              {meshFiles.length === 0 ? (
+                <option value="">No mesh JSON files</option>
+              ) : (
+                meshFiles.map((file) => (
+                  <option
+                    key={file}
+                    value={file}
+                  >
+                    {file}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
           <div className="timeline-controls">
             <input
               aria-label="Video timeline"
@@ -2013,6 +2110,13 @@ export function ScratchPrototype() {
               Save keyframe
             </button>
           </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setMeshReloadToken((current) => current + 1)}
+          >
+            Reload mesh
+          </button>
           <div className="button-row">
             <button
               type="button"

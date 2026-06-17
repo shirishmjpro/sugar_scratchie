@@ -1,3 +1,12 @@
 node_modules/
 dist/
 .DS_Store
+.tmp/
+.venv/
+.venv311/
+__pycache__/
+*.py[cod]
+
+# Generated ControlNet frames and output
+public/cards/controlnet-frames/
+public/cards/controlnet-output/

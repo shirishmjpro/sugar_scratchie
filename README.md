@@ -34,19 +34,28 @@ Then open the local Vite URL shown in the terminal.
 
 ## Generate Mesh Keyframes
 
-The prototype can generate repeatable mesh keyframes from the foreground green-screen clip:
+The prototype uses a single AI mesh-keyframe generator based on the RTMW whole-body pose model plus the foreground mask.
+Use Python 3.11 on this machine and install with the bootstrap script:
 
 ```bash
-npm run generate:keyframes
+scripts/install-ai-mesh-deps.sh
 ```
 
-This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds with `ffmpeg`, chroma-keys each frame, tracks the visible body silhouette rows, and writes:
+That creates `.venv311` and installs the compatible MMPose stack. The plain `pip install -r scripts/requirements-ai-mesh.txt` path is still unreliable because `mmpose` declares legacy transitive packages like `chumpy` and `xtcocotools` that are not needed for this project but still break installation.
+
+Then generate keyframes from the foreground green-screen clip:
+
+```bash
+.venv311/bin/python scripts/generate-ai-mesh-keyframes.py
+```
+
+This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds, runs AI pose detection, blends that with the chroma-keyed foreground mask, and writes:
 
 ```text
-public/cards/generated-mesh-keyframes.json
+public/mesh/generated-ai-mesh-keyframes.json
 ```
 
-The tracker detects separate foreground spans on each row, prefers the span closest to the torso from the previous frame, and trims noisy row edges so hands and stray alpha pixels do not pull the tracked reference points outward as aggressively. The active scratch surface uses a stable pseudo-3D body cage, while the generated keyframes provide overall frame motion and optional reference points. When that file is present, the app loads it automatically. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
+When that file is present, the app loads it automatically. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
 
 ## Video Clips
 

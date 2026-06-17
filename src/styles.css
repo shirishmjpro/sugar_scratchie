@@ -29,6 +29,18 @@ button {
   padding: 12px 14px;
 }
 
+select {
+  background: #fff;
+  border: 1px solid rgba(23, 21, 19, 0.22);
+  border-radius: 8px;
+  color: #171513;
+  font: inherit;
+  font-weight: 700;
+  min-width: 0;
+  padding: 10px 12px;
+  width: 100%;
+}
+
 textarea {
   background: #171513;
   border: 0;
@@ -58,6 +70,7 @@ label {
 button:focus-visible,
 canvas:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 3px solid #2a74bf;
   outline-offset: 3px;
@@ -181,6 +194,7 @@ dt {
 
 dd {
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 760px) {
