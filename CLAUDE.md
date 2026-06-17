@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Sugar Scratchie is a single-page prototype validating one product mechanic: scratching a video-attached garment layer while the scratch mask stays in **garment-local (UV) coordinates** so scratched holes follow the moving body instead of noisy 2D silhouette edges. There is no backend — it is a Vite + React 19 + TypeScript app whose entire logic lives in one component plus an offline Python keyframe generator.
+Sugar Scratchie is a single-page prototype validating one product mechanic: scratching a video-attached garment layer while the scratch mask stays in **garment-local (UV) coordinates** so scratched holes follow the moving body instead of noisy 2D silhouette edges. There is no backend — it is a Vite + React 19 + TypeScript app whose entire logic lives in one component plus an offline Python mesh-tracking generator.
 
 ## Commands
 
@@ -17,53 +17,46 @@ npm run preview    # serve the production build on 127.0.0.1:5080
 
 There is **no test runner and no linter configured**. `npm run build` is the only correctness gate — `tsconfig.json` runs `tsc` in `strict` mode with `noEmit`, so a passing build means types are clean. Always run it after non-trivial edits.
 
-### Regenerating mesh keyframes
+### Regenerating the tracked mesh
 
 ```bash
-scripts/install-ai-mesh-deps.sh         # creates .venv311, installs the MMPose stack
-npm run generate:keyframes              # = .venv311/bin/python scripts/generate-ai-mesh-keyframes.py
+.venv/bin/pip install -r scripts/requirements-tracking.txt
+npm run generate:mesh    # = PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/generate-mesh-tracking.py
 ```
 
-The plain `pip install -r scripts/requirements-ai-mesh.txt` path is unreliable — MMPose pulls legacy transitive deps (`chumpy`, `xtcocotools`) that break installation but aren't needed here. Use the install script, which pins versions and runs `mmpose==1.3.2` with `--no-deps`. The generator needs `ffmpeg`/`ffprobe` on PATH. Useful env knobs: `MAX_FRAMES=N` (debug a few frames), `DEBUG_OVERLAY=1` (write per-frame cage overlays to `.tmp/gen_overlay`), `SAMPLE_INTERVAL_SECONDS`, `POSE_MODEL`.
+Runs CoTracker3 (dense point tracking) + SegFormer clothes-parsing on Apple-Silicon Torch **MPS** to produce `public/mesh/tracked-mesh.json`. Needs `ffmpeg`/`ffprobe` on PATH; CoTracker weights are fetched at runtime via `torch.hub`. Useful env knobs: `REF_IMAGE` (seed from a hand-picked frame, e.g. `.tmp/canvasframes/c044.png`), `FPS`, `GRID_COLS`/`GRID_ROWS`, `SMOOTH_SIGMA`, `LOOP_CLOSE`, `PER_FRAME_MASK`, `DEBUG_OVERLAY=1` (overlays to `.tmp/track_overlay`).
 
 ## Architecture
 
-### Rendering pipeline (`src/ScratchPrototype.tsx`, ~2300 lines, the whole app)
+### Rendering pipeline (`src/ScratchPrototype.tsx`, ~800 lines, the whole app)
 
-Everything renders to one `<canvas>` driven by a `requestAnimationFrame` loop inside a `useEffect`. The loop is the heart of the app — read `render()` (around line 1635) first. Each frame:
+Everything renders to one `<canvas>` driven by a `requestAnimationFrame` loop inside a `useEffect` — read `render()` first. Each frame:
 
-1. Draw the **bottom video** (`ai girl 2.mp4`) full-frame — the content revealed underneath.
-2. Chroma-key the green-screen **foreground video** (`Green bg sample 2 swap.mp4`) into an offscreen canvas (`drawChromaKeyedVideo`), producing the scratchable layer plus an `ImageData` mask.
-3. Cut holes in the foreground inside the garment region using `globalCompositeOperation = "destination-out"` for each scratch mark, then composite the foreground over the bottom.
+1. Draw the **bottom video** (`ai girl 2.mp4`) full-frame, aspect-correct (`drawVideoContain`) — the content revealed underneath.
+2. `drawTrackedForegroundLayer`: chroma-key the green-screen **foreground video** (`Green bg sample 2 swap.mp4`) into an offscreen canvas (`drawChromaKeyedVideo`), cut holes for each scratch mark with `globalCompositeOperation = "destination-out"`, then composite over the bottom.
 
-If a video is missing/unplayable, a synthetic fallback frame is drawn so the mechanic stays testable. Hot reload depends on the `useEffect` dependency array `[dressPoints, isCurvedMask, isEditingShape, keyframes, showMesh]` — adding new state that the render loop reads means adding it there.
+The render-loop `useEffect` dependency array is `[showMesh, trackedMesh]` — new state the loop reads must be added there. If no tracked mesh is loaded, only the videos draw (there is no fallback renderer).
 
 ### The coordinate model (the core idea)
 
-A `GarmentFrame` (origin + orthonormal `uAxis`/`vAxis` + width/height) defines a local box on the body. Everything maps through it:
+The garment is a **deforming triangle lattice** tracked across the clip. `tracked-mesh.json` holds a static UV grid (`cols`×`rows`) plus, per frame, each vertex's canvas position and a visibility flag. Per video-time:
 
-- `localToWorld` / `worldToLocal` — flat affine mapping between UV (u,v ∈ [0,1]) and canvas pixels.
-- `projectSurfacePoint` — the **curved (3D) mode**: wraps UV around a cylinder-like body using `STABLE_BODY_CAGE_PROFILE` for cross-section depth, applies perspective, and returns a `frontWeight` so back-facing surface points can be culled (`FRONT_SURFACE_MIN_WEIGHT`). The "Use flat mask / Use 3D mesh" toggle (`isCurvedMask`) switches between flat and curved everywhere.
-- **Scratch marks are stored as UV `{u, v, radius}`** (`ScratchMark`), never as pixels. On each pointer event `worldToMeshLocal` inverts the projection (brute-force nearest-UV search) to convert the touch to UV; on each render the marks are re-projected forward. This is what keeps holes glued to the garment as it moves.
+- `sampleTrackedMesh` interpolates vertex positions between the two bracketing frames → a `TrackedMeshSample`.
+- **Scratch marks are stored as mesh-UV `{u, v, radius}`** (`ScratchMark`), never pixels. On pointer-down, `trackedWorldToUv` inverts the deformed lattice (per-cell barycentric) to UV; each render `trackedUvToWorld` (bilinear) re-projects the marks onto the live fabric. This is what glues holes to the garment.
+- A cell renders / accepts scratches only when **all four corners are visible** (`cellVisible`) — off-body and occluded cells are skipped.
 
-The garment outline is a `DressPoint[]` (8 default handles) and the body silhouette is a denser `BODY_MESH_ROWS` cage. Reveal progress is sampled in UV space (`calculateRevealProgress`); crossing `CLAIM_THRESHOLD` (0.35) sets the "claimed" reward state.
+Reveal progress is sampled in UV space (`calculateRevealProgress`); crossing `CLAIM_THRESHOLD` (0.35) sets the "claimed" reward state.
 
-### Keyframes and tracking (two sources of garment motion)
+### Mesh discovery
 
-The garment frame + dress shape can come from either:
+Mesh JSON files are discovered via `public/mesh/index.json`, **auto-generated by a custom Vite plugin** (`mesh-json-index` in `vite.config.ts`) on build and served live in dev — do not hand-edit it. The in-app "Mesh" dropdown switches files; "Reload mesh" re-fetches. `parseTrackedMesh` validates the schema (`uv.length === cols*rows`, per-frame `verts` length match) and returns null on mismatch.
 
-1. **Offline keyframes** — `public/mesh/*.json` generated by the Python script, interpolated per video-time (`interpolateGarmentFrame`, `interpolateDressPoints`). This is the default/preferred path when a valid file is present.
-2. **Live tracking fallback** — if no keyframes load, `trackBodyFrameFromForeground` / `trackBodyPointsFromForeground` derive the cage from the chroma-keyed mask each frame (with temporal smoothing against the previous frame's refs).
+### The offline generator (`scripts/generate-mesh-tracking.py`)
 
-Mesh JSON files are discovered via `public/mesh/index.json`, which is **auto-generated by a custom Vite plugin** (`mesh-json-index` in `vite.config.ts`) on build and served live in dev — do not hand-edit `index.json`. The in-app "Mesh keyframes" dropdown lets you switch files; "Reload mesh" re-fetches. Edit mode lets you drag handles and "Save keyframe", with JSON readouts in the side panel for moving annotations into a real card definition later.
-
-### Python ↔ TypeScript contract
-
-`scripts/generate-ai-mesh-keyframes.py` runs RTMW whole-body pose detection (MMPose) to anchor a `GarmentFrame`, then scans the cleaned chroma-key silhouette per row to place left/right cage edges, and writes `{ time, frame, points }` keyframes. **Several constants are duplicated between the Python script and the TSX and must be kept in sync**: `BODY_MESH_ROWS` (row ids/v-positions the renderer expects), the fallback body profile (`FALLBACK_PROFILE` ↔ `STABLE_BODY_CAGE_PROFILE`), and `CANVAS_WIDTH`/`CANVAS_HEIGHT` (390×672). Changing cage rows or canvas size in one file requires the matching change in the other. The renderer validates and tolerates malformed JSON (`parseGeneratedKeyframes`) — keyframes with fewer than 6 points are dropped.
+Seeds a grid over the garment in the **most frontal frame** (max body area, or `REF_IMAGE`), tracks every vertex **bidirectionally** with CoTracker3 so sides that rotate into view later are captured, applies temporal smoothing + loop closure, and writes `{ uv, frames: [{ t, verts, vis }] }`. The trackable region is the chroma-key silhouette **minus the head** (SegFormer), seeded as an area-filling masked grid with per-cell validity (off-body cells get `vis = 0`). `CANVAS_WIDTH`/`CANVAS_HEIGHT` (390×672) are duplicated between the script and the TSX and must match.
 
 ## Conventions
 
-- `src/ScratchPrototype.tsx` is intentionally one large file: a top section of pure geometry/drawing helpers (no React), then the `ScratchPrototype` component. New geometry logic goes in the helper section as a standalone function, not inside the component.
-- Per-frame mutable state (marks, hover point, tracked frame, rendered points) lives in `useRef`, not `useState`, to avoid re-renders in the animation loop; React state is reserved for UI-panel display and throttled via `UI_STATE_UPDATE_INTERVAL_MS`.
-- Reusable offscreen canvases are pooled through `getReusableCanvas(id)` — reuse it rather than creating new canvases per frame.
-- Tunable magic numbers are named `const`s at the top of the file (wrap radians, depth, thresholds). Adjust those rather than inlining literals.
+- `src/ScratchPrototype.tsx` is intentionally one file: pure geometry/drawing helpers (no React) on top, then the `ScratchPrototype` component. New geometry logic goes in the helper section as a standalone function, not inside the component.
+- Per-frame mutable state (marks, hover point, tracked sample) lives in `useRef`, not `useState`, to avoid re-renders in the animation loop; React state is reserved for UI-panel display and throttled via `UI_STATE_UPDATE_INTERVAL_MS`.
+- Tunable magic numbers are named `const`s at the top of the file (thresholds, radii). Adjust those rather than inlining literals.

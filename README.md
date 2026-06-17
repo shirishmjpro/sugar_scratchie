@@ -32,30 +32,30 @@ npm run dev
 
 Then open the local Vite URL shown in the terminal.
 
-## Generate Mesh Keyframes
+## Generate the Tracked Mesh
 
-The prototype uses a single AI mesh-keyframe generator based on the RTMW whole-body pose model plus the foreground mask.
-Use Python 3.11 on this machine and install with the bootstrap script:
-
-```bash
-scripts/install-ai-mesh-deps.sh
-```
-
-That creates `.venv311` and installs the compatible MMPose stack. The plain `pip install -r scripts/requirements-ai-mesh.txt` path is still unreliable because `mmpose` declares legacy transitive packages like `chumpy` and `xtcocotools` that are not needed for this project but still break installation.
-
-Then generate keyframes from the foreground green-screen clip:
+The garment is driven by a deforming mesh tracked across the clip with
+CoTracker3 (dense point tracking), with SegFormer clothes-parsing to seed the
+grid on the dress. Install into a Python 3.11 venv (`.venv`) and run on
+Apple-Silicon MPS:
 
 ```bash
-.venv311/bin/python scripts/generate-ai-mesh-keyframes.py
+.venv/bin/pip install -r scripts/requirements-tracking.txt
+npm run generate:mesh
 ```
 
-This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds, preserves the source video aspect ratio inside the prototype canvas, runs AI pose detection, filters the chroma-keyed foreground down to likely garment pixels, and writes:
+This samples `public/cards/Green bg sample 2 swap.mp4`, seeds a grid over the
+garment in the most frontal frame, tracks every vertex bidirectionally, and
+writes:
 
 ```text
-public/mesh/generated-ai-mesh-keyframes.json
+public/mesh/tracked-mesh.json
 ```
 
-When that file is present, the app loads it automatically. If the file is missing or invalid, the prototype falls back to its current live tracker and default hand-authored keyframes.
+Useful env knobs: `REF_IMAGE` (seed from a hand-picked frame), `FPS`,
+`GRID_COLS`/`GRID_ROWS`, `SMOOTH_SIGMA`, `LOOP_CLOSE`, `DEBUG_OVERLAY=1`. The
+generator needs `ffmpeg`/`ffprobe` on PATH. The app loads the tracked mesh
+automatically.
 
 ## Video Clips
 
@@ -66,10 +66,8 @@ public/cards/ai girl 2.mp4
 public/cards/Green bg sample 2 swap.mp4
 ```
 
-The renderer draws the bottom video first, chroma-keys the green background out of the foreground video, then draws the keyed foreground video on top. Scratch marks cut holes in the foreground layer inside the editable dress shape, revealing the bottom video underneath.
+The renderer draws the bottom video first, chroma-keys the green background out of the foreground video, then draws the keyed foreground video on top. Scratch marks cut holes in the foreground layer where the tracked mesh covers the garment, revealing the bottom video underneath.
 
-The prototype starts with generated keyframes sampled across the foreground clip. Use **Edit dress shape** to tune the scratchable area at the current timestamp, then **Save keyframe** to replace or add a shape. The renderer interpolates between saved keyframes during playback. The JSON readouts expose both the current shape and saved keyframes so the annotation data can be moved into a real card definition later.
+Scratches are stored in mesh-UV coordinates and re-projected through the tracked deforming lattice each frame, so a scratched hole rides the same patch of fabric as the body moves. Use **Show/Hide mesh** to toggle the lattice overlay.
 
-Use **Use flat mask** / **Use 3D mesh** to compare a flat stable cage projection against the curved UV mesh projection. In mesh mode, the stable body cage is subdivided into a triangular UV lattice, then projected through a curved body-surface approximation. Scratches are stored in garment UV coordinates, so when the keyframed frame moves, the scratched holes move with the surface without following noisy 2D silhouette edges.
-
-The current 3D mode is still canvas-based. A later Three.js/WebGL mesh can replace the renderer while keeping the same keyframe and scratch-coordinate model.
+The renderer is still canvas-based. A later Three.js/WebGL mesh can replace it while keeping the same tracked-mesh and scratch-coordinate model.
