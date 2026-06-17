@@ -1,4 +1,4 @@
-# Install with: .venv/bin/pip install -r scripts/requirements-ai-mesh.txt
+# Install with: .venv311/bin/pip install -r scripts/requirements-ai-mesh.txt
 #
 # RTMW whole-body pose inference runs through MMPose.
 # Use Python 3.12 for a clean install path. The current MMPose dependency

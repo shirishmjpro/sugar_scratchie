@@ -2,7 +2,7 @@
 Generate mesh keyframes with AI pose anchors plus the foreground mask.
 
 Usage:
-  .venv/bin/python scripts/generate-ai-mesh-keyframes.py
+  .venv311/bin/python scripts/generate-ai-mesh-keyframes.py
 
 Install:
   scripts/install-ai-mesh-deps.sh
@@ -180,6 +180,18 @@ def chroma_key_mask(rgba):
         (green > 130) & (green_dominance > 38)
     ]
     return keyed_alpha > 72
+
+
+def garment_mask(rgba):
+    red = rgba[:, :, 0].astype(np.int16)
+    green = rgba[:, :, 1].astype(np.int16)
+    blue = rgba[:, :, 2].astype(np.int16)
+    foreground = chroma_key_mask(rgba)
+
+    is_likely_skin = (red > 145) & (green > 86) & (green < 178) & (blue < 145) & ((red - blue) > 26)
+    is_bright_garment = (red > 118) & (green > 118) & (blue > 118)
+    is_cool_garment = (blue > 118) & (green > 86) & (blue >= red - 8)
+    return foreground & ~is_likely_skin & (is_bright_garment | is_cool_garment)
 
 
 def mask_bounds(mask):
@@ -513,8 +525,9 @@ def main():
 
         rgb = np.array(Image.fromarray(rgba, mode="RGBA").convert("RGB"))
         pose = detect_pose(inferencer, rgb)
-        mask = chroma_key_mask(rgba)
-        bounds = mask_bounds(mask)
+        foreground = chroma_key_mask(rgba)
+        garment = garment_mask(rgba)
+        bounds = mask_bounds(garment) or mask_bounds(foreground)
 
         if pose:
             ai_pose_hits += 1
@@ -522,7 +535,7 @@ def main():
         else:
             frame = previous_frame or fallback_frame()
 
-        points = estimate_points(frame, mask, previous_points)
+        points = estimate_points(frame, garment, previous_points)
         keyframes.append({"time": time, "frame": round_frame(frame), "points": round_points(points)})
         previous_frame = frame
         previous_points = points
@@ -533,7 +546,7 @@ def main():
             {
                 "source": "public/cards/Green bg sample 2 swap.mp4",
                 "generatedAt": datetime.now(timezone.utc).isoformat(),
-                "generator": "ai-rtmw-mask-v1",
+                "generator": "ai-rtmw-garment-mask-v2",
                 "poseModel": POSE_MODEL,
                 "sampleIntervalSeconds": SAMPLE_INTERVAL_SECONDS,
                 "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},

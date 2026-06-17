@@ -49,7 +49,7 @@ Then generate keyframes from the foreground green-screen clip:
 .venv311/bin/python scripts/generate-ai-mesh-keyframes.py
 ```
 
-This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds, runs AI pose detection, blends that with the chroma-keyed foreground mask, and writes:
+This samples `public/cards/Green bg sample 2 swap.mp4` every 0.25 seconds, runs AI pose detection, filters the chroma-keyed foreground down to likely garment pixels, and writes:
 
 ```text
 public/mesh/generated-ai-mesh-keyframes.json

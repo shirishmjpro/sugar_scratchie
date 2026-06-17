@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "generate:keyframes": ".venv/bin/python scripts/generate-ai-mesh-keyframes.py",
+    "generate:keyframes": ".venv311/bin/python scripts/generate-ai-mesh-keyframes.py",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
