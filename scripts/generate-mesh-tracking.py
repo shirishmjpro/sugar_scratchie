@@ -44,8 +44,8 @@ CANVAS_HEIGHT = 672
 FRAME_BYTES = CANVAS_WIDTH * CANVAS_HEIGHT * 4
 FPS = float(os.environ.get("FPS", "20"))
 MAX_FRAMES = int(os.environ["MAX_FRAMES"]) if os.environ.get("MAX_FRAMES") else None
-GRID_COLS = int(os.environ.get("GRID_COLS", "16"))
-GRID_ROWS = int(os.environ.get("GRID_ROWS", "24"))
+GRID_COLS = int(os.environ.get("GRID_COLS", "24"))
+GRID_ROWS = int(os.environ.get("GRID_ROWS", "36"))
 DEVICE = os.environ.get("DEVICE", "mps")
 DEBUG_OVERLAY = bool(os.environ.get("DEBUG_OVERLAY"))
 # Temporal low-pass (in frames) to de-jitter each track. 0 disables.
