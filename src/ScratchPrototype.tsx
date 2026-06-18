@@ -40,6 +40,20 @@ const CARDS: Card[] = [
     foreground: "/cards/girl_1/foreground.mp4",
     mesh: "girl_1.json",
   },
+  {
+    id: "girl_2",
+    label: "Girl 2",
+    bottom: "/cards/girl_2/background.mp4",
+    foreground: "/cards/girl_2/foreground.mp4",
+    mesh: "girl_2.json",
+  },
+  {
+    id: "juliana_1",
+    label: "Juliana 1",
+    bottom: "/cards/juliana_1/background.mp4",
+    foreground: "/cards/juliana_1/foreground.mp4",
+    mesh: "juliana_1.json",
+  },
 ];
 
 const MESH_INDEX_SRC = "/mesh/index.json";
@@ -47,6 +61,8 @@ const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
 const CLAIM_THRESHOLD = 0.35;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
+// Scratch brush radius in garment-UV units (0..1). Smaller = finer scratches.
+const SCRATCH_RADIUS = 0.028;
 
 // Subtle virtual camera that keeps the performer's chest near a fixed framing
 // point. The chest anchor is a mesh-UV coordinate (roughly center, upper torso);
@@ -210,8 +226,15 @@ function parseTrackedMesh(value: unknown): TrackedMesh | null {
   };
 }
 
-// Interpolate vertex positions between the two source frames bracketing `time`.
-function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
+// Interpolate vertex positions between the two source frames bracketing `time`,
+// writing into a reused `store` to avoid per-frame allocation (this runs every
+// rAF). Pass the previous return value back as `store`; it is reallocated only
+// when the mesh identity/size changes.
+function sampleTrackedMesh(
+  mesh: TrackedMesh,
+  time: number,
+  store: TrackedMeshSample | null,
+): TrackedMeshSample {
   const frames = mesh.frames;
   const loopTime = frames.length > 1 ? time % (frames[frames.length - 1].t || 1) : time;
   let previous = frames[0];
@@ -226,13 +249,24 @@ function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
 
   const span = next.t - previous.t;
   const blend = span > 0 ? (loopTime - previous.t) / span : 0;
-  const verts = previous.verts.map((point, index) => {
-    const target = next.verts[index] ?? point;
-    return { x: point.x + (target.x - point.x) * blend, y: point.y + (target.y - point.y) * blend };
-  });
-  const vis = previous.vis.map((value, index) => (value && next.vis[index] ? 1 : 0));
+  const n = mesh.uv.length;
 
-  return { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis };
+  let target = store;
+  if (!target || target.verts.length !== n || target.uv !== mesh.uv) {
+    const verts: Vec2[] = new Array(n);
+    for (let i = 0; i < n; i += 1) verts[i] = { x: 0, y: 0 };
+    target = { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis: new Array(n) };
+  }
+
+  for (let i = 0; i < n; i += 1) {
+    const p = previous.verts[i];
+    const q = next.verts[i] ?? p;
+    const vert = target.verts[i];
+    vert.x = p.x + (q.x - p.x) * blend;
+    vert.y = p.y + (q.y - p.y) * blend;
+    target.vis[i] = previous.vis[i] && next.vis[i] ? 1 : 0;
+  }
+  return target;
 }
 
 function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
@@ -311,6 +345,8 @@ export function ScratchPrototype() {
   const drawingRef = useRef(false);
   const [trackedMesh, setTrackedMesh] = useState<TrackedMesh | null>(null);
   const trackedSampleRef = useRef<TrackedMeshSample | null>(null);
+  // Persistent sample reused across frames by sampleTrackedMesh (no per-frame alloc).
+  const sampleStoreRef = useRef<TrackedMeshSample | null>(null);
   const trackedMeshRef = useRef<TrackedMesh | null>(null);
   trackedMeshRef.current = trackedMesh;
   // Smoothed chest-follow camera offset, in clip units. Read by getCanvasPoint
@@ -368,7 +404,10 @@ export function ScratchPrototype() {
       const hasForegroundFrame = Boolean(foregroundVideo && foregroundVideo.readyState >= 2);
       const videoTime = bottomVideo?.currentTime ?? time;
       const trackedSample =
-        trackedMeshNow && hasForegroundFrame ? sampleTrackedMesh(trackedMeshNow, videoTime) : null;
+        trackedMeshNow && hasForegroundFrame
+          ? sampleTrackedMesh(trackedMeshNow, videoTime, sampleStoreRef.current)
+          : null;
+      sampleStoreRef.current = trackedSample ?? sampleStoreRef.current;
       trackedSampleRef.current = trackedSample;
 
       // Subtle chest-follow camera: pan toward keeping the chest anchor at its
@@ -565,8 +604,8 @@ export function ScratchPrototype() {
     const uv = trackedWorldToUv(trackedSample, point);
     if (!uv) return;
 
-    marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: 0.045 }].slice(-180);
-    glRendererRef.current?.paintScratch(uv.x, uv.y, 0.045);
+    marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: SCRATCH_RADIUS }].slice(-180);
+    glRendererRef.current?.paintScratch(uv.x, uv.y, SCRATCH_RADIUS);
     const nextProgress = calculateRevealProgress(marksRef.current);
     progressRef.current = nextProgress;
     setProgress(nextProgress);
