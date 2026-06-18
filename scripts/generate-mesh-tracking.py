@@ -60,6 +60,13 @@ PER_FRAME_MASK = os.environ.get("PER_FRAME_MASK", "0") != "0"
 # scratched holes flicker; open away isolated single-frame blips.
 VIS_CLOSE = int(os.environ.get("VIS_CLOSE", "7"))
 VIS_OPEN = int(os.environ.get("VIS_OPEN", "3"))
+# When enabled, output a full-canvas deformation field. CoTracker still only
+# tracks real performer/body points; off-body vertices inherit nearby performer
+# displacement so the mesh covers the full screen without pretending the green
+# background has trackable features.
+FULL_SCREEN_FIELD = os.environ.get("FULL_SCREEN_FIELD", "1") != "0"
+FIELD_NEIGHBORS = int(os.environ.get("FIELD_NEIGHBORS", "8"))
+FIELD_POWER = float(os.environ.get("FIELD_POWER", "2.0"))
 # Frame to seed the grid from. "auto" picks the most frontal frame (max body
 # area) so sides that rotate into view later are captured; or set an index.
 REF_FRAME = os.environ.get("REF_FRAME", "auto")
@@ -242,6 +249,64 @@ def seed_grid(mask):
     )
 
 
+def seed_canvas_grid():
+    """Lay a regular GRID_COLS x GRID_ROWS lattice over the full render canvas."""
+    uv, seeds = [], []
+    for j in range(GRID_ROWS):
+        v = j / (GRID_ROWS - 1)
+        y = (CANVAS_HEIGHT - 1) * v
+        for i in range(GRID_COLS):
+            u = i / (GRID_COLS - 1)
+            x = (CANVAS_WIDTH - 1) * u
+            uv.append([u, v])
+            seeds.append([x, y])
+    return np.array(uv, dtype=np.float32), np.array(seeds, dtype=np.float32)
+
+
+def extend_motion_to_canvas_field(target_seeds, driver_seeds, driver_tracks, driver_vis):
+    """Move full-canvas vertices using nearby performer-track displacement.
+
+    `driver_tracks` are real CoTracker outputs seeded on the performer. Each
+    target vertex blends the displacement of its nearest driver vertices, with
+    per-frame CoTracker visibility acting as confidence. If all nearby drivers
+    are invisible for a frame, it falls back to the static nearest-neighbor
+    weights to avoid holes/flicker in the full-screen field.
+    """
+    if len(driver_seeds) == 0:
+        raise SystemExit("No performer seeds available to drive full-screen field.")
+
+    neighbor_count = max(1, min(FIELD_NEIGHBORS, len(driver_seeds)))
+    distances = np.linalg.norm(target_seeds[:, None, :] - driver_seeds[None, :, :], axis=2)
+    nearest = np.argpartition(distances, neighbor_count - 1, axis=1)[:, :neighbor_count]
+    nearest_distances = np.take_along_axis(distances, nearest, axis=1)
+    base_weights = 1.0 / np.maximum(nearest_distances, 1.0) ** FIELD_POWER
+    base_denominator = base_weights.sum(axis=1, keepdims=True)
+
+    driver_displacements = driver_tracks - driver_seeds[None, :, :]
+    T = driver_tracks.shape[0]
+    tracks = np.empty((T, len(target_seeds), 2), dtype=np.float32)
+
+    for t in range(T):
+        frame_displacements = driver_displacements[t, nearest, :]
+        confidence = driver_vis[t, nearest].astype(np.float32)
+        weights = base_weights * confidence
+        denominator = weights.sum(axis=1, keepdims=True)
+
+        fallback_delta = (frame_displacements * base_weights[:, :, None]).sum(axis=1) / base_denominator
+        weighted_delta = np.divide(
+            (frame_displacements * weights[:, :, None]).sum(axis=1),
+            np.maximum(denominator, 1e-6),
+        )
+        use_fallback = denominator[:, 0] <= 1e-6
+        weighted_delta[use_fallback] = fallback_delta[use_fallback]
+        tracks[t] = target_seeds + weighted_delta
+
+    # The output field is intentionally visible everywhere. Driver visibility
+    # has already been consumed as weighting confidence above.
+    vis = np.ones((T, len(target_seeds)), dtype=np.uint8)
+    return tracks, vis
+
+
 def smooth_tracks(tracks, sigma):
     """Gaussian low-pass each vertex trajectory over time to remove jitter."""
     if sigma <= 0:
@@ -322,12 +387,12 @@ def main():
     ref_idx = pick_reference_frame(frames)
     print(f"Reference frame for seeding: {ref_idx} (t={ref_idx / FPS:.2f}s)")
     trackable = build_trackable_mask(frames[ref_idx])
-    uv, seeds, valid = seed_grid(trackable)
-    total = len(uv)
+    driver_uv, driver_seeds, valid = seed_grid(trackable)
+    total = len(driver_uv)
     valid_idx = np.where(valid)[0]
     ref_col = np.full((len(valid_idx), 1), float(ref_idx), np.float32)
-    queries = np.concatenate([ref_col, seeds[valid_idx]], axis=1)
-    print(f"Seeded {len(valid_idx)}/{total} grid cells on body ({GRID_COLS}x{GRID_ROWS} lattice)")
+    queries = np.concatenate([ref_col, driver_seeds[valid_idx]], axis=1)
+    print(f"Seeded {len(valid_idx)}/{total} grid cells on body ({GRID_COLS}x{GRID_ROWS} driver lattice)")
 
     print("Loading CoTracker3 (offline) ...")
     model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
@@ -350,25 +415,39 @@ def main():
     if LOOP_CLOSE > 0:
         print(f"Loop closure: distributed {mean_drift:.1f}px mean end-to-start drift")
 
-    # Scatter tracked (valid) cells back into the full regular grid. Invalid
-    # cells (off-body in frame 0) stay at their seed position with vis=0, which
-    # the renderer skips.
-    tracks = np.tile(seeds[None], (T, 1, 1)).astype(np.float32)  # T,total,2
-    vis = np.zeros((T, total), dtype=np.uint8)
-    tracks[:, valid_idx, :] = tracks_v
-    vis[:, valid_idx] = vis_v
-
     if PER_FRAME_MASK:
-        print("Building per-frame garment masks to refine visibility ...")
+        print("Building per-frame garment masks to refine driver visibility ...")
+        driver_tracks = np.tile(driver_seeds[None], (T, 1, 1)).astype(np.float32)
+        driver_vis = np.zeros((T, total), dtype=np.uint8)
+        driver_tracks[:, valid_idx, :] = tracks_v
+        driver_vis[:, valid_idx] = vis_v
         masks = [build_garment_mask(frames[t, :, :, :3]) for t in range(T)]
-        vis = visibility_from_masks(tracks, masks, vis)
-        print(f"Refined mean visibility {vis.mean():.2f}")
+        driver_vis = visibility_from_masks(driver_tracks, masks, driver_vis)
+        vis_v = driver_vis[:, valid_idx]
+        print(f"Refined driver mean visibility {vis_v.mean():.2f}")
 
     if VIS_CLOSE > 1 or VIS_OPEN > 1:
-        before = int(np.abs(np.diff(vis.astype(np.int16), axis=0)).sum())
-        vis = stabilize_visibility(vis, VIS_CLOSE, VIS_OPEN)
-        after = int(np.abs(np.diff(vis.astype(np.int16), axis=0)).sum())
-        print(f"Visibility stabilized: {before} -> {after} transitions")
+        before = int(np.abs(np.diff(vis_v.astype(np.int16), axis=0)).sum())
+        vis_v = stabilize_visibility(vis_v, VIS_CLOSE, VIS_OPEN)
+        after = int(np.abs(np.diff(vis_v.astype(np.int16), axis=0)).sum())
+        print(f"Driver visibility stabilized: {before} -> {after} transitions")
+
+    if FULL_SCREEN_FIELD:
+        uv, seeds = seed_canvas_grid()
+        tracks, vis = extend_motion_to_canvas_field(seeds, driver_seeds[valid_idx], tracks_v, vis_v)
+        print(
+            f"Extended performer motion to full-canvas field "
+            f"({GRID_COLS}x{GRID_ROWS}, {FIELD_NEIGHBORS} neighbors, power={FIELD_POWER:g})"
+        )
+    else:
+        # Scatter tracked (valid) cells back into the regular driver grid.
+        # Invalid cells (off-body in the reference frame) stay at their seed
+        # position with vis=0, which the renderer skips.
+        uv, seeds = driver_uv, driver_seeds
+        tracks = np.tile(seeds[None], (T, 1, 1)).astype(np.float32)  # T,total,2
+        vis = np.zeros((T, total), dtype=np.uint8)
+        tracks[:, valid_idx, :] = tracks_v
+        vis[:, valid_idx] = vis_v
 
     if DEBUG_OVERLAY:
         write_overlay(frames, tracks, vis)
@@ -387,7 +466,7 @@ def main():
     OUTPUT_JSON.write_text(json.dumps({
         "source": "public/cards/Green bg sample 2 swap.mp4",
         "generatedAt": datetime.now(timezone.utc).isoformat(),
-        "generator": "cotracker3-grid-v5",
+        "generator": "cotracker3-full-field-v6" if FULL_SCREEN_FIELD else "cotracker3-grid-v5",
         "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
         "fps": FPS,
         "durationSeconds": round(duration, 3),
@@ -397,6 +476,10 @@ def main():
         "perFrameMask": PER_FRAME_MASK,
         "visClose": VIS_CLOSE,
         "visOpen": VIS_OPEN,
+        "fullScreenField": FULL_SCREEN_FIELD,
+        "fieldNeighbors": FIELD_NEIGHBORS if FULL_SCREEN_FIELD else None,
+        "fieldPower": FIELD_POWER if FULL_SCREEN_FIELD else None,
+        "driverSeedCount": int(len(valid_idx)),
         "mesh": {"cols": GRID_COLS, "rows": GRID_ROWS},
         "uv": [[round(float(u), 4), round(float(v), 4)] for u, v in uv],
         "frames": out_frames,

@@ -44,18 +44,19 @@ Apple-Silicon MPS:
 npm run generate:mesh
 ```
 
-This samples `public/cards/Green bg sample 2 swap.mp4`, seeds a grid over the
-garment in the most frontal frame, tracks every vertex bidirectionally, and
-writes:
+This samples `public/cards/Green bg sample 2 swap.mp4`, seeds driver points over
+the performer in the most frontal frame, tracks those points bidirectionally,
+then extends their motion into a full-screen deformation field and writes:
 
 ```text
 public/mesh/tracked-mesh.json
 ```
 
 Useful env knobs: `REF_IMAGE` (seed from a hand-picked frame), `FPS`,
-`GRID_COLS`/`GRID_ROWS`, `SMOOTH_SIGMA`, `LOOP_CLOSE`, `DEBUG_OVERLAY=1`. The
-generator needs `ffmpeg`/`ffprobe` on PATH. The app loads the tracked mesh
-automatically.
+`GRID_COLS`/`GRID_ROWS`, `SMOOTH_SIGMA`, `LOOP_CLOSE`, `FIELD_NEIGHBORS`,
+`FIELD_POWER`, `FULL_SCREEN_FIELD=0` (old performer-only mesh), and
+`DEBUG_OVERLAY=1`. The generator needs `ffmpeg`/`ffprobe` on PATH. The app loads
+the tracked mesh automatically.
 
 ## Video Clips
 
