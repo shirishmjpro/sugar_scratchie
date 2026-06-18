@@ -22,6 +22,14 @@ export type GLMeshSample = {
 };
 
 const SCRATCH_TEX_SIZE = 1024;
+// Zoom applied to the presented layers (bottom video + final composite) for a
+// tighter shot framed on the performer. It doubles as pan headroom: the
+// chest-follow camera offset stays below PRESENT_ZOOM-1 so no canvas edge shows.
+export const PRESENT_ZOOM = 1.15;
+
+function clamp(value: number, lo: number, hi: number) {
+  return value < lo ? lo : value > hi ? hi : value;
+}
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string) {
   const shader = gl.createShader(type)!;
@@ -258,17 +266,25 @@ export class GarmentGLRenderer {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   }
 
-  private coverUniforms(prog: WebGLProgram, videoW: number, videoH: number) {
+  private coverUniforms(
+    prog: WebGLProgram,
+    videoW: number,
+    videoH: number,
+    camX = 0,
+    camY = 0,
+    overscan = 1,
+  ) {
     const gl = this.gl;
     // Cover: scale so the video fills the whole canvas, cropping the overflowing
     // edge (Math.max). The offline mesh generator letterboxes/crops identically
     // (force_original_aspect_ratio=increase + center crop), so the tracked verts
-    // stay aligned with the drawn pixels.
-    const scale = Math.max(this.width / videoW, this.height / videoH);
+    // stay aligned with the drawn pixels. `overscan` adds pan headroom; the
+    // camera offset is clamped to that headroom so no canvas edge is revealed.
+    const scale = Math.max(this.width / videoW, this.height / videoH) * overscan;
     const w = (videoW * scale) / this.width; // >=1: overflow is cropped at clip edges
     const h = (videoH * scale) / this.height;
     gl.uniform2f(gl.getUniformLocation(prog, "uScale"), w, h);
-    gl.uniform2f(gl.getUniformLocation(prog, "uOffset"), 0, 0);
+    gl.uniform2f(gl.getUniformLocation(prog, "uOffset"), clamp(camX, -(w - 1), w - 1), clamp(camY, -(h - 1), h - 1));
   }
 
   private uploadVideo(tex: WebGLTexture, video: HTMLVideoElement) {
@@ -277,7 +293,15 @@ export class GarmentGLRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   }
 
-  private drawVideo(prog: WebGLProgram, tex: WebGLTexture, video: HTMLVideoElement, chroma: boolean) {
+  private drawVideo(
+    prog: WebGLProgram,
+    tex: WebGLTexture,
+    video: HTMLVideoElement,
+    chroma: boolean,
+    camX = 0,
+    camY = 0,
+    overscan = 1,
+  ) {
     const gl = this.gl;
     gl.useProgram(prog);
     this.uploadVideo(tex, video);
@@ -286,7 +310,7 @@ export class GarmentGLRenderer {
     gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
     const chromaLoc = gl.getUniformLocation(prog, "uChroma");
     if (chromaLoc) gl.uniform1i(chromaLoc, chroma ? 1 : 0);
-    this.coverUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height);
+    this.coverUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height, camX, camY, overscan);
     this.bindQuad(prog);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -296,8 +320,16 @@ export class GarmentGLRenderer {
     foregroundVideo: HTMLVideoElement | null,
     sample: GLMeshSample | null,
     showMesh: boolean,
+    camera: { x: number; y: number } = { x: 0, y: 0 },
   ) {
     const gl = this.gl;
+
+    // The chest-follow camera pans the PRESENTED layers (bottom video in step 1,
+    // composite in step 4) by the same clip-space offset, with overscan headroom.
+    // The foreground-into-FBO (step 2) and hole punching (step 3) stay in the
+    // un-panned reference frame so scratch holes remain glued to the mesh.
+    const camX = clamp(camera.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
+    const camY = clamp(camera.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
 
     // 1. bottom video to screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -306,12 +338,12 @@ export class GarmentGLRenderer {
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (bottomVideo && bottomVideo.readyState >= 2) {
-      this.drawVideo(this.blit, this.bottomTex, bottomVideo, false);
+      this.drawVideo(this.blit, this.bottomTex, bottomVideo, false, camX, camY, PRESENT_ZOOM);
     }
 
     if (!foregroundVideo || foregroundVideo.readyState < 2) return;
 
-    // 2. keyed foreground into fgFbo
+    // 2. keyed foreground into fgFbo (reference frame — no camera/overscan)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
     gl.viewport(0, 0, this.width, this.height);
     gl.disable(gl.BLEND);
@@ -334,8 +366,10 @@ export class GarmentGLRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
     gl.uniform1i(gl.getUniformLocation(this.composite, "uTex"), 0);
-    gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), 1, 1);
-    gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), 0, 0);
+    // Present the FBO (foreground + holes) with the same overscan + camera pan
+    // as the bottom video so the whole shot moves together.
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), camX, camY);
     this.bindQuad(this.composite);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 

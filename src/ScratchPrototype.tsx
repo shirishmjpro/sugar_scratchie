@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { GarmentGLRenderer } from "./glRenderer";
+import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 
 type Vec2 = {
   x: number;
@@ -47,6 +47,44 @@ const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
 const CLAIM_THRESHOLD = 0.35;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
+
+// Subtle virtual camera that keeps the performer's chest near a fixed framing
+// point. The chest anchor is a mesh-UV coordinate (roughly center, upper torso);
+// each frame we sample where it lands and pan the presented shot toward the
+// target. Pan is clamped small (and < PRESENT_ZOOM-1 so no edge shows) and
+// smoothed so the move stays gentle.
+const CHEST_ANCHOR_UV = { x: 0.5, y: 0.4 };
+const CHEST_TARGET_UV = { x: 0.5, y: 0.4 };
+const CHEST_FOLLOW_STRENGTH = 0.7;
+const CHEST_CAM_MAX = Math.min(0.05, PRESENT_ZOOM - 1);
+const CHEST_SMOOTH = 0.08;
+
+function clampValue(value: number, lo: number, hi: number) {
+  return value < lo ? lo : value > hi ? hi : value;
+}
+
+// Bilinearly interpolate the deformed mesh at a fractional UV grid position to
+// get its current canvas-pixel location (the mesh UV grid is regular 0..1).
+function sampleMeshUvToWorld(sample: TrackedMeshSample, u: number, v: number): Vec2 {
+  const { cols, rows, verts } = sample;
+  const gx = clampValue(u * (cols - 1), 0, cols - 1);
+  const gy = clampValue(v * (rows - 1), 0, rows - 1);
+  const x0 = Math.floor(gx);
+  const y0 = Math.floor(gy);
+  const x1 = Math.min(cols - 1, x0 + 1);
+  const y1 = Math.min(rows - 1, y0 + 1);
+  const fx = gx - x0;
+  const fy = gy - y0;
+  const v00 = verts[y0 * cols + x0];
+  const v10 = verts[y0 * cols + x1];
+  const v01 = verts[y1 * cols + x0];
+  const v11 = verts[y1 * cols + x1];
+  const topX = v00.x + (v10.x - v00.x) * fx;
+  const topY = v00.y + (v10.y - v00.y) * fx;
+  const botX = v01.x + (v11.x - v01.x) * fx;
+  const botY = v01.y + (v11.y - v01.y) * fx;
+  return { x: topX + (botX - topX) * fy, y: topY + (botY - topY) * fy };
+}
 
 function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
   if (source.paused && !target.paused) {
@@ -275,6 +313,9 @@ export function ScratchPrototype() {
   const trackedSampleRef = useRef<TrackedMeshSample | null>(null);
   const trackedMeshRef = useRef<TrackedMesh | null>(null);
   trackedMeshRef.current = trackedMesh;
+  // Smoothed chest-follow camera offset, in clip units. Read by getCanvasPoint
+  // to invert the pan when mapping a tap back to fabric UV.
+  const cameraRef = useRef({ x: 0, y: 0 });
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
   const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[0].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
@@ -330,6 +371,23 @@ export function ScratchPrototype() {
         trackedMeshNow && hasForegroundFrame ? sampleTrackedMesh(trackedMeshNow, videoTime) : null;
       trackedSampleRef.current = trackedSample;
 
+      // Subtle chest-follow camera: pan toward keeping the chest anchor at its
+      // target framing point, clamped + smoothed.
+      const camera = cameraRef.current;
+      let targetCamX = 0;
+      let targetCamY = 0;
+      if (trackedSample) {
+        const chest = sampleMeshUvToWorld(trackedSample, CHEST_ANCHOR_UV.x, CHEST_ANCHOR_UV.y);
+        const targetPx = CANVAS_WIDTH * CHEST_TARGET_UV.x;
+        const targetPy = CANVAS_HEIGHT * CHEST_TARGET_UV.y;
+        const shiftX = (targetPx - chest.x) * CHEST_FOLLOW_STRENGTH;
+        const shiftY = (targetPy - chest.y) * CHEST_FOLLOW_STRENGTH;
+        targetCamX = clampValue(shiftX / (CANVAS_WIDTH / 2), -CHEST_CAM_MAX, CHEST_CAM_MAX);
+        targetCamY = clampValue(-shiftY / (CANVAS_HEIGHT / 2), -CHEST_CAM_MAX, CHEST_CAM_MAX);
+      }
+      camera.x += (targetCamX - camera.x) * CHEST_SMOOTH;
+      camera.y += (targetCamY - camera.y) * CHEST_SMOOTH;
+
       if (bottomVideo && foregroundVideo && bottomVideo.readyState >= 2 && foregroundVideo.readyState >= 1) {
         syncVideoTime(bottomVideo, foregroundVideo);
       }
@@ -356,7 +414,7 @@ export function ScratchPrototype() {
         }
       }
 
-      renderer.render(bottomVideo, foregroundVideo, trackedSample, showMeshRef.current);
+      renderer.render(bottomVideo, foregroundVideo, trackedSample, showMeshRef.current, camera);
       animationId = requestAnimationFrame(render);
     };
 
@@ -482,9 +540,17 @@ export function ScratchPrototype() {
     if (!canvas) return null;
 
     const rect = canvas.getBoundingClientRect();
+    // Screen -> presented canvas pixels.
+    const presentX = ((clientX - rect.left) / rect.width) * CANVAS_WIDTH;
+    const presentY = ((clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
+    // Invert the chest-follow camera (overscan + clip-space pan) so a tap maps to
+    // the reference-frame fabric coordinate the mesh/holes live in.
+    const cam = cameraRef.current;
+    const refClipX = (presentX / CANVAS_WIDTH * 2 - 1 - cam.x) / PRESENT_ZOOM;
+    const refClipY = (1 - presentY / CANVAS_HEIGHT * 2 - cam.y) / PRESENT_ZOOM;
     return {
-      x: ((clientX - rect.left) / rect.width) * CANVAS_WIDTH,
-      y: ((clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
+      x: (refClipX + 1) / 2 * CANVAS_WIDTH,
+      y: (1 - refClipY) / 2 * CANVAS_HEIGHT,
     };
   }
 
