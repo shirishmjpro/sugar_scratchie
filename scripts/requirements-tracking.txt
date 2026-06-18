@@ -5,6 +5,10 @@
 # CoTracker3 itself is fetched at runtime via torch.hub
 # (facebookresearch/co-tracker, weights from huggingface.co/facebook/cotracker3),
 # so it is not pinned here.
+#
+# BootsTAPIR (TRACKER=bootstapir|blend) runs the DeepMind torch port vendored
+# under scripts/vendor/tapnet_torch. Its checkpoint is fetched once at runtime to
+# ~/.cache/tapnet/bootstapir_checkpoint_v2.pt. The port needs dm-tree + einshape.
 torch>=2.12.0
 torchvision
 numpy>=2.0.0
@@ -14,3 +18,5 @@ einops
 imageio
 imageio-ffmpeg
 tqdm
+dm-tree
+einshape

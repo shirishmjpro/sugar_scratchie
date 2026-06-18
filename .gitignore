@@ -6,6 +6,7 @@ dist/
 .venv311/
 __pycache__/
 *.py[cod]
+.playwright-mcp/
 
 # Generated ControlNet frames and output
 public/cards/controlnet-frames/

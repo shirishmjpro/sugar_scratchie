@@ -54,9 +54,11 @@ public/mesh/tracked-mesh.json
 
 Useful env knobs: `REF_IMAGE` (seed from a hand-picked frame), `FPS`,
 `GRID_COLS`/`GRID_ROWS`, `SMOOTH_SIGMA`, `LOOP_CLOSE`, `FIELD_NEIGHBORS`,
-`FIELD_POWER`, `FULL_SCREEN_FIELD=0` (old performer-only mesh), and
-`DEBUG_OVERLAY=1`. The generator needs `ffmpeg`/`ffprobe` on PATH. The app loads
-the tracked mesh automatically.
+`FIELD_POWER`, `EXTRA_DRIVER_POINTS` (extra hand/edge tracking seeds),
+`FULL_SCREEN_FIELD=0` (old performer-only mesh), and `DEBUG_OVERLAY=1`. With
+debug overlays enabled, `trk*.png` shows the output field and `drv*.png` shows
+the raw performer driver points. The generator needs `ffmpeg`/`ffprobe` on PATH.
+The app loads the tracked mesh automatically.
 
 ## Video Clips
 

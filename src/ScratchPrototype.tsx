@@ -14,8 +14,34 @@ type ScratchMark = {
 
 const CANVAS_WIDTH = 390;
 const CANVAS_HEIGHT = 672;
-const BOTTOM_VIDEO_SRC = "/cards/ai%20girl%202.mp4";
-const FOREGROUND_VIDEO_SRC = "/cards/Green%20bg%20sample%202%20swap.mp4";
+// A card pairs the reveal (bottom) video, the green-screen foreground video, and
+// the tracked mesh generated from that foreground. Switching cards swaps all
+// three together so the scratch holes line up with the right clip.
+type Card = {
+  id: string;
+  label: string;
+  bottom: string;
+  foreground: string;
+  mesh: string;
+};
+
+const CARDS: Card[] = [
+  {
+    id: "original",
+    label: "Original",
+    bottom: "/cards/ai%20girl%202.mp4",
+    foreground: "/cards/Green%20bg%20sample%202%20swap.mp4",
+    mesh: "tracked-mesh.json",
+  },
+  {
+    id: "girl_1",
+    label: "Girl 1",
+    bottom: "/cards/girl_1/background.mp4",
+    foreground: "/cards/girl_1/foreground.mp4",
+    mesh: "girl_1.json",
+  },
+];
+
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
@@ -250,8 +276,10 @@ export function ScratchPrototype() {
   const trackedMeshRef = useRef<TrackedMesh | null>(null);
   trackedMeshRef.current = trackedMesh;
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
-  const [selectedMeshFile, setSelectedMeshFile] = useState("");
+  const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[0].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
+  const [selectedCardId, setSelectedCardId] = useState(CARDS[0].id);
+  const card = CARDS.find((entry) => entry.id === selectedCardId) ?? CARDS[0];
   // The mesh lattice is a dev overlay — default it off on phones (where the
   // toggle is hidden).
   const [showMesh, setShowMesh] = useState(
@@ -378,6 +406,19 @@ export function ScratchPrototype() {
     };
   }, [meshReloadToken, selectedMeshFile]);
 
+  // Switching cards: load that card's mesh and clear scratches/progress so holes
+  // from the previous clip don't carry over onto the new fabric.
+  useEffect(() => {
+    setSelectedMeshFile(card.mesh);
+    marksRef.current = [];
+    glRendererRef.current?.clearScratch();
+    progressRef.current = 0;
+    claimedRef.current = false;
+    setProgress(0);
+    setClaimed(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCardId]);
+
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
     const foregroundVideo = foregroundVideoRef.current;
@@ -410,19 +451,30 @@ export function ScratchPrototype() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
   }
 
+  function resetScratch() {
+    marksRef.current = [];
+    glRendererRef.current?.clearScratch();
+    progressRef.current = 0;
+    claimedRef.current = false;
+    setProgress(0);
+    setClaimed(false);
+  }
+
+  // On phones the canvas is centered with a translate that fills the screen, so
+  // the magnify scale has to be composed on top of it rather than replacing it.
+  const canvasBaseTransform = () => (isPhoneLayout() ? "translate(-50%, -50%) " : "");
+
   function applyScratchZoom(point: Vec2) {
     const canvas = canvasRef.current;
-    // On phones the canvas is centered with a transform and fills the screen —
-    // don't override it (and skip the magnify effect).
-    if (!canvas || isPhoneLayout()) return;
+    if (!canvas) return;
     canvas.style.transformOrigin = `${(point.x / CANVAS_WIDTH) * 100}% ${(point.y / CANVAS_HEIGHT) * 100}%`;
-    canvas.style.transform = "scale(1.35)";
+    canvas.style.transform = `${canvasBaseTransform()}scale(1.35)`;
   }
 
   function clearScratchZoom() {
     const canvas = canvasRef.current;
-    if (!canvas || isPhoneLayout()) return;
-    canvas.style.transform = "scale(1)";
+    if (!canvas) return;
+    canvas.style.transform = `${canvasBaseTransform()}scale(1)`;
   }
 
   function getCanvasPoint(clientX: number, clientY: number) {
@@ -505,7 +557,7 @@ export function ScratchPrototype() {
             loop
             playsInline
             preload="auto"
-            src={BOTTOM_VIDEO_SRC}
+            src={card.bottom}
           />
           <video
             ref={foregroundVideoRef}
@@ -515,7 +567,7 @@ export function ScratchPrototype() {
             loop
             playsInline
             preload="auto"
-            src={FOREGROUND_VIDEO_SRC}
+            src={card.foreground}
           />
           <canvas
             ref={canvasRef}
@@ -549,9 +601,47 @@ export function ScratchPrototype() {
               clearScratchZoom();
             }}
           />
-          <div className="stage-status">
-            <strong>{claimed ? "Dress reveal completed" : "Scratch the foreground video"}</strong>
-            <span>{Math.round(progress * 100)}% revealed</span>
+          {/* Phones hide the dev panel, so surface compact controls on the stage
+              itself. Hidden on desktop where the panel is used. */}
+          <div className="mobile-controls">
+            <label className="mobile-card-switch">
+              <span className="visually-hidden">Card</span>
+              <select
+                aria-label="Card clip"
+                onChange={(event) => setSelectedCardId(event.currentTarget.value)}
+                value={selectedCardId}
+              >
+                {CARDS.map((entry) => (
+                  <option
+                    key={entry.id}
+                    value={entry.id}
+                  >
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="mobile-reset"
+              aria-label="Reset scratch"
+              onClick={resetScratch}
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+            </button>
           </div>
         </div>
         <aside className="panel">
@@ -559,6 +649,23 @@ export function ScratchPrototype() {
             <p className="eyebrow">Milestone 1</p>
             <h1>Full Dress Scratch Test</h1>
           </div>
+          <label>
+            Card
+            <select
+              aria-label="Card clip"
+              onChange={(event) => setSelectedCardId(event.currentTarget.value)}
+              value={selectedCardId}
+            >
+              {CARDS.map((entry) => (
+                <option
+                  key={entry.id}
+                  value={entry.id}
+                >
+                  {entry.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             Mesh
             <select
@@ -602,14 +709,7 @@ export function ScratchPrototype() {
             <button
               type="button"
               className="secondary-button"
-              onClick={() => {
-                marksRef.current = [];
-                glRendererRef.current?.clearScratch();
-                progressRef.current = 0;
-                claimedRef.current = false;
-                setProgress(0);
-                setClaimed(false);
-              }}
+              onClick={resetScratch}
             >
               Reset scratch
             </button>

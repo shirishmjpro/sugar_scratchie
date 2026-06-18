@@ -1,7 +1,7 @@
 // WebGL2 renderer for the scratch prototype.
 //
 // Compositing pipeline (per frame):
-//   1. bottom video  -> screen, aspect-contained
+//   1. bottom video  -> screen, aspect-cover (fills canvas, crops overflow)
 //   2. foreground video -> offscreen FBO, chroma-keyed in the fragment shader
 //   3. tracked mesh triangles -> punch holes in that FBO wherever the UV-space
 //      scratch texture is marked (multiplies dst alpha by 1 - scratch)
@@ -258,10 +258,14 @@ export class GarmentGLRenderer {
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   }
 
-  private containUniforms(prog: WebGLProgram, videoW: number, videoH: number) {
+  private coverUniforms(prog: WebGLProgram, videoW: number, videoH: number) {
     const gl = this.gl;
-    const scale = Math.min(this.width / videoW, this.height / videoH);
-    const w = (videoW * scale) / this.width; // 0..1 fraction of canvas
+    // Cover: scale so the video fills the whole canvas, cropping the overflowing
+    // edge (Math.max). The offline mesh generator letterboxes/crops identically
+    // (force_original_aspect_ratio=increase + center crop), so the tracked verts
+    // stay aligned with the drawn pixels.
+    const scale = Math.max(this.width / videoW, this.height / videoH);
+    const w = (videoW * scale) / this.width; // >=1: overflow is cropped at clip edges
     const h = (videoH * scale) / this.height;
     gl.uniform2f(gl.getUniformLocation(prog, "uScale"), w, h);
     gl.uniform2f(gl.getUniformLocation(prog, "uOffset"), 0, 0);
@@ -282,7 +286,7 @@ export class GarmentGLRenderer {
     gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
     const chromaLoc = gl.getUniformLocation(prog, "uChroma");
     if (chromaLoc) gl.uniform1i(chromaLoc, chroma ? 1 : 0);
-    this.containUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height);
+    this.coverUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height);
     this.bindQuad(prog);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
