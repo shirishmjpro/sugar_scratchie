@@ -43,9 +43,13 @@ from pathlib import Path
 API_BASE = os.environ.get("XAI_API_BASE", "https://api.x.ai")
 EDITS_PATH = "/v1/videos/edits"
 POLL_PATH = "/v1/videos/{request_id}"
+CHAT_PATH = "/v1/chat/completions"
+# Chat model used by --enhance to rewrite the edit prompt. Override if your
+# account uses a different id (e.g. grok-3, grok-4-latest).
+DEFAULT_CHAT_MODEL = os.environ.get("XAI_CHAT_MODEL", "grok-4")
 # Model id for video ops. Docs reference both "grok-imagine-video" and
 # "grok-imagine-video-1.5"; override with --model if the API complains.
-DEFAULT_MODEL = os.environ.get("XAI_VIDEO_MODEL", "grok-imagine-video")
+DEFAULT_MODEL = os.environ.get("XAI_VIDEO_MODEL", "grok-imagine-video-1.5")
 # JSON field that carries the input video for /v1/videos/edits. Image endpoints
 # use image:{url}; we mirror that as video:{url}. Override with --video-field.
 DEFAULT_VIDEO_FIELD = os.environ.get("XAI_VIDEO_FIELD", "video")
@@ -112,6 +116,39 @@ def to_data_uri(path: Path) -> str:
     return f"data:video/mp4;base64,{b64}"
 
 
+ENHANCE_SYSTEM = (
+    "You rewrite a short clothing-change instruction into a single precise prompt "
+    "for a video EDIT model. Rules: (1) The ONLY change allowed is the dress/outfit "
+    "described. Describe it vividly (fabric, color, cut, length, fit). (2) Then "
+    "explicitly command the model to keep EVERYTHING else identical: the same "
+    "person, face, identity, hair, skin, body, pose, hands, motion, camera, "
+    "framing, background, lighting, shadows and colors. (3) Do NOT add scenery, "
+    "style, mood, camera moves, effects or details that are not in the input. "
+    "(4) Output ONLY the rewritten prompt, one paragraph, no preamble or quotes."
+)
+
+
+def enhance_prompt(prompt, key, model):
+    """Rewrite the edit instruction via a Grok chat model into a tighter,
+    preservation-focused prompt. Returns the rewritten text (falls back to the
+    original on any unexpected response)."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": ENHANCE_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.4,
+    }
+    result = api_post(CHAT_PATH, payload, key)
+    try:
+        text = result["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        print("Enhance: unexpected chat response, using original prompt.")
+        return prompt
+    return text or prompt
+
+
 def api_post(path, payload, key):
     req = urllib.request.Request(
         API_BASE + path,
@@ -149,6 +186,11 @@ def main():
     parser.add_argument("--out", default=".tmp/grok-edit.mp4", help="Where to save the edited video")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Override the video model id")
     parser.add_argument("--video-field", default=DEFAULT_VIDEO_FIELD, help="Request body field for the input video")
+    parser.add_argument("--enhance", action="store_true",
+                        help="Rewrite the prompt via a Grok chat model for tighter, preservation-focused edits")
+    parser.add_argument("--enhance-model", default=DEFAULT_CHAT_MODEL, help="Chat model id used by --enhance")
+    parser.add_argument("--resolution", default="720p",
+                        help="Output resolution: 720p (max detail), 480p, auto, or '' to omit the field")
     args = parser.parse_args()
 
     key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
@@ -167,8 +209,16 @@ def main():
         video_value = {"url": to_data_uri(src)}
         print("Encoded original video inline (base64 data URI, no conversion).")
 
-    payload = {"model": args.model, "prompt": args.prompt, args.video_field: video_value}
-    print(f"Submitting edit to {API_BASE}{EDITS_PATH} (model={args.model}) ...")
+    prompt = args.prompt
+    if args.enhance:
+        print(f"Enhancing prompt via {args.enhance_model} ...")
+        prompt = enhance_prompt(args.prompt, key, args.enhance_model)
+        print(f"Enhanced prompt:\n  {prompt}\n")
+
+    payload = {"model": args.model, "prompt": prompt, args.video_field: video_value}
+    if args.resolution:
+        payload["resolution"] = args.resolution
+    print(f"Submitting edit to {API_BASE}{EDITS_PATH} (model={args.model}, resolution={args.resolution or 'default'}) ...")
     submit = api_post(EDITS_PATH, payload, key)
     request_id = submit.get("request_id") or submit.get("id")
     if not request_id:

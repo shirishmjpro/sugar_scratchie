@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:api": ".venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8090",
     "generate:mesh": "PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/generate-mesh-tracking.py",
     "build": "tsc && vite build",
     "preview": "vite preview"

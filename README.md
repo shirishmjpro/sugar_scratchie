@@ -32,6 +32,21 @@ npm run dev
 
 Then open the local Vite URL shown in the terminal.
 
+## Dashboard
+
+The operator dashboard is available at `/dashboard` and uses a local FastAPI
+backend to run the mesh and Grok edit scripts.
+
+```bash
+.venv/bin/pip install -r backend/requirements.txt
+npm run dev:api
+npm run dev
+```
+
+Open `http://localhost:5080/dashboard`. The dashboard can scan cards/meshes,
+start mesh-generation jobs, start Grok dress-edit jobs, cancel running jobs, and
+show script logs.
+
 ## Generate the Tracked Mesh
 
 The garment is driven by a deforming mesh tracked across the clip with

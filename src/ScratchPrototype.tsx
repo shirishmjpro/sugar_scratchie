@@ -378,6 +378,21 @@ export function ScratchPrototype() {
     lastUpdatedAt: 0,
   });
 
+  function tryPlayVideos() {
+    const bottomVideo = bottomVideoRef.current;
+    const foregroundVideo = foregroundVideoRef.current;
+    if (!bottomVideo || !foregroundVideo) return;
+
+    for (const video of [bottomVideo, foregroundVideo]) {
+      video.muted = true;
+      video.defaultMuted = true;
+      video.playsInline = true;
+    }
+
+    void bottomVideo.play().catch(() => undefined);
+    void foregroundVideo.play().catch(() => undefined);
+  }
+
   // Create the WebGL renderer once so the scratch texture persists across mesh
   // / showMesh changes (those are read live via refs).
   useEffect(() => {
@@ -513,6 +528,11 @@ export function ScratchPrototype() {
     claimedRef.current = false;
     setProgress(0);
     setClaimed(false);
+    requestAnimationFrame(() => {
+      bottomVideoRef.current?.load();
+      foregroundVideoRef.current?.load();
+      tryPlayVideos();
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCardId]);
 
@@ -529,10 +549,10 @@ export function ScratchPrototype() {
         isPaused: bottomVideo.paused,
       };
       setDuration(nextDuration);
-      void bottomVideo.play().catch(() => undefined);
+      tryPlayVideos();
     };
     const onForegroundCanPlay = () => {
-      void foregroundVideo.play().catch(() => undefined);
+      tryPlayVideos();
     };
 
     bottomVideo.addEventListener("canplay", onBottomCanPlay);
@@ -679,6 +699,7 @@ export function ScratchPrototype() {
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
+              tryPlayVideos();
               drawingRef.current = true;
               const point = getCanvasPoint(event.clientX, event.clientY);
               hoverPointRef.current = point;

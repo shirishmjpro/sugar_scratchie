@@ -43,8 +43,42 @@ The key can be `XAI_API_KEY` or `GROK_API_KEY`.
 | `--out` | `.tmp/grok-edit.mp4` | Where to save the edited video. |
 | `--model` | `grok-imagine-video` | Override the video model id. |
 | `--video-field` | `video` | Request-body field name for the input video. |
+| `--enhance` | off | Rewrite the prompt via a Grok chat model before editing (see below). |
+| `--enhance-model` | `grok-4` | Chat model id used by `--enhance`. |
+| `--resolution` | `720p` | Output resolution: `720p` (max detail), `480p`, `auto`, or `''` to omit. |
 
-Environment overrides: `XAI_API_BASE`, `XAI_VIDEO_MODEL`, `XAI_VIDEO_FIELD`.
+### Accuracy levers
+
+The video-edit endpoint exposes almost no accuracy controls — there is **no seed,
+strength, negative prompt, or guidance scale**. The only things that affect
+quality are: the **prompt** (use `--enhance`), **`--resolution 720p`** (max
+detail), the **`--model`** (use the latest, e.g. `grok-imagine-video-1.5`), and
+the quality of your input clip. Anything beyond that (region locking, frame
+locking) must be done with a mask/mesh pipeline, not request parameters.
+
+Environment overrides: `XAI_API_BASE`, `XAI_VIDEO_MODEL`, `XAI_VIDEO_FIELD`, `XAI_CHAT_MODEL`.
+
+## Prompt enhancer (`--enhance`)
+
+With `--enhance`, the script first calls a Grok **chat** model
+(`POST /v1/chat/completions`) to rewrite your short instruction into a tighter,
+preservation-focused edit prompt — it describes the new dress vividly and then
+explicitly commands the model to keep the person, face, pose, background,
+lighting and colors unchanged. The rewritten prompt is printed, then used for the
+edit.
+
+```bash
+XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
+  --video public/cards/girl_2/foreground.mp4 \
+  --prompt "red satin gown" \
+  --enhance \
+  --out .tmp/girl_2_red.mp4
+```
+
+Cost: one extra (cheap) text call per run. It improves prompt adherence but is
+**steering, not a guarantee** — the edit endpoint still has no mask, so non-dress
+pixels can drift. If `--enhance-model` is wrong for your account, override it
+(e.g. `--enhance-model grok-3`) or set `XAI_CHAT_MODEL`.
 
 ## Grok limits
 
