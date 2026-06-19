@@ -45,7 +45,8 @@ npm run dev
 
 Open `http://localhost:5080/dashboard`. The dashboard can scan cards/meshes,
 start mesh-generation jobs, start Grok dress-edit jobs, cancel running jobs, and
-show script logs.
+show script logs. It also includes an image-to-video-to-dress-edit flow; see
+[`docs/image-dress-flow.md`](docs/image-dress-flow.md).
 
 ## Generate the Tracked Mesh
 

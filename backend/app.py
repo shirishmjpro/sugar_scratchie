@@ -89,6 +89,20 @@ class GrokEditRequest(BaseModel):
     video_field: str = "video"
 
 
+class ImageDressFlowRequest(BaseModel):
+    image: str
+    motion_prompt: str = Field(min_length=1)
+    dress_prompt: str = Field(min_length=1)
+    base_video_out: str = ".tmp/image-video-base.mp4"
+    out: str = ".tmp/image-dress-video.mp4"
+    enhance_dress_prompt: bool = True
+    model: str = "grok-imagine-video-1.5"
+    resolution: str = "720p"
+    image_field: str = "image"
+    video_field: str = "video"
+    endpoint: str = "/v1/videos/generations"
+
+
 @dataclass
 class Job:
     id: str
@@ -301,6 +315,44 @@ def grok_edit(request: GrokEditRequest) -> dict:
     if request.enhance:
         command.append("--enhance")
     job = enqueue("grok-edit", command, {})
+    return job.public()
+
+
+@app.post("/api/jobs/image-dress-flow")
+def image_dress_flow(request: ImageDressFlowRequest) -> dict:
+    if request.image.startswith(("http://", "https://")):
+        image_arg = request.image
+    else:
+        image_arg = relative(workspace_path(request.image, must_exist=True))
+    base_out = relative(workspace_path(request.base_video_out))
+    out = relative(workspace_path(request.out))
+    command = [
+        PYTHON_CMD,
+        "scripts/grok-image-dress-flow.py",
+        "--image",
+        image_arg,
+        "--motion-prompt",
+        request.motion_prompt,
+        "--dress-prompt",
+        request.dress_prompt,
+        "--base-video-out",
+        base_out,
+        "--out",
+        out,
+        "--model",
+        request.model,
+        "--resolution",
+        request.resolution,
+        "--image-field",
+        request.image_field,
+        "--video-field",
+        request.video_field,
+        "--endpoint",
+        request.endpoint,
+    ]
+    if request.enhance_dress_prompt:
+        command.append("--enhance-dress-prompt")
+    job = enqueue("image-dress-flow", command, {})
     return job.public()
 
 

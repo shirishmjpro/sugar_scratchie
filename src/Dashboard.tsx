@@ -84,6 +84,15 @@ export function Dashboard() {
   const [grokOut, setGrokOut] = useState(".tmp/grok-edit.mp4");
   const [enhancePrompt, setEnhancePrompt] = useState(true);
   const [resolution, setResolution] = useState("720p");
+  const [sourceImage, setSourceImage] = useState("public/images/source.png");
+  const [motionPrompt, setMotionPrompt] = useState(
+    "Animate this still portrait into a short natural fashion video with subtle body movement and a steady camera.",
+  );
+  const [flowDressPrompt, setFlowDressPrompt] = useState(
+    "Replace only her dress with a fitted emerald satin dress. Keep the same person, face, hair, pose, motion, lighting and background.",
+  );
+  const [flowBaseOut, setFlowBaseOut] = useState(".tmp/image-video-base.mp4");
+  const [flowOut, setFlowOut] = useState(".tmp/image-dress-video.mp4");
 
   const selectedCard = useMemo(() => {
     return assets.cards.find((card) => card.id === selectedCardId) ?? assets.cards[0];
@@ -145,6 +154,27 @@ export function Dashboard() {
           prompt: grokPrompt,
           out: grokOut,
           enhance: enhancePrompt,
+          resolution,
+        }),
+      });
+      await refreshJobs();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function startImageDressFlow() {
+    setError("");
+    try {
+      await api<JobInfo>("/api/jobs/image-dress-flow", {
+        method: "POST",
+        body: JSON.stringify({
+          image: sourceImage,
+          motion_prompt: motionPrompt,
+          dress_prompt: flowDressPrompt,
+          base_video_out: flowBaseOut,
+          out: flowOut,
+          enhance_dress_prompt: enhancePrompt,
           resolution,
         }),
       });
@@ -245,6 +275,59 @@ export function Dashboard() {
             onClick={startMeshJob}
           >
             Start mesh job
+          </button>
+        </div>
+
+        <div className="tool-panel">
+          <div className="panel-heading">
+            <h2>Image To Dress Video</h2>
+            <span>Chained flow</span>
+          </div>
+          <label>
+            Source image path or URL
+            <input
+              value={sourceImage}
+              onChange={(event) => setSourceImage(event.currentTarget.value)}
+              type="text"
+            />
+          </label>
+          <label>
+            Motion prompt
+            <textarea
+              value={motionPrompt}
+              onChange={(event) => setMotionPrompt(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Dress edit prompt
+            <textarea
+              value={flowDressPrompt}
+              onChange={(event) => setFlowDressPrompt(event.currentTarget.value)}
+            />
+          </label>
+          <div className="inline-fields">
+            <label>
+              Base video output
+              <input
+                value={flowBaseOut}
+                onChange={(event) => setFlowBaseOut(event.currentTarget.value)}
+                type="text"
+              />
+            </label>
+            <label>
+              Final video output
+              <input
+                value={flowOut}
+                onChange={(event) => setFlowOut(event.currentTarget.value)}
+                type="text"
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={startImageDressFlow}
+          >
+            Start image flow
           </button>
         </div>
 
