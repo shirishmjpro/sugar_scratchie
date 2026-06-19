@@ -54,6 +54,13 @@ const CARDS: Card[] = [
     foreground: "/cards/juliana_1/foreground.mp4",
     mesh: "juliana_1.json",
   },
+  {
+    id: "juliana_2",
+    label: "Juliana 2",
+    bottom: "/cards/juliana_2/background.mp4",
+    foreground: "/cards/juliana_2/foreground.mp4",
+    mesh: "juliana_2.json",
+  },
 ];
 
 const MESH_INDEX_SRC = "/mesh/index.json";

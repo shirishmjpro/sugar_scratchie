@@ -47,9 +47,9 @@ CHAT_PATH = "/v1/chat/completions"
 # Chat model used by --enhance to rewrite the edit prompt. Override if your
 # account uses a different id (e.g. grok-3, grok-4-latest).
 DEFAULT_CHAT_MODEL = os.environ.get("XAI_CHAT_MODEL", "grok-4")
-# Model id for video ops. Docs reference both "grok-imagine-video" and
-# "grok-imagine-video-1.5"; override with --model if the API complains.
-DEFAULT_MODEL = os.environ.get("XAI_VIDEO_MODEL", "grok-imagine-video-1.5")
+# Model id for video edits. Keep this separate from image/video generation
+# because some generation models are rejected by /v1/videos/edits.
+DEFAULT_MODEL = os.environ.get("XAI_VIDEO_EDIT_MODEL", "grok-imagine-video")
 # JSON field that carries the input video for /v1/videos/edits. Image endpoints
 # use image:{url}; we mirror that as video:{url}. Override with --video-field.
 DEFAULT_VIDEO_FIELD = os.environ.get("XAI_VIDEO_FIELD", "video")
@@ -85,9 +85,49 @@ def probe(path):
     }
 
 
+def compatible_size(width: int, height: int) -> tuple[int, int]:
+    short_side = min(width, height)
+    if short_side <= MAX_SHORT_SIDE:
+        return width, height
+    scale = MAX_SHORT_SIDE / short_side
+    next_width = max(2, round(width * scale / 2) * 2)
+    next_height = max(2, round(height * scale / 2) * 2)
+    return next_width, next_height
+
+
+def prepare_compatible_video(src: Path) -> Path:
+    meta = probe(src)
+    next_width, next_height = compatible_size(meta["width"], meta["height"])
+    if (next_width, next_height) == (meta["width"], meta["height"]):
+        return src
+
+    out = src.parent / f"{src.stem}-grok-compatible.mp4"
+    print(
+        "Preparing Grok-compatible copy: "
+        f"{meta['width']}x{meta['height']} -> {next_width}x{next_height}"
+    )
+    run([
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-vf",
+        f"scale={next_width}:{next_height}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(out),
+    ])
+    return out
+
+
 def check_grok_limits(src: Path) -> None:
-    """Reject the clip if it exceeds Grok's edit limits. We never convert or
-    downscale — the upload is the original file untouched."""
+    """Reject the clip if it exceeds Grok's edit limits."""
     meta = probe(src)
     print(f"Input: {meta['width']}x{meta['height']} {meta['codec']} {meta['duration']:.2f}s")
 
@@ -191,6 +231,8 @@ def main():
     parser.add_argument("--enhance-model", default=DEFAULT_CHAT_MODEL, help="Chat model id used by --enhance")
     parser.add_argument("--resolution", default="720p",
                         help="Output resolution: 720p (max detail), 480p, auto, or '' to omit the field")
+    parser.add_argument("--prepare-compatible", action="store_true",
+                        help="Downscale a local input copy when needed so Grok accepts the edit upload")
     args = parser.parse_args()
 
     key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
@@ -205,9 +247,11 @@ def main():
         src = Path(args.video)
         if not src.exists():
             sys.exit(f"Video not found: {src}")
+        if args.prepare_compatible:
+            src = prepare_compatible_video(src)
         check_grok_limits(src)
         video_value = {"url": to_data_uri(src)}
-        print("Encoded original video inline (base64 data URI, no conversion).")
+        print("Encoded video inline (base64 data URI).")
 
     prompt = args.prompt
     if args.enhance:

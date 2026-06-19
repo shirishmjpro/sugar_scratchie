@@ -52,11 +52,11 @@ The key can be `XAI_API_KEY` or `GROK_API_KEY`.
 The video-edit endpoint exposes almost no accuracy controls — there is **no seed,
 strength, negative prompt, or guidance scale**. The only things that affect
 quality are: the **prompt** (use `--enhance`), **`--resolution 720p`** (max
-detail), the **`--model`** (use the latest, e.g. `grok-imagine-video-1.5`), and
+detail), the **`--model`** (default `grok-imagine-video` for edits), and
 the quality of your input clip. Anything beyond that (region locking, frame
 locking) must be done with a mask/mesh pipeline, not request parameters.
 
-Environment overrides: `XAI_API_BASE`, `XAI_VIDEO_MODEL`, `XAI_VIDEO_FIELD`, `XAI_CHAT_MODEL`.
+Environment overrides: `XAI_API_BASE`, `XAI_VIDEO_EDIT_MODEL`, `XAI_VIDEO_FIELD`, `XAI_CHAT_MODEL`.
 
 ## Prompt enhancer (`--enhance`)
 
@@ -110,8 +110,8 @@ This is a **prompt-driven** edit, not a masked one — so steer it explicitly:
 - **Schema may need a nudge.** The exact `/v1/videos/edits` input-video field
   name and model id aren't fully published. Defaults here are `video: {url}` and
   `grok-imagine-video`. If the API returns an error, it is printed verbatim; flip
-  `--video-field` (e.g. `video_url`) and/or `--model` (e.g.
-  `grok-imagine-video-1.5`) to match what your account expects.
+  `--video-field` (e.g. `video_url`) and/or set `XAI_VIDEO_EDIT_MODEL` to match
+  what your account expects.
 
 ## Using the result in this app
 
@@ -126,7 +126,7 @@ regenerate its tracked mesh — see the "Regenerating the tracked mesh" section 
 | Symptom | Fix |
 |---------|-----|
 | `Set XAI_API_KEY ...` | Export `XAI_API_KEY` (or `GROK_API_KEY`). |
-| `API error 4xx ... model` | Try `--model grok-imagine-video-1.5`. |
+| `API error 4xx ... model` | Set `XAI_VIDEO_EDIT_MODEL` or pass `--model` to an edit-capable model. |
 | `API error 4xx` mentioning the video field | Try `--video-field video_url`. |
 | `Incompatible with Grok ...` | Provide a clip within ≤8.7 s and ≤720p. |
 | `Encoded video is N MB (> cap)` | Host the clip; pass an `https` URL to `--video`. |

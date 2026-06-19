@@ -1,27 +1,60 @@
 from __future__ import annotations
 
 import os
-import signal
-import subprocess
+import re
+import shutil
 import sys
 import threading
 import time
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
+from io import TextIOBase
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
+from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
+from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
+from backend.services.mesh_tracking import generate_mesh as run_generate_mesh
 
 
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ROOT / "public"
 CARDS_DIR = PUBLIC / "cards"
 MESH_DIR = PUBLIC / "mesh"
+UPLOADS_DIR = ROOT / ".tmp" / "uploads"
 PYTHON = ROOT / ".venv" / "bin" / "python"
 PYTHON_CMD = str(PYTHON if PYTHON.exists() else Path(sys.executable))
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+load_env_file(ROOT / ".env")
+load_env_file(ROOT / "backend" / ".env")
 
 
 def now() -> float:
@@ -84,9 +117,20 @@ class GrokEditRequest(BaseModel):
     prompt: str = Field(min_length=1)
     out: str
     enhance: bool = False
-    model: str = "grok-imagine-video-1.5"
+    prepare_compatible: bool = True
+    model: str = "grok-imagine-video"
     resolution: str = "720p"
     video_field: str = "video"
+
+
+class ImageToVideoRequest(BaseModel):
+    image: str
+    prompt: str = Field(min_length=1)
+    out: str = ".tmp/image-to-video.mp4"
+    model: str = "grok-imagine-video-1.5"
+    resolution: str = "720p"
+    image_field: str = "image"
+    endpoint: str = "/v1/videos/generations"
 
 
 class ImageDressFlowRequest(BaseModel):
@@ -103,19 +147,23 @@ class ImageDressFlowRequest(BaseModel):
     endpoint: str = "/v1/videos/generations"
 
 
+class UploadedFileInfo(BaseModel):
+    path: str
+    size_bytes: int
+
+
 @dataclass
 class Job:
     id: str
     kind: str
     command: list[str]
-    env: dict[str, str]
+    action: Callable[[], None]
     status: str = "queued"
     created_at: float = field(default_factory=now)
     started_at: float | None = None
     ended_at: float | None = None
     return_code: int | None = None
     logs: list[str] = field(default_factory=list)
-    process: subprocess.Popen[str] | None = None
 
     def public(self) -> dict:
         return {
@@ -145,44 +193,54 @@ app.add_middleware(
 )
 
 
+class JobLogWriter(TextIOBase):
+    def __init__(self, job: Job) -> None:
+        self.job = job
+        self.buffer = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        self.buffer += text
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            with jobs_lock:
+                self.job.logs.append(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.buffer:
+            with jobs_lock:
+                self.job.logs.append(self.buffer)
+            self.buffer = ""
+
+
 def run_job(job: Job) -> None:
     with jobs_lock:
         job.status = "running"
         job.started_at = now()
-    env = os.environ.copy()
-    env.update(job.env)
+    writer = JobLogWriter(job)
     try:
-        process = subprocess.Popen(
-            job.command,
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        with redirect_stdout(writer), redirect_stderr(writer):
+            job.action()
+        writer.flush()
         with jobs_lock:
-            job.process = process
-        assert process.stdout is not None
-        for line in process.stdout:
-            with jobs_lock:
-                job.logs.append(line.rstrip("\n"))
-        return_code = process.wait()
-        with jobs_lock:
-            job.return_code = return_code
+            job.return_code = 0
             if job.status != "cancelled":
-                job.status = "succeeded" if return_code == 0 else "failed"
+                job.status = "succeeded"
             job.ended_at = now()
-            job.process = None
     except Exception as exc:  # pragma: no cover - last-resort job reporting
+        writer.flush()
         with jobs_lock:
             job.status = "failed"
             job.logs.append(f"Job runner error: {exc}")
+            job.return_code = 1
             job.ended_at = now()
 
 
-def enqueue(kind: str, command: list[str], env: dict[str, str]) -> Job:
-    job = Job(id=uuid.uuid4().hex[:12], kind=kind, command=command, env=env)
+def enqueue(kind: str, command: list[str], action: Callable[[], None]) -> Job:
+    job = Job(id=uuid.uuid4().hex[:12], kind=kind, command=command, action=action)
     with jobs_lock:
         jobs[job.id] = job
     thread = threading.Thread(target=run_job, args=(job,), daemon=True)
@@ -224,7 +282,18 @@ def read_mesh_info(path: Path) -> MeshInfo:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "root": str(ROOT)}
+    env_files = {
+        ".env": (ROOT / ".env").exists(),
+        "backend/.env": (ROOT / "backend" / ".env").exists(),
+    }
+    return {
+        "ok": True,
+        "root": str(ROOT),
+        "env_files": env_files,
+        "xai_key_loaded": bool(os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")),
+        "ffmpeg_available": shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
+        "python": PYTHON_CMD,
+    }
 
 
 @app.get("/api/assets")
@@ -263,6 +332,34 @@ def assets() -> dict:
     }
 
 
+@app.post("/api/files/upload")
+async def upload_file(
+    request: Request,
+    x_file_name: str | None = Header(default=None),
+) -> UploadedFileInfo:
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    original_name = Path(unquote(x_file_name or "")).name
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._")
+    if not safe_name:
+        safe_name = "upload.bin"
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOADS_DIR / f"{uuid.uuid4().hex[:8]}-{safe_name}"
+    target.write_bytes(data)
+    return UploadedFileInfo(path=relative(target), size_bytes=len(data))
+
+
+@app.get("/api/files/preview")
+def preview_file(path: str) -> FileResponse:
+    target = workspace_path(path, must_exist=True)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    return FileResponse(target)
+
+
 @app.post("/api/jobs/generate-mesh")
 def generate_mesh(request: GenerateMeshRequest) -> dict:
     input_video = workspace_path(request.input_video, must_exist=True)
@@ -285,74 +382,77 @@ def generate_mesh(request: GenerateMeshRequest) -> dict:
         "EXTRA_DRIVER_POINTS": request.extra_driver_points,
     }
     env.update({key: str(value) for key, value in optional.items() if value is not None})
-    job = enqueue("generate-mesh", [PYTHON_CMD, "scripts/generate-mesh-tracking.py"], env)
+    job = enqueue(
+        "generate-mesh",
+        ["backend.services.mesh_tracking.generate_mesh"],
+        lambda env=env: run_generate_mesh(env),
+    )
     return job.public()
 
 
 @app.post("/api/jobs/grok-edit")
 def grok_edit(request: GrokEditRequest) -> dict:
-    if request.video.startswith(("http://", "https://")):
-        video_arg = request.video
-    else:
-        video_arg = relative(workspace_path(request.video, must_exist=True))
-    out = relative(workspace_path(request.out))
-    command = [
-        PYTHON_CMD,
-        "scripts/grok-dress-edit.py",
-        "--video",
-        video_arg,
-        "--prompt",
-        request.prompt,
-        "--out",
-        out,
-        "--model",
-        request.model,
-        "--video-field",
-        request.video_field,
-    ]
-    if request.resolution:
-        command.extend(["--resolution", request.resolution])
-    if request.enhance:
-        command.append("--enhance")
-    job = enqueue("grok-edit", command, {})
+    video = request.video if request.video.startswith(("http://", "https://")) else workspace_path(request.video, must_exist=True)
+    out = workspace_path(request.out)
+    job = enqueue(
+        "grok-edit",
+        ["backend.services.grok.edit_video"],
+        lambda video=video, out=out, request=request: edit_video(
+            video=video,
+            prompt=request.prompt,
+            out=out,
+            model=request.model,
+            resolution=request.resolution,
+            video_field=request.video_field,
+            enhance=request.enhance,
+            prepare_compatible=request.prepare_compatible,
+        ),
+    )
+    return job.public()
+
+
+@app.post("/api/jobs/image-to-video")
+def image_to_video(request: ImageToVideoRequest) -> dict:
+    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    out = workspace_path(request.out)
+    job = enqueue(
+        "image-to-video",
+        ["backend.services.grok.image_to_video"],
+        lambda image=image, out=out, request=request: run_image_to_video(
+            image=image,
+            prompt=request.prompt,
+            out=out,
+            model=request.model,
+            resolution=request.resolution,
+            image_field=request.image_field,
+            endpoint=request.endpoint,
+        ),
+    )
     return job.public()
 
 
 @app.post("/api/jobs/image-dress-flow")
 def image_dress_flow(request: ImageDressFlowRequest) -> dict:
-    if request.image.startswith(("http://", "https://")):
-        image_arg = request.image
-    else:
-        image_arg = relative(workspace_path(request.image, must_exist=True))
-    base_out = relative(workspace_path(request.base_video_out))
-    out = relative(workspace_path(request.out))
-    command = [
-        PYTHON_CMD,
-        "scripts/grok-image-dress-flow.py",
-        "--image",
-        image_arg,
-        "--motion-prompt",
-        request.motion_prompt,
-        "--dress-prompt",
-        request.dress_prompt,
-        "--base-video-out",
-        base_out,
-        "--out",
-        out,
-        "--model",
-        request.model,
-        "--resolution",
-        request.resolution,
-        "--image-field",
-        request.image_field,
-        "--video-field",
-        request.video_field,
-        "--endpoint",
-        request.endpoint,
-    ]
-    if request.enhance_dress_prompt:
-        command.append("--enhance-dress-prompt")
-    job = enqueue("image-dress-flow", command, {})
+    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    base_out = workspace_path(request.base_video_out)
+    out = workspace_path(request.out)
+    job = enqueue(
+        "image-dress-flow",
+        ["backend.services.grok.image_dress_flow"],
+        lambda image=image, base_out=base_out, out=out, request=request: run_image_dress_flow(
+            image=image,
+            motion_prompt=request.motion_prompt,
+            dress_prompt=request.dress_prompt,
+            base_video_out=base_out,
+            out=out,
+            enhance_dress_prompt=request.enhance_dress_prompt,
+            model=request.model,
+            resolution=request.resolution,
+            image_field=request.image_field,
+            video_field=request.video_field,
+            endpoint=request.endpoint,
+        ),
+    )
     return job.public()
 
 
@@ -378,8 +478,5 @@ def cancel_job(job_id: str) -> dict:
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        process = job.process
         job.status = "cancelled"
-    if process and process.poll() is None:
-        process.send_signal(signal.SIGTERM)
     return job.public()

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Generate a video from a still image, then edit that generated video into a
-different dress/outfit.
+Generate a video from a still image with x.ai/Grok.
 
-This intentionally mirrors scripts/grok-dress-edit.py and keeps the exact xAI
-image-to-video request shape configurable because the video API schema may vary
-by account/model.
+The API key is read from XAI_API_KEY or GROK_API_KEY. Request shape fields are
+kept configurable because account/model schemas can vary.
 """
 
 import argparse
 import base64
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -25,7 +24,6 @@ IMAGE_TO_VIDEO_PATH = os.environ.get("XAI_IMAGE_TO_VIDEO_PATH", "/v1/videos/gene
 POLL_PATH = "/v1/videos/{request_id}"
 DEFAULT_VIDEO_MODEL = os.environ.get("XAI_VIDEO_MODEL", "grok-imagine-video-1.5")
 DEFAULT_IMAGE_FIELD = os.environ.get("XAI_IMAGE_FIELD", "image")
-DEFAULT_VIDEO_FIELD = os.environ.get("XAI_VIDEO_FIELD", "video")
 MAX_INLINE_MB = 18
 POLL_INTERVAL_S = 5
 POLL_TIMEOUT_S = 600
@@ -61,24 +59,25 @@ def probe(path):
     }
 
 
-def to_data_uri(path, mime):
+def to_data_uri(path):
     raw = path.read_bytes()
     mb = len(raw) / 1e6
     if mb > MAX_INLINE_MB:
         sys.exit(
-            f"Encoded input is {mb:.1f} MB (> {MAX_INLINE_MB} MB inline cap). "
+            f"Encoded image is {mb:.1f} MB (> {MAX_INLINE_MB} MB inline cap). "
             "Host it and pass an https URL instead."
         )
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def media_value(value, mime):
+def media_value(value):
     if value.startswith("http://") or value.startswith("https://"):
         return {"url": value}
     path = Path(value)
     if not path.exists():
-        sys.exit(f"File not found: {path}")
-    return {"url": to_data_uri(path, mime)}
+        sys.exit(f"Image not found: {path}")
+    return {"url": to_data_uri(path)}
 
 
 def api_post(path, payload, key):
@@ -112,7 +111,7 @@ def _send(req):
 
 
 def poll_video(request_id, key):
-    print(f"Request id: {request_id} — polling ...")
+    print(f"Request id: {request_id} - polling ...")
     started = time.time()
     while True:
         if time.time() - started > POLL_TIMEOUT_S:
@@ -139,18 +138,14 @@ def download(url, out):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Image -> video -> dress edit flow.")
+    parser = argparse.ArgumentParser(description="Generate video from an image.")
     parser.add_argument("--image", required=True, help="Local image path or https URL")
-    parser.add_argument("--motion-prompt", required=True, help="Prompt for animating the still image")
-    parser.add_argument("--dress-prompt", required=True, help="Prompt for the dress/outfit edit")
-    parser.add_argument("--base-video-out", default=".tmp/image-video-base.mp4")
-    parser.add_argument("--out", default=".tmp/image-dress-video.mp4")
+    parser.add_argument("--prompt", required=True, help="Prompt for animating the still image")
+    parser.add_argument("--out", default=".tmp/image-to-video.mp4", help="Where to save the generated video")
     parser.add_argument("--model", default=DEFAULT_VIDEO_MODEL)
     parser.add_argument("--resolution", default="720p")
     parser.add_argument("--image-field", default=DEFAULT_IMAGE_FIELD)
-    parser.add_argument("--video-field", default=DEFAULT_VIDEO_FIELD)
     parser.add_argument("--endpoint", default=IMAGE_TO_VIDEO_PATH)
-    parser.add_argument("--enhance-dress-prompt", action="store_true")
     args = parser.parse_args()
 
     key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
@@ -159,8 +154,8 @@ def main():
 
     payload = {
         "model": args.model,
-        "prompt": args.motion_prompt,
-        args.image_field: media_value(args.image, "image/png"),
+        "prompt": args.prompt,
+        args.image_field: media_value(args.image),
     }
     if args.resolution:
         payload["resolution"] = args.resolution
@@ -171,32 +166,7 @@ def main():
     if not request_id:
         sys.exit(f"No request_id in response:\n{json.dumps(submit, indent=2)}")
     video_url = poll_video(request_id, key)
-
-    base_video = Path(args.base_video_out)
-    download(video_url, base_video)
-
-    edit_cmd = [
-        sys.executable,
-        "scripts/grok-dress-edit.py",
-        "--video",
-        str(base_video),
-        "--prompt",
-        args.dress_prompt,
-        "--out",
-        args.out,
-        "--model",
-        args.model,
-        "--video-field",
-        args.video_field,
-        "--resolution",
-        args.resolution,
-        "--prepare-compatible",
-    ]
-    if args.enhance_dress_prompt:
-        edit_cmd.append("--enhance")
-    print("Starting dress edit on generated video ...")
-    subprocess.run(edit_cmd, check=True)
-    print(f"Flow complete: {args.out}")
+    download(video_url, Path(args.out))
 
 
 if __name__ == "__main__":
