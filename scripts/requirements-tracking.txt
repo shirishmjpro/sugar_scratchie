@@ -20,3 +20,4 @@ imageio-ffmpeg
 tqdm
 dm-tree
 einshape
+transformers>=4.40.0

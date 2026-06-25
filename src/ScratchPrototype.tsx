@@ -68,8 +68,57 @@ const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
 const CLAIM_THRESHOLD = 0.35;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
-// Scratch brush radius in garment-UV units (0..1). Smaller = finer scratches.
-const SCRATCH_RADIUS = 0.028;
+const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
+
+type ScratchZoomSettings = {
+  enabled: boolean;
+  scale: number;
+  durationMs: number;
+  bounce: boolean;
+};
+
+const SCRATCH_ZOOM_DEFAULTS: ScratchZoomSettings = {
+  enabled: true,
+  scale: 1.35,
+  durationMs: 180,
+  bounce: false,
+};
+
+function scratchZoomEasing(bounce: boolean) {
+  return bounce ? "cubic-bezier(0.34, 1.56, 0.64, 1)" : "ease-out";
+}
+
+function loadScratchZoomSettings(): ScratchZoomSettings {
+  if (typeof window === "undefined") return SCRATCH_ZOOM_DEFAULTS;
+  try {
+    const raw = localStorage.getItem(SCRATCH_ZOOM_STORAGE_KEY);
+    if (!raw) return SCRATCH_ZOOM_DEFAULTS;
+    const parsed = JSON.parse(raw) as Partial<ScratchZoomSettings>;
+    return {
+      enabled: parsed.enabled ?? SCRATCH_ZOOM_DEFAULTS.enabled,
+      scale: clampValue(Number(parsed.scale) || SCRATCH_ZOOM_DEFAULTS.scale, 1, 2),
+      durationMs: clampValue(Number(parsed.durationMs) || SCRATCH_ZOOM_DEFAULTS.durationMs, 50, 800),
+      bounce: parsed.bounce ?? SCRATCH_ZOOM_DEFAULTS.bounce,
+    };
+  } catch {
+    return SCRATCH_ZOOM_DEFAULTS;
+  }
+}
+
+function clampValue(value: number, lo: number, hi: number) {
+  return value < lo ? lo : value > hi ? hi : value;
+}
+
+function foregroundTimeFromBottom(source: HTMLVideoElement, target: HTMLVideoElement) {
+  const srcT = source.currentTime;
+  const srcDur = source.duration;
+  const tgtDur = target.duration;
+  if (!Number.isFinite(srcT) || !Number.isFinite(tgtDur) || tgtDur <= 0) return srcT;
+  if (Number.isFinite(srcDur) && srcDur > 0 && Math.abs(srcDur - tgtDur) <= 0.25) {
+    return Math.min(Math.max(0, srcT), tgtDur - 0.001);
+  }
+  return srcT % tgtDur;
+}
 
 // Subtle virtual camera that keeps the performer's chest near a fixed framing
 // point. The chest anchor is a mesh-UV coordinate (roughly center, upper torso);
@@ -81,10 +130,6 @@ const CHEST_TARGET_UV = { x: 0.5, y: 0.4 };
 const CHEST_FOLLOW_STRENGTH = 0.7;
 const CHEST_CAM_MAX = Math.min(0.05, PRESENT_ZOOM - 1);
 const CHEST_SMOOTH = 0.08;
-
-function clampValue(value: number, lo: number, hi: number) {
-  return value < lo ? lo : value > hi ? hi : value;
-}
 
 // Bilinearly interpolate the deformed mesh at a fractional UV grid position to
 // get its current canvas-pixel location (the mesh UV grid is regular 0..1).
@@ -119,8 +164,8 @@ function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
   }
 
   if (Number.isFinite(source.currentTime) && Number.isFinite(target.duration) && target.duration > 0) {
-    const targetTime = source.currentTime % target.duration;
-    if (Math.abs(targetTime - target.currentTime) > 0.12) {
+    const targetTime = foregroundTimeFromBottom(source, target);
+    if (Math.abs(targetTime - target.currentTime) > 0.05) {
       target.currentTime = targetTime;
     }
   }
@@ -233,15 +278,8 @@ function parseTrackedMesh(value: unknown): TrackedMesh | null {
   };
 }
 
-// Interpolate vertex positions between the two source frames bracketing `time`,
-// writing into a reused `store` to avoid per-frame allocation (this runs every
-// rAF). Pass the previous return value back as `store`; it is reallocated only
-// when the mesh identity/size changes.
-function sampleTrackedMesh(
-  mesh: TrackedMesh,
-  time: number,
-  store: TrackedMeshSample | null,
-): TrackedMeshSample {
+// Interpolate vertex positions between the two source frames bracketing `time`.
+function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
   const frames = mesh.frames;
   const loopTime = frames.length > 1 ? time % (frames[frames.length - 1].t || 1) : time;
   let previous = frames[0];
@@ -256,24 +294,13 @@ function sampleTrackedMesh(
 
   const span = next.t - previous.t;
   const blend = span > 0 ? (loopTime - previous.t) / span : 0;
-  const n = mesh.uv.length;
+  const verts = previous.verts.map((point, index) => {
+    const target = next.verts[index] ?? point;
+    return { x: point.x + (target.x - point.x) * blend, y: point.y + (target.y - point.y) * blend };
+  });
+  const vis = previous.vis.map((value, index) => (value && next.vis[index] ? 1 : 0));
 
-  let target = store;
-  if (!target || target.verts.length !== n || target.uv !== mesh.uv) {
-    const verts: Vec2[] = new Array(n);
-    for (let i = 0; i < n; i += 1) verts[i] = { x: 0, y: 0 };
-    target = { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis: new Array(n) };
-  }
-
-  for (let i = 0; i < n; i += 1) {
-    const p = previous.verts[i];
-    const q = next.verts[i] ?? p;
-    const vert = target.verts[i];
-    vert.x = p.x + (q.x - p.x) * blend;
-    vert.y = p.y + (q.y - p.y) * blend;
-    target.vis[i] = previous.vis[i] && next.vis[i] ? 1 : 0;
-  }
-  return target;
+  return { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis };
 }
 
 function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
@@ -352,18 +379,16 @@ export function ScratchPrototype() {
   const drawingRef = useRef(false);
   const [trackedMesh, setTrackedMesh] = useState<TrackedMesh | null>(null);
   const trackedSampleRef = useRef<TrackedMeshSample | null>(null);
-  // Persistent sample reused across frames by sampleTrackedMesh (no per-frame alloc).
-  const sampleStoreRef = useRef<TrackedMeshSample | null>(null);
   const trackedMeshRef = useRef<TrackedMesh | null>(null);
   trackedMeshRef.current = trackedMesh;
   // Smoothed chest-follow camera offset, in clip units. Read by getCanvasPoint
   // to invert the pan when mapping a tap back to fabric UV.
   const cameraRef = useRef({ x: 0, y: 0 });
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
-  const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[0].mesh);
+  const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[1].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [selectedCardId, setSelectedCardId] = useState(CARDS[0].id);
-  const card = CARDS.find((entry) => entry.id === selectedCardId) ?? CARDS[0];
+  const [selectedCardId, setSelectedCardId] = useState(CARDS[1].id);
+  const card = CARDS.find((entry) => entry.id === selectedCardId) ?? CARDS[1];
   // The mesh lattice is a dev overlay — default it off on phones (where the
   // toggle is hidden).
   const [showMesh, setShowMesh] = useState(
@@ -384,21 +409,9 @@ export function ScratchPrototype() {
     isPaused,
     lastUpdatedAt: 0,
   });
-
-  function tryPlayVideos() {
-    const bottomVideo = bottomVideoRef.current;
-    const foregroundVideo = foregroundVideoRef.current;
-    if (!bottomVideo || !foregroundVideo) return;
-
-    for (const video of [bottomVideo, foregroundVideo]) {
-      video.muted = true;
-      video.defaultMuted = true;
-      video.playsInline = true;
-    }
-
-    void bottomVideo.play().catch(() => undefined);
-    void foregroundVideo.play().catch(() => undefined);
-  }
+  const [scratchZoom, setScratchZoom] = useState<ScratchZoomSettings>(loadScratchZoomSettings);
+  const scratchZoomRef = useRef(scratchZoom);
+  scratchZoomRef.current = scratchZoom;
 
   // Create the WebGL renderer once so the scratch texture persists across mesh
   // / showMesh changes (those are read live via refs).
@@ -423,13 +436,8 @@ export function ScratchPrototype() {
       const bottomVideo = bottomVideoRef.current;
       const foregroundVideo = foregroundVideoRef.current;
       const trackedMeshNow = trackedMeshRef.current;
-      const hasForegroundFrame = Boolean(foregroundVideo && foregroundVideo.readyState >= 2);
       const videoTime = bottomVideo?.currentTime ?? time;
-      const trackedSample =
-        trackedMeshNow && hasForegroundFrame
-          ? sampleTrackedMesh(trackedMeshNow, videoTime, sampleStoreRef.current)
-          : null;
-      sampleStoreRef.current = trackedSample ?? sampleStoreRef.current;
+      const trackedSample = trackedMeshNow ? sampleTrackedMesh(trackedMeshNow, videoTime) : null;
       trackedSampleRef.current = trackedSample;
 
       // Subtle chest-follow camera: pan toward keeping the chest anchor at its
@@ -535,11 +543,6 @@ export function ScratchPrototype() {
     claimedRef.current = false;
     setProgress(0);
     setClaimed(false);
-    requestAnimationFrame(() => {
-      bottomVideoRef.current?.load();
-      foregroundVideoRef.current?.load();
-      tryPlayVideos();
-    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCardId]);
 
@@ -556,10 +559,10 @@ export function ScratchPrototype() {
         isPaused: bottomVideo.paused,
       };
       setDuration(nextDuration);
-      tryPlayVideos();
+      void bottomVideo.play().catch(() => undefined);
     };
     const onForegroundCanPlay = () => {
-      tryPlayVideos();
+      void foregroundVideo.play().catch(() => undefined);
     };
 
     bottomVideo.addEventListener("canplay", onBottomCanPlay);
@@ -570,6 +573,24 @@ export function ScratchPrototype() {
       foregroundVideo.removeEventListener("canplay", onForegroundCanPlay);
     };
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(SCRATCH_ZOOM_STORAGE_KEY, JSON.stringify(scratchZoom));
+  }, [scratchZoom]);
+
+  function syncScratchZoomTransition(canvas: HTMLCanvasElement, settings = scratchZoomRef.current) {
+    canvas.style.setProperty("--scratch-zoom-duration", `${settings.durationMs}ms`);
+    canvas.style.setProperty("--scratch-zoom-easing", scratchZoomEasing(settings.bounce));
+  }
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas) syncScratchZoomTransition(canvas);
+  }, [scratchZoom]);
+
+  function updateScratchZoom(patch: Partial<ScratchZoomSettings>) {
+    setScratchZoom((current) => ({ ...current, ...patch }));
+  }
 
   function isPhoneLayout() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
@@ -589,15 +610,23 @@ export function ScratchPrototype() {
   const canvasBaseTransform = () => (isPhoneLayout() ? "translate(-50%, -50%) " : "");
 
   function applyScratchZoom(point: Vec2) {
+    const settings = scratchZoomRef.current;
+    if (!settings.enabled) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
+    syncScratchZoomTransition(canvas, settings);
     canvas.style.transformOrigin = `${(point.x / CANVAS_WIDTH) * 100}% ${(point.y / CANVAS_HEIGHT) * 100}%`;
-    canvas.style.transform = `${canvasBaseTransform()}scale(1.35)`;
+    canvas.style.transform = `${canvasBaseTransform()}scale(${settings.scale})`;
   }
 
   function clearScratchZoom() {
+    const settings = scratchZoomRef.current;
+    if (!settings.enabled) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
+    syncScratchZoomTransition(canvas, settings);
     canvas.style.transform = `${canvasBaseTransform()}scale(1)`;
   }
 
@@ -631,8 +660,8 @@ export function ScratchPrototype() {
     const uv = trackedWorldToUv(trackedSample, point);
     if (!uv) return;
 
-    marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: SCRATCH_RADIUS }].slice(-180);
-    glRendererRef.current?.paintScratch(uv.x, uv.y, SCRATCH_RADIUS);
+    marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius: 0.045 }].slice(-180);
+    glRendererRef.current?.paintScratch(uv.x, uv.y, 0.045);
     const nextProgress = calculateRevealProgress(marksRef.current);
     progressRef.current = nextProgress;
     setProgress(nextProgress);
@@ -648,8 +677,8 @@ export function ScratchPrototype() {
     const nextTime = Math.max(0, Math.min(duration || 0, time));
 
     if (bottomVideo) bottomVideo.currentTime = nextTime;
-    if (foregroundVideo && Number.isFinite(foregroundVideo.duration) && foregroundVideo.duration > 0) {
-      foregroundVideo.currentTime = nextTime % foregroundVideo.duration;
+    if (foregroundVideo && Number.isFinite(foregroundVideo.duration) && foregroundVideo.duration > 0 && bottomVideo) {
+      foregroundVideo.currentTime = foregroundTimeFromBottom(bottomVideo, foregroundVideo);
     }
     uiStateRef.current = {
       ...uiStateRef.current,
@@ -706,7 +735,10 @@ export function ScratchPrototype() {
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
-              tryPlayVideos();
+              const bottomVideo = bottomVideoRef.current;
+              const foregroundVideo = foregroundVideoRef.current;
+              if (bottomVideo?.paused) void bottomVideo.play().catch(() => undefined);
+              if (foregroundVideo?.paused) void foregroundVideo.play().catch(() => undefined);
               drawingRef.current = true;
               const point = getCanvasPoint(event.clientX, event.clientY);
               hoverPointRef.current = point;
@@ -863,6 +895,50 @@ export function ScratchPrototype() {
               Reload mesh
             </button>
           </div>
+          <fieldset className="scratch-zoom-settings">
+            <legend>Scratch zoom</legend>
+            <label className="checkbox-label">
+              <input
+                checked={scratchZoom.enabled}
+                onChange={(event) => updateScratchZoom({ enabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Enable zoom while scratching
+            </label>
+            <label>
+              Range ({scratchZoom.scale.toFixed(2)}×)
+              <input
+                disabled={!scratchZoom.enabled}
+                max={2}
+                min={1}
+                onChange={(event) => updateScratchZoom({ scale: Number(event.currentTarget.value) })}
+                step={0.05}
+                type="range"
+                value={scratchZoom.scale}
+              />
+            </label>
+            <label>
+              Animation ({scratchZoom.durationMs} ms)
+              <input
+                disabled={!scratchZoom.enabled}
+                max={800}
+                min={50}
+                onChange={(event) => updateScratchZoom({ durationMs: Number(event.currentTarget.value) })}
+                step={10}
+                type="range"
+                value={scratchZoom.durationMs}
+              />
+            </label>
+            <label className="checkbox-label">
+              <input
+                checked={scratchZoom.bounce}
+                disabled={!scratchZoom.enabled}
+                onChange={(event) => updateScratchZoom({ bounce: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              Bounce easing
+            </label>
+          </fieldset>
         </aside>
       </section>
     </main>

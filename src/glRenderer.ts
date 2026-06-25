@@ -133,58 +133,25 @@ void main() {
   frag = vec4(0.0, 0.0, 0.0, s); // src alpha = scratch amount
 }`;
 
-// Paint a scratch stamp into the UV-space scratch texture. The mark is carved
-// with noise anchored to the fabric UV (not the stamp), so overlapping stamps
-// (MAX-blended) reinforce one coherent torn/grainy pattern that stays glued to
-// the cloth — reading as scraped-off foil rather than a soft airbrushed dot.
+// Paint a soft dot into the UV-space scratch texture.
 const PAINT_VS = `#version 300 es
 in vec2 aPos;        // unit quad 0..1
 uniform vec2 uCenter; // uv center 0..1
 uniform float uRadius; // uv radius
 out vec2 vLocal;
-out vec2 vUv;
 void main() {
   vLocal = aPos * 2.0 - 1.0;
-  vUv = uCenter + vLocal * uRadius;
-  gl_Position = vec4(vUv * 2.0 - 1.0, 0.0, 1.0);
+  vec2 uv = uCenter + vLocal * uRadius;
+  gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
 const PAINT_FS = `#version 300 es
 precision highp float;
 in vec2 vLocal;
-in vec2 vUv;
 out vec4 frag;
-
-float hash(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-float vnoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
 void main() {
   float d = length(vLocal);
-  // Harder radial core than a soft dot, with an irregular outer falloff.
-  float core = smoothstep(1.0, 0.25, d);
-
-  // Anchored grain + anisotropic streaks (the scratch striations). Rotated so
-  // the streaks run diagonally rather than axis-aligned.
-  mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
-  vec2 q = rot * vUv;
-  float grain = vnoise(vUv * 320.0);
-  float streak = vnoise(q * vec2(28.0, 520.0));
-  float rough = mix(grain, streak, 0.55);
-
-  // Carve the dot: tear the edge and let grain/streaks subtract material so the
-  // revealed patch has rough boundaries and internal texture.
-  float a = smoothstep(0.30, 0.72, core * (0.45 + 0.85 * rough));
+  float a = smoothstep(1.0, 0.55, d);
   frag = vec4(a, 0.0, 0.0, 1.0);
 }`;
 
@@ -224,34 +191,6 @@ export class GarmentGLRenderer {
   private scratchFbo: WebGLFramebuffer;
   private fgColorTex: WebGLTexture;
   private fgFbo: WebGLFramebuffer;
-
-  // Cached GL locations (string lookups are otherwise re-done every draw/frame).
-  private attribCache = new Map<WebGLProgram, Map<string, number>>();
-  private uniformCache = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
-
-  // Per-frame mesh upload reuse. UV + indices are static per mesh (keyed by the
-  // uv array identity / a visibility signature); only positions change per frame.
-  private posScratch: Float32Array = new Float32Array(0);
-  private posBufLen = -1;
-  private uvKey: unknown = null;
-  private indexKey = -1;
-  private indexCount = 0;
-
-  private attrib(prog: WebGLProgram, name: string) {
-    let m = this.attribCache.get(prog);
-    if (!m) this.attribCache.set(prog, (m = new Map()));
-    let loc = m.get(name);
-    if (loc === undefined) m.set(name, (loc = this.gl.getAttribLocation(prog, name)));
-    return loc;
-  }
-
-  private uniform(prog: WebGLProgram, name: string) {
-    let m = this.uniformCache.get(prog);
-    if (!m) this.uniformCache.set(prog, (m = new Map()));
-    let loc = m.get(name);
-    if (loc === undefined) m.set(name, (loc = this.gl.getUniformLocation(prog, name)));
-    return loc;
-  }
 
   constructor(canvas: HTMLCanvasElement, width: number, height: number) {
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: false });
@@ -311,8 +250,8 @@ export class GarmentGLRenderer {
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.MAX);
     gl.blendFunc(gl.ONE, gl.ONE);
-    gl.uniform2f(this.uniform(this.paint, "uCenter"), u, v);
-    gl.uniform1f(this.uniform(this.paint, "uRadius"), radius);
+    gl.uniform2f(gl.getUniformLocation(this.paint, "uCenter"), u, v);
+    gl.uniform1f(gl.getUniformLocation(this.paint, "uRadius"), radius);
     this.bindQuad(this.paint);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.blendEquation(gl.FUNC_ADD);
@@ -322,7 +261,7 @@ export class GarmentGLRenderer {
   private bindQuad(prog: WebGLProgram) {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
-    const loc = this.attrib(prog, "aPos");
+    const loc = gl.getAttribLocation(prog, "aPos");
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
   }
@@ -344,8 +283,8 @@ export class GarmentGLRenderer {
     const scale = Math.max(this.width / videoW, this.height / videoH) * overscan;
     const w = (videoW * scale) / this.width; // >=1: overflow is cropped at clip edges
     const h = (videoH * scale) / this.height;
-    gl.uniform2f(this.uniform(prog, "uScale"), w, h);
-    gl.uniform2f(this.uniform(prog, "uOffset"), clamp(camX, -(w - 1), w - 1), clamp(camY, -(h - 1), h - 1));
+    gl.uniform2f(gl.getUniformLocation(prog, "uScale"), w, h);
+    gl.uniform2f(gl.getUniformLocation(prog, "uOffset"), clamp(camX, -(w - 1), w - 1), clamp(camY, -(h - 1), h - 1));
   }
 
   private uploadVideo(tex: WebGLTexture, video: HTMLVideoElement) {
@@ -368,8 +307,8 @@ export class GarmentGLRenderer {
     this.uploadVideo(tex, video);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.uniform1i(this.uniform(prog, "uTex"), 0);
-    const chromaLoc = this.uniform(prog, "uChroma");
+    gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
+    const chromaLoc = gl.getUniformLocation(prog, "uChroma");
     if (chromaLoc) gl.uniform1i(chromaLoc, chroma ? 1 : 0);
     this.coverUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height, camX, camY, overscan);
     this.bindQuad(prog);
@@ -426,11 +365,11 @@ export class GarmentGLRenderer {
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
-    gl.uniform1i(this.uniform(this.composite, "uTex"), 0);
+    gl.uniform1i(gl.getUniformLocation(this.composite, "uTex"), 0);
     // Present the FBO (foreground + holes) with the same overscan + camera pan
     // as the bottom video so the whole shot moves together.
-    gl.uniform2f(this.uniform(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
-    gl.uniform2f(this.uniform(this.composite, "uOffset"), camX, camY);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), camX, camY);
     this.bindQuad(this.composite);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
@@ -458,66 +397,28 @@ export class GarmentGLRenderer {
     return new Uint16Array(idx);
   }
 
-  // FNV-1a over the visibility flags — lets us skip rebuilding the index buffer
-  // unless visibility actually changes (it never does for full-screen-field
-  // meshes, where vis is 1 everywhere).
-  private visSignature(vis: number[]) {
-    let h = 2166136261;
-    for (let i = 0; i < vis.length; i++) {
-      h ^= vis[i] ? 1 : 0;
-      h = Math.imul(h, 16777619);
-    }
-    return h | 0;
-  }
-
-  // Upload the per-frame mesh state. Positions change every frame (reused array,
-  // bufferSubData). UV is static per mesh (uploaded once, keyed by array
-  // identity). Indices are rebuilt only when visibility changes. Returns the
-  // index count to draw.
-  private ensureMeshBuffers(sample: GLMeshSample): number {
+  private uploadMesh(sample: GLMeshSample) {
     const gl = this.gl;
     const n = sample.verts.length;
-    if (this.posScratch.length !== n * 2) this.posScratch = new Float32Array(n * 2);
-    const pos = this.posScratch;
+    const pos = new Float32Array(n * 2);
+    const uv = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
       pos[i * 2] = sample.verts[i].x;
       pos[i * 2 + 1] = sample.verts[i].y;
+      uv[i * 2] = sample.uv[i].x;
+      uv[i * 2 + 1] = sample.uv[i].y;
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.meshPosBuf);
-    if (this.posBufLen !== pos.length) {
-      gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
-      this.posBufLen = pos.length;
-    } else {
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
-    }
-
-    if (this.uvKey !== sample.uv) {
-      const uv = new Float32Array(n * 2);
-      for (let i = 0; i < n; i++) {
-        uv[i * 2] = sample.uv[i].x;
-        uv[i * 2 + 1] = sample.uv[i].y;
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.meshUvBuf);
-      gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
-      this.uvKey = sample.uv;
-      this.indexKey = -1; // new mesh -> force index rebuild
-    }
-
-    const sig = this.visSignature(sample.vis);
-    if (sig !== this.indexKey) {
-      const indices = this.buildVisibleIndices(sample);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.meshIndexBuf);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-      this.indexCount = indices.length;
-      this.indexKey = sig;
-    }
-    return this.indexCount;
+    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.meshUvBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, uv, gl.DYNAMIC_DRAW);
   }
 
   private drawMeshPunch(sample: GLMeshSample) {
     const gl = this.gl;
-    const count = this.ensureMeshBuffers(sample);
-    if (count === 0) return;
+    const indices = this.buildVisibleIndices(sample);
+    if (indices.length === 0) return;
+    this.uploadMesh(sample);
 
     gl.useProgram(this.punch);
     gl.enable(gl.BLEND);
@@ -526,22 +427,22 @@ export class GarmentGLRenderer {
     gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.meshPosBuf);
-    const posLoc = this.attrib(this.punch, "aPos");
+    const posLoc = gl.getAttribLocation(this.punch, "aPos");
     gl.enableVertexAttribArray(posLoc);
     gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.meshUvBuf);
-    const uvLoc = this.attrib(this.punch, "aUV");
+    const uvLoc = gl.getAttribLocation(this.punch, "aUV");
     gl.enableVertexAttribArray(uvLoc);
     gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 0, 0);
 
-    gl.uniform2f(this.uniform(this.punch, "uCanvas"), this.width, this.height);
+    gl.uniform2f(gl.getUniformLocation(this.punch, "uCanvas"), this.width, this.height);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.scratchTex);
-    gl.uniform1i(this.uniform(this.punch, "uScratch"), 0);
+    gl.uniform1i(gl.getUniformLocation(this.punch, "uScratch"), 0);
 
-    // Index buffer is already populated by ensureMeshBuffers (cached).
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.meshIndexBuf);
-    gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_SHORT, 0);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.DYNAMIC_DRAW);
+    gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
   }
 
   private drawMeshLines(sample: GLMeshSample) {
@@ -566,10 +467,10 @@ export class GarmentGLRenderer {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.lineBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(segs), gl.DYNAMIC_DRAW);
-    const loc = this.attrib(this.line, "aPos");
+    const loc = gl.getAttribLocation(this.line, "aPos");
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-    gl.uniform2f(this.uniform(this.line, "uCanvas"), this.width, this.height);
+    gl.uniform2f(gl.getUniformLocation(this.line, "uCanvas"), this.width, this.height);
     gl.drawArrays(gl.LINES, 0, segs.length / 2);
   }
 }

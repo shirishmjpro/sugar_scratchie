@@ -683,6 +683,17 @@ def main():
             f"Extended performer motion to full-canvas field "
             f"({GRID_COLS}x{GRID_ROWS}, {FIELD_NEIGHBORS} neighbors, power={FIELD_POWER:g})"
         )
+        print("Refining full-canvas visibility to garment-only ...")
+        garment_masks = [build_garment_mask(frames[t, :, :, :3]) for t in range(T)]
+        for t in range(T):
+            for i in range(tracks.shape[1]):
+                x = int(round(tracks[t, i, 0]))
+                y = int(round(tracks[t, i, 1]))
+                if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT and garment_masks[t][y, x]:
+                    vis[t, i] = 1
+                else:
+                    vis[t, i] = 0
+        print(f"Garment visibility mean {vis.mean():.2f}")
     else:
         # Scatter tracked (valid) cells back into the regular driver grid.
         # Invalid cells (off-body in the reference frame) stay at their seed
@@ -711,9 +722,24 @@ def main():
             "vis": [int(v) for v in vis[t]],
         })
 
+    garment_ref = None
+    if FULL_SCREEN_FIELD:
+        ref_garment = build_garment_mask(frames[ref_idx, :, :, :3])
+        garment_ref = []
+        for x, y in seeds:
+            xi = int(round(float(x)))
+            yi = int(round(float(y)))
+            on_garment = (
+                0 <= xi < CANVAS_WIDTH
+                and 0 <= yi < CANVAS_HEIGHT
+                and bool(ref_garment[yi, xi])
+            )
+            garment_ref.append(int(on_garment))
+        print(f"Reference garment vertices {sum(garment_ref)}/{len(garment_ref)}")
+
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     # Compact (no indentation) — this ships to the browser, so keep it small.
-    OUTPUT_JSON.write_text(json.dumps({
+    payload = {
         "source": str(INPUT_VIDEO.relative_to(REPO_ROOT)) if INPUT_VIDEO.is_relative_to(REPO_ROOT) else str(INPUT_VIDEO),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "generator": f"{TRACKER}-full-field-v9" if FULL_SCREEN_FIELD else f"{TRACKER}-grid-v5",
@@ -743,7 +769,10 @@ def main():
         "mesh": {"cols": GRID_COLS, "rows": GRID_ROWS},
         "uv": [[round(float(u), 4), round(float(v), 4)] for u, v in uv],
         "frames": out_frames,
-    }, separators=(",", ":")) + "\n")
+    }
+    if garment_ref is not None:
+        payload["garment"] = garment_ref
+    OUTPUT_JSON.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
     size_mb = OUTPUT_JSON.stat().st_size / 1e6
     print(f"Wrote {T} mesh frames to {OUTPUT_JSON} ({size_mb:.1f} MB)")
 
