@@ -145,6 +145,14 @@ textarea:focus-visible {
 
 /* Compact on-stage controls — only shown on phones, where the side panel
    (and its Card dropdown / Reset button) is hidden. Desktop keeps them off. */
+.mobile-controls-wrap {
+  display: none;
+}
+
+.mobile-sound-wrap {
+  display: none;
+}
+
 .mobile-controls {
   display: none;
 }
@@ -153,23 +161,140 @@ textarea:focus-visible {
   display: none;
 }
 
-/* Live "dress revealed" percentage, overlaid on the stage (desktop + mobile). */
+/* Live "dress revealed" percentage — hidden; symbols bar replaces it. */
 .scratch-progress {
+  display: none;
+}
+
+.symbol-bar {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  z-index: 5;
-  display: grid;
-  gap: 2px;
-  padding: 8px 14px;
-  border-radius: 14px;
+  top: max(12px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: fit-content;
+  max-width: calc(100% - 56px);
+  margin-inline: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
   background: rgba(20, 18, 16, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.28);
-  color: #fff;
-  pointer-events: none;
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
-  transition: background 200ms ease;
+  pointer-events: none;
+}
+
+.symbol-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.symbol-bar.is-symbols-complete:not(.is-fully-revealed) {
+  border-color: rgba(255, 217, 120, 0.75);
+  box-shadow: 0 0 0 1px rgba(255, 217, 120, 0.35);
+}
+
+.symbol-slot.is-revealed {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.45);
+  animation: symbolReveal 280ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+.stage.is-game-over canvas,
+.stage.is-game-over .symbol-bar {
+  filter: blur(5px);
+}
+
+@keyframes symbolReveal {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.game-result {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(12, 10, 8, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.game-result-title {
+  margin: 0;
+  font-size: clamp(28px, 7vw, 40px);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.game-result--win .game-result-title {
+  color: #ffe08a;
+  text-shadow: 0 2px 24px rgba(255, 200, 80, 0.45);
+}
+
+.game-result--lose .game-result-title {
+  color: #f0e8e4;
+}
+
+.game-result-detail {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.game-result-button {
+  justify-self: center;
+  margin-top: 8px;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  color: #1a1410;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.game-result--win .game-result-button {
+  background: linear-gradient(180deg, #ffe9a8, #ffc84a);
+  color: #3a2800;
+}
+
+@media (max-width: 700px) {
+  .symbol-bar {
+    top: max(12px, env(safe-area-inset-top));
+    max-width: calc(100% - 32px);
+    gap: 4px;
+    padding: 5px 8px;
+  }
+
+  .symbol-slot {
+    width: 20px;
+    height: 20px;
+  }
 }
 
 .scratch-progress-value {
@@ -190,13 +315,6 @@ textarea:focus-visible {
 .scratch-progress.is-claimed {
   background: rgba(138, 62, 50, 0.82);
   border-color: rgba(255, 217, 207, 0.6);
-}
-
-@media (max-width: 700px) {
-  .scratch-progress {
-    top: max(16px, env(safe-area-inset-top));
-    left: 16px;
-  }
 }
 
 .visually-hidden {
@@ -262,6 +380,51 @@ textarea:focus-visible {
   align-items: center;
   display: flex;
   gap: 10px;
+}
+
+.panel-settings-tabs {
+  display: grid;
+  gap: 14px;
+}
+
+.panel-settings-tablist {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(23, 21, 19, 0.06);
+  border: 1px solid rgba(23, 21, 19, 0.1);
+}
+
+.panel-settings-tab {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(23, 21, 19, 0.62);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.panel-settings-tab.is-active {
+  background: #fffaf2;
+  box-shadow: 0 1px 3px rgba(23, 21, 19, 0.12);
+  color: #8a3e32;
+}
+
+.panel-settings-tabpanel .scratch-zoom-settings {
+  border: 0;
+  padding: 0;
+}
+
+.panel-settings-tabpanel .scratch-zoom-settings legend {
+  display: none;
 }
 
 .eyebrow {
@@ -489,14 +652,43 @@ textarea:focus-visible {
     width: max(100dvw, 100dvh * 390 / 672);
   }
 
-  .mobile-controls {
+  .mobile-controls-wrap {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-end;
     gap: 10px;
     position: absolute;
     top: max(16px, env(safe-area-inset-top));
     right: 16px;
     z-index: 5;
+  }
+
+  .mobile-sound-wrap {
+    display: block;
+    position: absolute;
+    top: max(16px, env(safe-area-inset-top));
+    left: 16px;
+    z-index: 5;
+  }
+
+  .mobile-sound-toggle.is-muted {
+    opacity: 0.62;
+  }
+
+  .mobile-controls-toggle svg {
+    transition: transform 180ms ease;
+  }
+
+  .mobile-controls-toggle.is-open svg {
+    transform: rotate(180deg);
+  }
+
+  .mobile-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .mobile-card-switch {
@@ -528,11 +720,16 @@ textarea:focus-visible {
     cursor: pointer;
   }
 
+  .mobile-reset.is-active {
+    background: rgba(255, 200, 80, 0.25);
+    border-color: rgba(255, 200, 80, 0.85);
+  }
+
   .mobile-settings-sheet {
     display: grid;
     position: absolute;
-    top: calc(max(16px, env(safe-area-inset-top)) + 48px);
-    right: 16px;
+    top: calc(38px + 10px);
+    right: 0;
     z-index: 6;
     width: min(320px, calc(100dvw - 32px));
     max-height: calc(100dvh - 120px);
