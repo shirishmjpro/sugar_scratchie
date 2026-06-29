@@ -191,6 +191,13 @@ export class GarmentGLRenderer {
   private scratchFbo: WebGLFramebuffer;
   private fgColorTex: WebGLTexture;
   private fgFbo: WebGLFramebuffer;
+  // Once a video has been drawn at least once we keep drawing its last good
+  // frame even if it momentarily stalls (common on mobile during a loop wrap, or
+  // when a second video element gets suspended). This stops the foreground from
+  // blinking out to "just the bottom video", and stops scratched holes from
+  // flashing black when the bottom video wraps.
+  private fgEverReady = false;
+  private bottomEverReady = false;
 
   constructor(canvas: HTMLCanvasElement, width: number, height: number) {
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: false });
@@ -230,6 +237,13 @@ export class GarmentGLRenderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  }
+
+  // Drop the "last good frame" memory so a card switch doesn't briefly composite
+  // the previous clip's performer over the new background while it decodes.
+  resetForeground() {
+    this.fgEverReady = false;
+    this.bottomEverReady = false;
   }
 
   clearScratch() {
@@ -301,10 +315,13 @@ export class GarmentGLRenderer {
     camX = 0,
     camY = 0,
     overscan = 1,
+    upload = true,
   ) {
     const gl = this.gl;
     gl.useProgram(prog);
-    this.uploadVideo(tex, video);
+    // Skip the upload to redraw the previously cached frame (video stalled but
+    // its metadata — and thus videoWidth/Height for cover framing — persists).
+    if (upload) this.uploadVideo(tex, video);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
@@ -339,22 +356,34 @@ export class GarmentGLRenderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (bottomVideo && bottomVideo.readyState >= 2) {
       this.drawVideo(this.blit, this.bottomTex, bottomVideo, false, camX, camY, PRESENT_ZOOM);
+      this.bottomEverReady = true;
+    } else if (bottomVideo && this.bottomEverReady) {
+      // Bottom stalled (e.g. mid loop wrap): redraw its last frame so scratched
+      // holes keep revealing video instead of flashing black.
+      this.drawVideo(this.blit, this.bottomTex, bottomVideo, false, camX, camY, PRESENT_ZOOM, false);
     }
 
-    if (!foregroundVideo || foregroundVideo.readyState < 2) return;
+    const fgFresh = !!foregroundVideo && foregroundVideo.readyState >= 2;
+    // Nothing to show yet: bail until the foreground has decoded its first frame.
+    if (!fgFresh && !this.fgEverReady) return;
 
-    // 2. keyed foreground into fgFbo (reference frame — no camera/overscan)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
-    gl.viewport(0, 0, this.width, this.height);
-    gl.disable(gl.BLEND);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    this.drawVideo(this.blit, this.fgTex, foregroundVideo, true);
+    if (fgFresh) {
+      // 2. keyed foreground into fgFbo (reference frame — no camera/overscan)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.disable(gl.BLEND);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.drawVideo(this.blit, this.fgTex, foregroundVideo!, true);
 
-    // 3. punch holes where scratched, within the tracked mesh
-    if (sample) {
-      this.drawMeshPunch(sample);
+      // 3. punch holes where scratched, within the tracked mesh
+      if (sample) {
+        this.drawMeshPunch(sample);
+      }
+      this.fgEverReady = true;
     }
+    // If the foreground stalled we skip steps 2-3 and re-composite the last good
+    // FBO contents below, so the performer freezes instead of disappearing.
 
     // 4. composite fg (with holes) over the bottom video on screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);

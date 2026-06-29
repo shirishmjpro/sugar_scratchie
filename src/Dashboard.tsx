@@ -485,6 +485,478 @@ function MeshOverlayPreview({
   );
 }
 
+type GarmentMeshData = TrackedMeshPreviewData & {
+  garment?: number[] | null;
+};
+
+function coverFit(videoWidth: number, videoHeight: number, width: number, height: number) {
+  const scale = Math.max(width / videoWidth, height / videoHeight);
+  const drawWidth = videoWidth * scale;
+  const drawHeight = videoHeight * scale;
+  return {
+    dx: (width - drawWidth) / 2,
+    dy: (height - drawHeight) / 2,
+    dw: drawWidth,
+    dh: drawHeight,
+  };
+}
+
+/**
+ * Paint-the-mask editor. The app stores scratchability as a static per-vertex
+ * `garment` array; here the operator scrubs the clip to a pose (e.g. arm raised,
+ * or to expose the neck), then paints/erases the vertices that sit on the fabric
+ * in that frame. Because vertices are drawn at their tracked positions for the
+ * current frame, painting a raised arm marks exactly the cells that will be
+ * under the finger when the arm is raised in the prototype.
+ */
+function MaskEditor({
+  cards,
+  selectedCardId,
+  onSelectCard,
+  onSaved,
+  onError,
+}: {
+  cards: CardInfo[];
+  selectedCardId: string;
+  onSelectCard: (value: string) => void;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}) {
+  const card = useMemo(
+    () => cards.find((entry) => entry.id === selectedCardId) ?? cards[0],
+    [cards, selectedCardId],
+  );
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const garmentRef = useRef<Uint8Array | null>(null);
+  const framesRef = useRef<TrackedMeshFrame[]>([]);
+  const dimsRef = useRef({ cols: 0, rows: 0, width: 390, height: 672 });
+  const brushRef = useRef({ mode: "add" as "add" | "erase", radius: 26 });
+  const drawingRef = useRef(false);
+  const cursorRef = useRef<{ x: number; y: number } | null>(null);
+
+  const [meshReady, setMeshReady] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [coverage, setCoverage] = useState({ on: 0, total: 0 });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [brushMode, setBrushMode] = useState<"add" | "erase">("add");
+  const [brushRadius, setBrushRadius] = useState(26);
+  const [playing, setPlaying] = useState(false);
+
+  const meshFile = card?.mesh ?? "";
+  const videoSrc = card ? previewSource(card.foreground) : "";
+  const meshSrc = meshFile ? previewSource(`public/mesh/${meshFile}`) : "";
+
+  useEffect(() => {
+    brushRef.current.mode = brushMode;
+  }, [brushMode]);
+  useEffect(() => {
+    brushRef.current.radius = brushRadius;
+  }, [brushRadius]);
+
+  function recomputeCoverage() {
+    const garment = garmentRef.current;
+    if (!garment) return;
+    let on = 0;
+    for (let i = 0; i < garment.length; i += 1) on += garment[i];
+    setCoverage({ on, total: garment.length });
+  }
+
+  // Load the mesh JSON (geometry + current garment mask) for the selected card.
+  useEffect(() => {
+    let cancelled = false;
+    setMeshReady(false);
+    setLoadError("");
+    setSaveMsg("");
+    setDirty(false);
+    garmentRef.current = null;
+    framesRef.current = [];
+    if (!meshSrc) return undefined;
+
+    // Cache-bust so the editor always edits the latest on-disk mask (the backend
+    // FileResponse can otherwise be served from the browser cache, losing edits).
+    const freshSrc = `${meshSrc}${meshSrc.includes("?") ? "&" : "?"}v=${Date.now()}`;
+    fetch(freshSrc, { cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Mesh not available (${response.status})`);
+        return response.json() as Promise<GarmentMeshData>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const cols = data.mesh?.cols ?? 0;
+        const rows = data.mesh?.rows ?? 0;
+        const total = cols * rows;
+        if (total <= 0 || !data.frames || data.frames.length === 0) {
+          throw new Error("Mesh has no grid or frames");
+        }
+        const garment = new Uint8Array(total);
+        if (Array.isArray(data.garment) && data.garment.length === total) {
+          for (let i = 0; i < total; i += 1) garment[i] = data.garment[i] ? 1 : 0;
+        } else {
+          // No mask yet — start fully scratchable so the operator carves it down.
+          garment.fill(1);
+        }
+        garmentRef.current = garment;
+        framesRef.current = data.frames;
+        dimsRef.current = {
+          cols,
+          rows,
+          width: data.canvas?.width ?? 390,
+          height: data.canvas?.height ?? 672,
+        };
+        setMeshReady(true);
+        recomputeCoverage();
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) setLoadError(caught instanceof Error ? caught.message : String(caught));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [meshSrc]);
+
+  // Render loop: video (cover-fit) + scratchable cells + grid + vertices + brush.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video || !meshReady) return undefined;
+    const { cols, rows, width, height } = dimsRef.current;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return undefined;
+
+    let raf = 0;
+
+    const draw = () => {
+      const frames = framesRef.current;
+      const garment = garmentRef.current;
+      ctx.clearRect(0, 0, width, height);
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        const fit = coverFit(video.videoWidth, video.videoHeight, width, height);
+        try {
+          ctx.drawImage(video, fit.dx, fit.dy, fit.dw, fit.dh);
+        } catch {
+          /* frame not ready */
+        }
+      }
+      const frame = frameForTime(frames, video.currentTime);
+      if (frame && garment) {
+        const on = (index: number) => garment[index] === 1;
+        // Fill scratchable cells (all four corners painted on).
+        ctx.fillStyle = "rgba(34, 220, 130, 0.30)";
+        for (let row = 0; row < rows - 1; row += 1) {
+          for (let col = 0; col < cols - 1; col += 1) {
+            const tl = row * cols + col;
+            const tr = tl + 1;
+            const bl = tl + cols;
+            const br = bl + 1;
+            if (!(on(tl) && on(tr) && on(bl) && on(br))) continue;
+            const a = frame.verts[tl];
+            const b = frame.verts[tr];
+            const c = frame.verts[br];
+            const d = frame.verts[bl];
+            if (!a || !b || !c || !d) continue;
+            ctx.beginPath();
+            ctx.moveTo(a[0], a[1]);
+            ctx.lineTo(b[0], b[1]);
+            ctx.lineTo(c[0], c[1]);
+            ctx.lineTo(d[0], d[1]);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+        // Faint grid.
+        ctx.lineWidth = 0.6;
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+        ctx.beginPath();
+        for (let row = 0; row < rows; row += 1) {
+          for (let col = 0; col < cols; col += 1) {
+            const index = row * cols + col;
+            const here = frame.verts[index];
+            if (!here) continue;
+            if (col < cols - 1) {
+              const right = frame.verts[index + 1];
+              if (right) {
+                ctx.moveTo(here[0], here[1]);
+                ctx.lineTo(right[0], right[1]);
+              }
+            }
+            if (row < rows - 1) {
+              const down = frame.verts[index + cols];
+              if (down) {
+                ctx.moveTo(here[0], here[1]);
+                ctx.lineTo(down[0], down[1]);
+              }
+            }
+          }
+        }
+        ctx.stroke();
+        // Vertices: bright green where scratchable, dim otherwise.
+        for (let index = 0; index < frame.verts.length; index += 1) {
+          const vert = frame.verts[index];
+          if (!vert) continue;
+          if (on(index)) {
+            ctx.fillStyle = "rgba(46, 255, 150, 0.95)";
+            ctx.beginPath();
+            ctx.arc(vert[0], vert[1], 2.1, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            ctx.fillStyle = "rgba(255, 90, 90, 0.55)";
+            ctx.beginPath();
+            ctx.arc(vert[0], vert[1], 1.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      // Brush cursor.
+      const cursor = cursorRef.current;
+      if (cursor) {
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = brushRef.current.mode === "add" ? "rgba(46, 255, 150, 0.9)" : "rgba(255, 90, 90, 0.9)";
+        ctx.beginPath();
+        ctx.arc(cursor.x, cursor.y, brushRef.current.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      raf = window.requestAnimationFrame(draw);
+    };
+
+    draw();
+    return () => window.cancelAnimationFrame(raf);
+  }, [meshReady]);
+
+  function toMeshPoint(clientX: number, clientY: number) {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const { width, height } = dimsRef.current;
+    return {
+      x: ((clientX - rect.left) / rect.width) * width,
+      y: ((clientY - rect.top) / rect.height) * height,
+    };
+  }
+
+  function paintAt(clientX: number, clientY: number) {
+    const point = toMeshPoint(clientX, clientY);
+    if (!point) return;
+    cursorRef.current = point;
+    if (!drawingRef.current) return;
+    const garment = garmentRef.current;
+    const video = videoRef.current;
+    if (!garment || !video) return;
+    const frame = frameForTime(framesRef.current, video.currentTime);
+    if (!frame) return;
+    const radius = brushRef.current.radius;
+    const r2 = radius * radius;
+    const value = brushRef.current.mode === "add" ? 1 : 0;
+    let changed = false;
+    for (let index = 0; index < frame.verts.length; index += 1) {
+      const vert = frame.verts[index];
+      if (!vert) continue;
+      const dx = vert[0] - point.x;
+      const dy = vert[1] - point.y;
+      if (dx * dx + dy * dy <= r2 && garment[index] !== value) {
+        garment[index] = value;
+        changed = true;
+      }
+    }
+    if (changed && !dirty) setDirty(true);
+  }
+
+  function fillAll(value: 0 | 1) {
+    const garment = garmentRef.current;
+    if (!garment) return;
+    garment.fill(value);
+    setDirty(true);
+    recomputeCoverage();
+  }
+
+  async function save() {
+    const garment = garmentRef.current;
+    if (!garment || !meshFile) return;
+    setSaving(true);
+    setSaveMsg("");
+    onError("");
+    try {
+      const result = await api<{ ok: boolean; sum: number; total: number }>("/api/mesh/garment", {
+        method: "POST",
+        body: JSON.stringify({ file: meshFile, garment: Array.from(garment) }),
+      });
+      setDirty(false);
+      setSaveMsg(`Saved ${result.sum}/${result.total} cells. Reload the mesh in the prototype to see it.`);
+      onSaved();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function togglePlay() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => undefined);
+      setPlaying(true);
+    } else {
+      video.pause();
+      setPlaying(false);
+    }
+  }
+
+  function step(deltaSeconds: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    setPlaying(false);
+    video.currentTime = Math.max(0, Math.min((video.duration || 0) - 0.001, video.currentTime + deltaSeconds));
+  }
+
+  const coveragePct = coverage.total > 0 ? Math.round((coverage.on / coverage.total) * 100) : 0;
+
+  return (
+    <Card>
+      <Grid columns={{ initial: "1", md: "2" }} gap="5">
+        <Flex direction="column" gap="4">
+          <Flex align="center" justify="between">
+            <Heading size="4">Mask Editor</Heading>
+            <Badge color={dirty ? "orange" : "gray"}>{dirty ? "Unsaved" : "Saved"}</Badge>
+          </Flex>
+          <Text color="gray" size="2">
+            Paint the cells that should be scratchable. Scrub to a frame (e.g. the arm raised, or to expose the neck),
+            then drag on the figure to add or erase. Save writes the mask back into the mesh; hit "Reload mesh" in the
+            prototype to pick it up.
+          </Text>
+
+          <Field label="Card">
+            <CardSelect cards={cards} selectedCardId={card?.id ?? ""} onValueChange={onSelectCard} />
+          </Field>
+
+          <Field label="Brush">
+            <Flex gap="2" wrap="wrap">
+              <Button
+                color={brushMode === "add" ? "green" : "gray"}
+                variant={brushMode === "add" ? "solid" : "soft"}
+                onClick={() => setBrushMode("add")}
+              >
+                Add
+              </Button>
+              <Button
+                color={brushMode === "erase" ? "red" : "gray"}
+                variant={brushMode === "erase" ? "solid" : "soft"}
+                onClick={() => setBrushMode("erase")}
+              >
+                Erase
+              </Button>
+            </Flex>
+          </Field>
+
+          <Field label={`Brush size (${brushRadius}px)`}>
+            <input
+              max={80}
+              min={8}
+              onChange={(event) => setBrushRadius(Number(event.currentTarget.value))}
+              type="range"
+              value={brushRadius}
+            />
+          </Field>
+
+          <Field label="Playback">
+            <Flex gap="2" wrap="wrap">
+              <Button color="gray" variant="soft" onClick={togglePlay}>
+                {playing ? <Square {...iconProps} /> : <Play {...iconProps} />}
+                {playing ? "Pause" : "Play"}
+              </Button>
+              <Button color="gray" variant="soft" onClick={() => step(-0.1)}>
+                -0.1s
+              </Button>
+              <Button color="gray" variant="soft" onClick={() => step(0.1)}>
+                +0.1s
+              </Button>
+            </Flex>
+          </Field>
+
+          <Field label="Whole mask">
+            <Flex gap="2" wrap="wrap">
+              <Button color="gray" variant="soft" onClick={() => fillAll(1)}>
+                Fill all
+              </Button>
+              <Button color="gray" variant="soft" onClick={() => fillAll(0)}>
+                Clear all
+              </Button>
+            </Flex>
+          </Field>
+
+          <Separator size="4" />
+          <Flex align="center" gap="3" justify="between">
+            <Text color="gray" size="2" weight="bold">
+              Scratchable: {coveragePct}% ({coverage.on}/{coverage.total})
+            </Text>
+            <Button disabled={!meshReady || saving || !dirty} onClick={save}>
+              <Play {...iconProps} />
+              {saving ? "Saving" : "Save mask"}
+            </Button>
+          </Flex>
+          {saveMsg ? (
+            <Text as="div" color="green" size="1" weight="medium">
+              {saveMsg}
+            </Text>
+          ) : null}
+          {loadError ? (
+            <Text as="div" color="orange" size="1" weight="medium">
+              {loadError}
+            </Text>
+          ) : null}
+        </Flex>
+
+        <Flex direction="column" gap="3">
+          <Heading size="3">Canvas</Heading>
+          <Separator size="4" />
+          <Box className="mask-editor-stage">
+            <video
+              ref={videoRef}
+              className="mask-editor-video"
+              loop
+              muted
+              playsInline
+              preload="auto"
+              src={videoSrc}
+            />
+            <canvas
+              ref={canvasRef}
+              className="mask-editor-canvas"
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                drawingRef.current = true;
+                paintAt(event.clientX, event.clientY);
+              }}
+              onPointerMove={(event) => paintAt(event.clientX, event.clientY)}
+              onPointerUp={() => {
+                drawingRef.current = false;
+                recomputeCoverage();
+              }}
+              onPointerLeave={() => {
+                drawingRef.current = false;
+                cursorRef.current = null;
+                recomputeCoverage();
+              }}
+            />
+          </Box>
+          <Text color="gray" size="1">
+            Green dots/cells are scratchable. Red dots are off. The video is shown cover-fit to match how the
+            prototype renders it, so what you paint lines up with the live scratch area.
+          </Text>
+        </Flex>
+      </Grid>
+    </Card>
+  );
+}
+
 function Field({
   children,
   label,
@@ -955,6 +1427,10 @@ export function Dashboard() {
                 <Workflow {...iconProps} />
                 Generate Mesh
               </Tabs.Trigger>
+              <Tabs.Trigger value="mask">
+                <SlidersHorizontal {...iconProps} />
+                Mask Editor
+              </Tabs.Trigger>
               <Tabs.Trigger value="image-video">
                 <Video {...iconProps} />
                 Image Video
@@ -1092,6 +1568,16 @@ export function Dashboard() {
                     </Flex>
                   </Grid>
                 </Card>
+              </Tabs.Content>
+
+              <Tabs.Content value="mask">
+                <MaskEditor
+                  cards={assets.cards}
+                  selectedCardId={selectedCard?.id ?? ""}
+                  onSelectCard={setSelectedCardId}
+                  onSaved={() => refreshAssets().catch(() => undefined)}
+                  onError={setError}
+                />
               </Tabs.Content>
 
               <Tabs.Content value="image-video">

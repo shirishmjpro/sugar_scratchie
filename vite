@@ -1,0 +1,82 @@
+
+
+  VITE v7.3.5  ready in 84 ms
+
+  ➜  Local:   http://localhost:5080/
+  ➜  Network: http://192.168.0.137:5080/
+  ➜  press h + enter to show help
+1:30:22 PM [vite] (client) hmr update /src/Dashboard.tsx
+1:30:38 PM [vite] (client) hmr update /src/Dashboard.tsx (x2)
+1:30:56 PM [vite] (client) hmr update /src/Dashboard.tsx (x3)
+1:31:47 PM [vite] (client) hmr update /src/styles.css
+2:16:14 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16)
+2:16:15 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x2)
+2:16:17 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:   at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x3)
+2:16:18 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x4)
+2:16:20 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x5)
+2:16:21 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x6)
+2:16:23 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x7)
+2:16:24 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x8)
+2:16:26 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x9)
+2:16:27 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x10)
+2:16:29 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x11)
+2:16:30 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x12)
+2:16:32 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x13)
+2:16:33 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x14)
+2:31:50 PM [vite] (client) hmr update /src/Dashboard.tsx
+3:01:08 PM [vite] (client) hmr update /src/ScratchPrototype.tsx
+3:14:42 PM [vite] (client) hmr update /src/ScratchPrototype.tsx (
+3:14:42 PM [vite] (client) hmr update /src/ScratchPrototype.tsx (x2)
+3:14:42 PM [vite] (client) hmr update /src/ScratchPrototype.tsx (
+3:14:42 PM [vite] (client) hmr update /src/ScratchPrototype.tsx (x3)
+3:14:42 PM [vite] (client) hmr update /src/styles.css
+3:14:42 PM [vite] (client) hmr update /src/Dashboard.tsx
+3:18:22 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16)
+3:18:22 PM [vite] http proxy error: /api/jobs
+Error: connect ECONNREFUSED 127.0.0.1:8090
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1615:16) (x2)

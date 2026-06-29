@@ -91,6 +91,11 @@ VIS_OPEN = int(os.environ.get("VIS_OPEN", "3"))
 # displacement so the mesh covers the full screen without pretending the green
 # background has trackable features.
 FULL_SCREEN_FIELD = os.environ.get("FULL_SCREEN_FIELD", "1") != "0"
+# In full-canvas mode the field is visible everywhere and the *static* garment
+# mask (added by add-garment-mask.py / the dashboard Mask Editor) is the scratch
+# gate. Re-restricting per-frame visibility to garment-only here makes vis sparse
+# and silently overrides the editable mask, so it's opt-in (off by default).
+GARMENT_VIS_REFINE = os.environ.get("GARMENT_VIS_REFINE", "0") != "0"
 FIELD_NEIGHBORS = int(os.environ.get("FIELD_NEIGHBORS", "8"))
 FIELD_POWER = float(os.environ.get("FIELD_POWER", "2.0"))
 # Extra CoTracker drivers sampled from the performer mask. These are separate
@@ -112,6 +117,12 @@ REF_IMAGE = os.environ.get("REF_IMAGE")
 SEG_MODEL = os.environ.get("SEG_MODEL", "mattmdjaga/segformer_b2_clothes")
 GARMENT_CLASSES = {4, 5, 6, 7, 8, 17}  # Upper-clothes, Skirt, Pants, Dress, Belt, Scarf
 HEAD_CLASSES = {1, 2, 3, 11}  # Hat, Hair, Sunglasses, Face
+# Where the trackable body silhouette comes from. "chroma" (default) assumes a
+# green-screen clip and keys it out. "person" derives the silhouette from the
+# SegFormer parse (every non-background class) so clips shot on a real, non-green
+# background still seed tracking ONLY on the performer (not the static scenery),
+# which is what keeps scratches glued to moving arms/legs.
+SILHOUETTE_SOURCE = os.environ.get("SILHOUETTE_SOURCE", "chroma").lower()
 
 
 def run(command, args):
@@ -208,6 +219,13 @@ def build_garment_mask(rgb):
     return _largest_blob(np.isin(_segment(rgb), list(GARMENT_CLASSES)))
 
 
+def person_silhouette(rgb):
+    """Full performer silhouette from the SegFormer parse: every non-background
+    class (skin, hair, clothes, limbs). Used for non-green-screen clips so the
+    static scenery is excluded from the trackable region."""
+    return _largest_blob(_segment(rgb) != 0)
+
+
 # How far to grow the head/hair mask before subtracting it. Long hair draping
 # over a shoulder/arm otherwise deletes the garment beneath it, leaving that
 # limb unseeded and untrackable. Keep this small.
@@ -221,7 +239,7 @@ def build_trackable_mask(rgba):
     and only removes bare face/hair, so the lattice covers the whole garment
     including hair-occluded shoulders/arms."""
     rgb = rgba[:, :, :3]
-    silhouette = clean_silhouette(rgba)
+    silhouette = person_silhouette(rgb) if SILHOUETTE_SOURCE == "person" else clean_silhouette(rgba)
     seg = _segment(rgb)
     garment = np.isin(seg, list(GARMENT_CLASSES))
     # Only subtract head/hair where it is NOT garment, and dilate gently so the
@@ -683,17 +701,21 @@ def main():
             f"Extended performer motion to full-canvas field "
             f"({GRID_COLS}x{GRID_ROWS}, {FIELD_NEIGHBORS} neighbors, power={FIELD_POWER:g})"
         )
-        print("Refining full-canvas visibility to garment-only ...")
-        garment_masks = [build_garment_mask(frames[t, :, :, :3]) for t in range(T)]
-        for t in range(T):
-            for i in range(tracks.shape[1]):
-                x = int(round(tracks[t, i, 0]))
-                y = int(round(tracks[t, i, 1]))
-                if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT and garment_masks[t][y, x]:
-                    vis[t, i] = 1
-                else:
-                    vis[t, i] = 0
-        print(f"Garment visibility mean {vis.mean():.2f}")
+        if GARMENT_VIS_REFINE:
+            print("Refining full-canvas visibility to garment-only ...")
+            garment_masks = [build_garment_mask(frames[t, :, :, :3]) for t in range(T)]
+            for t in range(T):
+                for i in range(tracks.shape[1]):
+                    x = int(round(tracks[t, i, 0]))
+                    y = int(round(tracks[t, i, 1]))
+                    if 0 <= x < CANVAS_WIDTH and 0 <= y < CANVAS_HEIGHT and garment_masks[t][y, x]:
+                        vis[t, i] = 1
+                    else:
+                        vis[t, i] = 0
+            print(f"Garment visibility mean {vis.mean():.2f}")
+        else:
+            # Keep the field fully visible; the static garment mask is the gate.
+            print("Full-canvas visibility kept at 1 (static garment mask is the scratch gate)")
     else:
         # Scatter tracked (valid) cells back into the regular driver grid.
         # Invalid cells (off-body in the reference frame) stay at their seed

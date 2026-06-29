@@ -31,7 +31,8 @@ body {
 }
 
 .panel select,
-.mobile-card-switch select {
+.mobile-card-switch select,
+.mobile-settings-sheet select {
   background: #fff;
   border: 1px solid rgba(23, 21, 19, 0.22);
   border-radius: 8px;
@@ -55,7 +56,8 @@ body {
   width: 100%;
 }
 
-.panel input[type="range"] {
+.panel input[type="range"],
+.mobile-settings-sheet input[type="range"] {
   accent-color: #171513;
   width: 100%;
 }
@@ -72,11 +74,13 @@ body {
   width: 100%;
 }
 
-.panel input[type="checkbox"] {
+.panel input[type="checkbox"],
+.mobile-settings-sheet input[type="checkbox"] {
   accent-color: #171513;
 }
 
-.panel label {
+.panel label,
+.mobile-settings-sheet label {
   color: #6e645a;
   display: grid;
   font-size: 12px;
@@ -143,6 +147,56 @@ textarea:focus-visible {
    (and its Card dropdown / Reset button) is hidden. Desktop keeps them off. */
 .mobile-controls {
   display: none;
+}
+
+.mobile-settings-sheet {
+  display: none;
+}
+
+/* Live "dress revealed" percentage, overlaid on the stage (desktop + mobile). */
+.scratch-progress {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  padding: 8px 14px;
+  border-radius: 14px;
+  background: rgba(20, 18, 16, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  transition: background 200ms ease;
+}
+
+.scratch-progress-value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.scratch-progress-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.scratch-progress.is-claimed {
+  background: rgba(138, 62, 50, 0.82);
+  border-color: rgba(255, 217, 207, 0.6);
+}
+
+@media (max-width: 700px) {
+  .scratch-progress {
+    top: max(16px, env(safe-area-inset-top));
+    left: 16px;
+  }
 }
 
 .visually-hidden {
@@ -297,6 +351,34 @@ textarea:focus-visible {
   width: 100%;
 }
 
+.mask-editor-stage {
+  aspect-ratio: 390 / 672;
+  background: #171513;
+  border-radius: 8px;
+  margin-inline: auto;
+  max-width: 100%;
+  overflow: hidden;
+  position: relative;
+  width: min(100%, calc(560px * 390 / 672));
+}
+
+.mask-editor-video {
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  position: absolute;
+  width: 100%;
+}
+
+.mask-editor-canvas {
+  cursor: crosshair;
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  touch-action: none;
+  width: 100%;
+}
+
 .dashboard-preview-empty {
   aspect-ratio: 16 / 10;
   background: var(--gray-3);
@@ -444,6 +526,45 @@ textarea:focus-visible {
     height: 38px;
     padding: 0;
     cursor: pointer;
+  }
+
+  .mobile-settings-sheet {
+    display: grid;
+    position: absolute;
+    top: calc(max(16px, env(safe-area-inset-top)) + 48px);
+    right: 16px;
+    z-index: 6;
+    width: min(320px, calc(100dvw - 32px));
+    max-height: calc(100dvh - 120px);
+    overflow-y: auto;
+    padding: 14px;
+    background: rgba(20, 18, 16, 0.86);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  }
+
+  .mobile-settings-sheet .scratch-zoom-settings {
+    border: 0;
+    padding: 0;
+  }
+
+  .mobile-settings-sheet .scratch-zoom-settings legend {
+    color: #ffd9cf;
+  }
+
+  .mobile-settings-sheet label {
+    color: #e9e0d6;
+  }
+
+  .mobile-settings-sheet input[type="range"] {
+    accent-color: #fff;
+  }
+
+  .mobile-settings-sheet input[type="checkbox"] {
+    accent-color: #fff;
   }
 }
 

@@ -152,6 +152,11 @@ class UploadedFileInfo(BaseModel):
     size_bytes: int
 
 
+class SaveGarmentRequest(BaseModel):
+    file: str
+    garment: list[int]
+
+
 @dataclass
 class Job:
     id: str
@@ -360,6 +365,49 @@ def preview_file(path: str) -> FileResponse:
     return FileResponse(target)
 
 
+@app.post("/api/mesh/garment")
+def save_garment_mask(request: SaveGarmentRequest) -> dict:
+    """Persist a hand-edited per-vertex scratchable mask back into a mesh JSON.
+
+    The app stores scratchability as a static per-vertex `garment` array
+    (cols*rows) that parseTrackedMesh ANDs into per-frame visibility. The
+    dashboard mask editor paints this array, so saving only rewrites that field
+    and leaves the tracked geometry untouched.
+    """
+    import json
+
+    name = Path(request.file).name
+    if not name.endswith(".json") or name == "index.json":
+        raise HTTPException(status_code=400, detail=f"Invalid mesh file: {request.file}")
+    path = MESH_DIR / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Mesh not found: {name}")
+
+    data = json.loads(path.read_text())
+    mesh = data.get("mesh") or {}
+    cols = int(mesh.get("cols") or 0)
+    rows = int(mesh.get("rows") or 0)
+    expected = cols * rows
+    if expected <= 0:
+        raise HTTPException(status_code=400, detail="Mesh is missing grid dimensions")
+    if len(request.garment) != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"garment length {len(request.garment)} does not match grid {cols}x{rows} ({expected})",
+        )
+
+    data["garment"] = [1 if int(flag) else 0 for flag in request.garment]
+    data["garmentSource"] = "dashboard-editor"
+    data["garmentEditedAt"] = now()
+    path.write_text(json.dumps(data, separators=(",", ":")) + "\n")
+    return {
+        "ok": True,
+        "file": name,
+        "sum": int(sum(data["garment"])),
+        "total": expected,
+    }
+
+
 @app.post("/api/jobs/generate-mesh")
 def generate_mesh(request: GenerateMeshRequest) -> dict:
     input_video = workspace_path(request.input_video, must_exist=True)
@@ -368,6 +416,14 @@ def generate_mesh(request: GenerateMeshRequest) -> dict:
 
     env = {
         "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        # Use the locally cached SegFormer / tracker weights. Without these the
+        # in-process job tries to reach huggingface.co and fails when offline.
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        # The job runs in-process; Apple MPS has crashed the Metal command buffer
+        # on this hardware (taking the API with it), so pin to CPU for stability.
+        # Override by exporting DEVICE before launching the backend.
+        "DEVICE": os.environ.get("DEVICE", "cpu"),
         "INPUT_VIDEO": relative(input_video),
         "OUTPUT_JSON": relative(output_json),
         "TRACKER": request.tracker,
