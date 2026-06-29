@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, type LucideIcon } from "lucide-react";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 
 type Vec2 = {
@@ -73,7 +74,11 @@ const CARDS: Card[] = [
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
-const CLAIM_THRESHOLD = 0.35;
+const SYMBOL_TYPE_COUNT = 8;
+const SYMBOL_SLOT_COUNT = 12;
+const SYMBOL_REVEAL_STEP_MANUAL = 0.056;
+const SYMBOL_REVEAL_STEP_AUTO = 0.083;
+const FULL_REVEAL_MANUAL_THRESHOLD = 0.7;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
 
@@ -90,6 +95,48 @@ const SCRATCH_ZOOM_DEFAULTS: ScratchZoomSettings = {
   durationMs: 180,
   bounce: false,
 };
+
+const SYMBOL_TYPES: { icon: LucideIcon; label: string; color: string }[] = [
+  { icon: Star, label: "Star", color: "#ffd54a" },
+  { icon: Coins, label: "Coin", color: "#ffb74a" },
+  { icon: Gem, label: "Gem", color: "#7ec8ff" },
+  { icon: Clover, label: "Lucky", color: "#6ddf8a" },
+  { icon: Award, label: "Badge", color: "#c9a0ff" },
+  { icon: Ticket, label: "Ticket", color: "#ff9eb8" },
+  { icon: Heart, label: "Heart", color: "#ff6b8a" },
+  { icon: Sparkles, label: "Sparkle", color: "#fff4a8" },
+];
+
+function buildSessionSymbols(): number[] {
+  return Array.from({ length: SYMBOL_SLOT_COUNT }, () => Math.floor(Math.random() * SYMBOL_TYPE_COUNT));
+}
+
+function revealedSymbolCount(progress: number, autoMode: boolean) {
+  const step = autoMode ? SYMBOL_REVEAL_STEP_AUTO : SYMBOL_REVEAL_STEP_MANUAL;
+  return Math.min(SYMBOL_SLOT_COUNT, Math.floor(progress / step));
+}
+
+function isGarmentFullyRevealed(
+  progress: number,
+  revealedCount: number,
+  sampleCount: number,
+  autoMode: boolean,
+) {
+  if (sampleCount === 0) return false;
+  if (autoMode) {
+    return revealedCount >= sampleCount;
+  }
+  return (
+    progress >= FULL_REVEAL_MANUAL_THRESHOLD
+    || revealedCount >= Math.ceil(sampleCount * FULL_REVEAL_MANUAL_THRESHOLD)
+  );
+}
+
+function GameSymbolIcon({ typeId }: { typeId: number }) {
+  const entry = SYMBOL_TYPES[typeId] ?? SYMBOL_TYPES[0];
+  const Icon = entry.icon;
+  return <Icon aria-hidden="true" color={entry.color} size={16} strokeWidth={2.2} />;
+}
 
 function scratchZoomEasing(bounce: boolean) {
   return bounce ? "cubic-bezier(0.34, 1.56, 0.64, 1)" : "ease-out";
@@ -588,11 +635,15 @@ export function ScratchPrototype() {
   showMeshRef.current = showMesh;
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
+  const [sessionSymbols, setSessionSymbols] = useState(buildSessionSymbols);
+  const [revealedSymbols, setRevealedSymbols] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(18.8);
   const [isPaused, setIsPaused] = useState(false);
   const progressRef = useRef(progress);
   const claimedRef = useRef(claimed);
+  const revealedSymbolsRef = useRef(revealedSymbols);
+  revealedSymbolsRef.current = revealedSymbols;
   const uiStateRef = useRef({
     currentTime,
     duration,
@@ -613,6 +664,7 @@ export function ScratchPrototype() {
   // Phones hide the side panel, so the scratch-zoom config lives behind a gear
   // button that opens this sheet.
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
 
   // Create the WebGL renderer once so the scratch texture persists across mesh
   // / showMesh changes (those are read live via refs).
@@ -682,7 +734,15 @@ export function ScratchPrototype() {
           }
         }
 
-        if (path.length > 0 && autoPathIndexRef.current >= path.length) {
+        const pathDone = path.length === 0 || autoPathIndexRef.current >= path.length;
+        const sampleCount = revealSamplesRef.current.length;
+        const garmentComplete = isGarmentFullyRevealed(
+          progressRef.current,
+          revealedCountRef.current,
+          sampleCount,
+          true,
+        );
+        if (!garmentComplete && sampleCount > 0 && pathDone) {
           const samples = revealSamplesRef.current;
           const revealed = revealedRef.current;
           let filled = 0;
@@ -728,7 +788,27 @@ export function ScratchPrototype() {
         }
       }
 
-      renderer.render(bottomVideo, foregroundVideo, trackedSample, showMeshRef.current, camera);
+      const sampleCount = revealSamplesRef.current.length;
+      const autoMode = autoScratchRef.current.enabled;
+      const hideForeground = claimedRef.current || isGarmentFullyRevealed(
+        progressRef.current,
+        revealedCountRef.current,
+        sampleCount,
+        autoMode,
+      );
+      if (hideForeground && !claimedRef.current) {
+        claimedRef.current = true;
+        setClaimed(true);
+      }
+
+      renderer.render(
+        bottomVideo,
+        foregroundVideo,
+        trackedSample,
+        showMeshRef.current,
+        camera,
+        hideForeground,
+      );
       animationId = requestAnimationFrame(render);
     };
 
@@ -787,8 +867,11 @@ export function ScratchPrototype() {
     glRendererRef.current?.resetForeground();
     progressRef.current = 0;
     claimedRef.current = false;
+    revealedSymbolsRef.current = 0;
+    setSessionSymbols(buildSessionSymbols());
     setProgress(0);
     setClaimed(false);
+    setRevealedSymbols(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCardId]);
 
@@ -808,6 +891,17 @@ export function ScratchPrototype() {
     const next = samples.length ? revealedCountRef.current / samples.length : 0;
     progressRef.current = next;
     setProgress(next);
+    const nextSymbolCount = revealedSymbolCount(next, autoScratchRef.current.enabled);
+    revealedSymbolsRef.current = nextSymbolCount;
+    setRevealedSymbols(nextSymbolCount);
+    const nextClaimed = isGarmentFullyRevealed(
+      next,
+      revealedCountRef.current,
+      samples.length,
+      autoScratchRef.current.enabled,
+    );
+    claimedRef.current = nextClaimed;
+    setClaimed(nextClaimed);
   }, [trackedMesh]);
 
   useEffect(() => {
@@ -907,10 +1001,13 @@ export function ScratchPrototype() {
     revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
+    revealedSymbolsRef.current = 0;
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
+    setSessionSymbols(buildSessionSymbols());
     setProgress(0);
     setClaimed(false);
+    setRevealedSymbols(0);
   }
   resetScratchRef.current = resetScratch;
 
@@ -979,7 +1076,13 @@ export function ScratchPrototype() {
     const nextProgress = samples.length ? revealedCountRef.current / samples.length : 0;
     progressRef.current = nextProgress;
     setProgress(nextProgress);
-    if (nextProgress >= CLAIM_THRESHOLD) {
+    const autoMode = autoScratchRef.current.enabled;
+    const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
+    if (nextSymbolCount !== revealedSymbolsRef.current) {
+      revealedSymbolsRef.current = nextSymbolCount;
+      setRevealedSymbols(nextSymbolCount);
+    }
+    if (isGarmentFullyRevealed(nextProgress, revealedCountRef.current, samples.length, autoMode)) {
       claimedRef.current = true;
       setClaimed(true);
     }
@@ -1128,11 +1231,18 @@ export function ScratchPrototype() {
       <section className="prototype">
         <div className="stage">
           <div
-            className={`scratch-progress${claimed ? " is-claimed" : ""}`}
-            aria-live="polite"
+            className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
+            aria-label="Game symbols"
           >
-            <span className="scratch-progress-value">{Math.round(progress * 100)}%</span>
-            <span className="scratch-progress-label">{claimed ? "Claimed!" : "Dress revealed"}</span>
+            {sessionSymbols.map((typeId, index) => (
+              <div
+                key={index}
+                className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
+                title={index < revealedSymbols ? SYMBOL_TYPES[typeId]?.label : undefined}
+              >
+                {index < revealedSymbols ? <GameSymbolIcon typeId={typeId} /> : null}
+              </div>
+            ))}
           </div>
           <video
             ref={bottomVideoRef}
@@ -1192,99 +1302,129 @@ export function ScratchPrototype() {
           />
           {/* Phones hide the dev panel, so surface compact controls on the stage
               itself. Hidden on desktop where the panel is used. */}
-          <div className="mobile-controls">
-            <label className="mobile-card-switch">
-              <span className="visually-hidden">Card</span>
-              <select
-                aria-label="Card clip"
-                onChange={(event) => setSelectedCardId(event.currentTarget.value)}
-                value={selectedCardId}
+          <div className="mobile-controls-wrap">
+            <button
+              type="button"
+              className={`mobile-reset mobile-controls-toggle${mobileControlsOpen ? " is-open" : ""}`}
+              aria-label={mobileControlsOpen ? "Hide controls" : "Show controls"}
+              aria-expanded={mobileControlsOpen}
+              onClick={() => {
+                setMobileControlsOpen((current) => {
+                  if (current) setMobileSettingsOpen(false);
+                  return !current;
+                });
+              }}
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
               >
-                {CARDS.map((entry) => (
-                  <option
-                    key={entry.id}
-                    value={entry.id}
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            {mobileControlsOpen && (
+              <div className="mobile-controls">
+                <label className="mobile-card-switch">
+                  <span className="visually-hidden">Card</span>
+                  <select
+                    aria-label="Card clip"
+                    onChange={(event) => setSelectedCardId(event.currentTarget.value)}
+                    value={selectedCardId}
                   >
-                    {entry.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="mobile-reset"
-              aria-label="Reset scratch"
-              onClick={resetScratch}
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
+                    {CARDS.map((entry) => (
+                      <option
+                        key={entry.id}
+                        value={entry.id}
+                      >
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="mobile-reset"
+                  aria-label="Reset scratch"
+                  onClick={resetScratch}
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}`}
+                  aria-label={autoScratch.enabled ? "Disable auto scratch" : "Enable auto scratch"}
+                  aria-pressed={autoScratch.enabled}
+                  onClick={() => updateAutoScratch({ enabled: !autoScratch.enabled })}
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="mobile-reset mobile-settings-toggle"
+                  aria-label="Animation settings"
+                  aria-expanded={mobileSettingsOpen}
+                  onClick={() => setMobileSettingsOpen((current) => !current)}
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+              </div>
+            )}
+            {mobileControlsOpen && mobileSettingsOpen && (
+              <div
+                className="mobile-settings-sheet"
+                role="dialog"
+                aria-label="Animation settings"
               >
-                <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
-                <path d="M3 3v5h5" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}`}
-              aria-label={autoScratch.enabled ? "Disable auto scratch" : "Enable auto scratch"}
-              aria-pressed={autoScratch.enabled}
-              onClick={() => updateAutoScratch({ enabled: !autoScratch.enabled })}
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className="mobile-reset mobile-settings-toggle"
-              aria-label="Animation settings"
-              aria-expanded={mobileSettingsOpen}
-              onClick={() => setMobileSettingsOpen((current) => !current)}
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
+                {scratchZoomControls}
+                {autoScratchControls}
+              </div>
+            )}
           </div>
-          {mobileSettingsOpen && (
-            <div
-              className="mobile-settings-sheet"
-              role="dialog"
-              aria-label="Animation settings"
-            >
-              {scratchZoomControls}
-              {autoScratchControls}
-            </div>
-          )}
         </div>
         <aside className="panel">
           <div>

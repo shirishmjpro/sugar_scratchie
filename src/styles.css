@@ -145,6 +145,10 @@ textarea:focus-visible {
 
 /* Compact on-stage controls — only shown on phones, where the side panel
    (and its Card dropdown / Reset button) is hidden. Desktop keeps them off. */
+.mobile-controls-wrap {
+  display: none;
+}
+
 .mobile-controls {
   display: none;
 }
@@ -153,23 +157,79 @@ textarea:focus-visible {
   display: none;
 }
 
-/* Live "dress revealed" percentage, overlaid on the stage (desktop + mobile). */
+/* Live "dress revealed" percentage — hidden; symbols bar replaces it. */
 .scratch-progress {
+  display: none;
+}
+
+.symbol-bar {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  z-index: 5;
-  display: grid;
-  gap: 2px;
-  padding: 8px 14px;
-  border-radius: 14px;
+  top: max(12px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: fit-content;
+  max-width: calc(100% - 56px);
+  margin-inline: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
   background: rgba(20, 18, 16, 0.62);
   border: 1px solid rgba(255, 255, 255, 0.28);
-  color: #fff;
-  pointer-events: none;
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
-  transition: background 200ms ease;
+  pointer-events: none;
+}
+
+.symbol-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.symbol-bar.is-symbols-complete:not(.is-fully-revealed) {
+  border-color: rgba(255, 217, 120, 0.75);
+  box-shadow: 0 0 0 1px rgba(255, 217, 120, 0.35);
+}
+
+.symbol-slot.is-revealed {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.45);
+  animation: symbolReveal 280ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+@keyframes symbolReveal {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (max-width: 700px) {
+  .symbol-bar {
+    top: max(12px, env(safe-area-inset-top));
+    max-width: calc(100% - 32px);
+    gap: 4px;
+    padding: 5px 8px;
+  }
+
+  .symbol-slot {
+    width: 20px;
+    height: 20px;
+  }
 }
 
 .scratch-progress-value {
@@ -190,13 +250,6 @@ textarea:focus-visible {
 .scratch-progress.is-claimed {
   background: rgba(138, 62, 50, 0.82);
   border-color: rgba(255, 217, 207, 0.6);
-}
-
-@media (max-width: 700px) {
-  .scratch-progress {
-    top: max(16px, env(safe-area-inset-top));
-    left: 16px;
-  }
 }
 
 .visually-hidden {
@@ -489,14 +542,31 @@ textarea:focus-visible {
     width: max(100dvw, 100dvh * 390 / 672);
   }
 
-  .mobile-controls {
+  .mobile-controls-wrap {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-end;
     gap: 10px;
     position: absolute;
     top: max(16px, env(safe-area-inset-top));
     right: 16px;
     z-index: 5;
+  }
+
+  .mobile-controls-toggle svg {
+    transition: transform 180ms ease;
+  }
+
+  .mobile-controls-toggle.is-open svg {
+    transform: rotate(180deg);
+  }
+
+  .mobile-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .mobile-card-switch {
@@ -536,8 +606,8 @@ textarea:focus-visible {
   .mobile-settings-sheet {
     display: grid;
     position: absolute;
-    top: calc(max(16px, env(safe-area-inset-top)) + 48px);
-    right: 16px;
+    top: calc(38px + 10px);
+    right: 0;
     z-index: 6;
     width: min(320px, calc(100dvw - 32px));
     max-height: calc(100dvh - 120px);

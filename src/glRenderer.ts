@@ -433,6 +433,7 @@ export class GarmentGLRenderer {
     sample: GLMeshSample | null,
     showMesh: boolean,
     camera: { x: number; y: number } = { x: 0, y: 0 },
+    hideForeground = false,
   ) {
     const gl = this.gl;
 
@@ -465,9 +466,9 @@ export class GarmentGLRenderer {
 
     const fgFresh = !!foregroundVideo && foregroundVideo.readyState >= 2;
     // Nothing to show yet: bail until the foreground has decoded its first frame.
-    if (!fgFresh && !this.fgEverReady) return;
+    if (!hideForeground && !fgFresh && !this.fgEverReady) return;
 
-    if (fgFresh) {
+    if (!hideForeground && fgFresh) {
       // 2. keyed foreground into fgFbo (reference frame — no camera/overscan)
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
       gl.viewport(0, 0, this.width, this.height);
@@ -485,6 +486,7 @@ export class GarmentGLRenderer {
     // If the foreground stalled we skip steps 2-3 and re-composite the last good
     // FBO contents below, so the performer freezes instead of disappearing.
 
+    if (!hideForeground) {
     // 4. composite fg (with holes) over the bottom video on screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
@@ -501,6 +503,7 @@ export class GarmentGLRenderer {
     gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), camX, camY);
     this.bindQuad(this.composite);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
 
     // 4.5. flying fabric flakes over the composite
     this.drawFlakes(camX, camY);
