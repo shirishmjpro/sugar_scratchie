@@ -149,6 +149,10 @@ textarea:focus-visible {
   display: none;
 }
 
+.mobile-sound-wrap {
+  display: none;
+}
+
 .mobile-controls {
   display: none;
 }
@@ -207,6 +211,11 @@ textarea:focus-visible {
   animation: symbolReveal 280ms cubic-bezier(0.34, 1.4, 0.64, 1);
 }
 
+.stage.is-game-over canvas,
+.stage.is-game-over .symbol-bar {
+  filter: blur(5px);
+}
+
 @keyframes symbolReveal {
   from {
     opacity: 0;
@@ -216,6 +225,62 @@ textarea:focus-visible {
     opacity: 1;
     transform: scale(1);
   }
+}
+
+.game-result {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(12, 10, 8, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.game-result-title {
+  margin: 0;
+  font-size: clamp(28px, 7vw, 40px);
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.game-result--win .game-result-title {
+  color: #ffe08a;
+  text-shadow: 0 2px 24px rgba(255, 200, 80, 0.45);
+}
+
+.game-result--lose .game-result-title {
+  color: #f0e8e4;
+}
+
+.game-result-detail {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.game-result-button {
+  justify-self: center;
+  margin-top: 8px;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  color: #1a1410;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.game-result--win .game-result-button {
+  background: linear-gradient(180deg, #ffe9a8, #ffc84a);
+  color: #3a2800;
 }
 
 @media (max-width: 700px) {
@@ -315,6 +380,51 @@ textarea:focus-visible {
   align-items: center;
   display: flex;
   gap: 10px;
+}
+
+.panel-settings-tabs {
+  display: grid;
+  gap: 14px;
+}
+
+.panel-settings-tablist {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(23, 21, 19, 0.06);
+  border: 1px solid rgba(23, 21, 19, 0.1);
+}
+
+.panel-settings-tab {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(23, 21, 19, 0.62);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.panel-settings-tab.is-active {
+  background: #fffaf2;
+  box-shadow: 0 1px 3px rgba(23, 21, 19, 0.12);
+  color: #8a3e32;
+}
+
+.panel-settings-tabpanel .scratch-zoom-settings {
+  border: 0;
+  padding: 0;
+}
+
+.panel-settings-tabpanel .scratch-zoom-settings legend {
+  display: none;
 }
 
 .eyebrow {
@@ -551,6 +661,18 @@ textarea:focus-visible {
     top: max(16px, env(safe-area-inset-top));
     right: 16px;
     z-index: 5;
+  }
+
+  .mobile-sound-wrap {
+    display: block;
+    position: absolute;
+    top: max(16px, env(safe-area-inset-top));
+    left: 16px;
+    z-index: 5;
+  }
+
+  .mobile-sound-toggle.is-muted {
+    opacity: 0.62;
   }
 
   .mobile-controls-toggle svg {

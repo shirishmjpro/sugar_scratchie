@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, type LucideIcon } from "lucide-react";
+import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, Volume2, VolumeX, type LucideIcon } from "lucide-react";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 
 type Vec2 = {
@@ -79,8 +79,12 @@ const SYMBOL_SLOT_COUNT = 12;
 const SYMBOL_REVEAL_STEP_MANUAL = 0.056;
 const SYMBOL_REVEAL_STEP_AUTO = 0.083;
 const FULL_REVEAL_MANUAL_THRESHOLD = 0.7;
+const WIN_MATCH_COUNT = 3;
+const GAME_OUTCOME_OVERLAY_PAD_MS = 300;
+const GAME_OUTCOME_SILENT_DELAY_MS = 1500;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
+const SOUND_STORAGE_KEY = "sugar-scratchie:sound";
 
 type ScratchZoomSettings = {
   enabled: boolean;
@@ -132,6 +136,181 @@ function isGarmentFullyRevealed(
   );
 }
 
+function evaluateSessionWin(symbolIds: number[]) {
+  const counts = new Array(SYMBOL_TYPE_COUNT).fill(0);
+  for (const id of symbolIds) {
+    counts[id] += 1;
+    if (counts[id] >= WIN_MATCH_COUNT) return true;
+  }
+  return false;
+}
+
+type GameResult = "win" | "lose";
+
+const DESKTOP_SETTINGS_TABS = [
+  { id: "scratch-zoom", label: "Scratch zoom" },
+  { id: "sound", label: "Sound" },
+  { id: "auto-scratch", label: "Auto scratch" },
+] as const;
+
+type DesktopSettingsTab = (typeof DESKTOP_SETTINGS_TABS)[number]["id"];
+
+// One chromatic note per symbol slot (C5 → B5); slot index always maps to the same pitch.
+const SYMBOL_NOTE_BASE_HZ = 523.25;
+const SYMBOL_NOTE_DURATION_S = 0.32;
+
+type SymbolAudioState = {
+  ctx: AudioContext | null;
+};
+
+function ensureSymbolAudio(state: SymbolAudioState) {
+  if (typeof window === "undefined") return null;
+  if (!state.ctx) {
+    const AudioCtor =
+      window.AudioContext
+      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) return null;
+    state.ctx = new AudioCtor();
+  }
+  if (state.ctx.state === "suspended") void state.ctx.resume();
+  return state.ctx;
+}
+
+function symbolSlotFrequency(slotIndex: number) {
+  return SYMBOL_NOTE_BASE_HZ * 2 ** (slotIndex / SYMBOL_SLOT_COUNT);
+}
+
+function playSymbolSlotNote(state: SymbolAudioState, slotIndex: number) {
+  const ctx = ensureSymbolAudio(state);
+  if (!ctx || slotIndex < 0 || slotIndex >= SYMBOL_SLOT_COUNT) return;
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "triangle";
+  osc.frequency.setValueAtTime(symbolSlotFrequency(slotIndex), now);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + SYMBOL_NOTE_DURATION_S);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + SYMBOL_NOTE_DURATION_S + 0.02);
+}
+
+function playNewSymbolNotes(
+  state: SymbolAudioState,
+  prevCount: number,
+  nextCount: number,
+  enabled: boolean,
+) {
+  if (!enabled) return;
+  for (let slot = prevCount; slot < nextCount; slot += 1) {
+    playSymbolSlotNote(state, slot);
+  }
+}
+
+function scheduleTone(
+  ctx: AudioContext,
+  startAt: number,
+  frequency: number,
+  durationS: number,
+  volume: number,
+  type: OscillatorType = "triangle",
+) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(frequency, startAt);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationS);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + durationS + 0.02);
+}
+
+function scheduleSlide(
+  ctx: AudioContext,
+  startAt: number,
+  fromHz: number,
+  toHz: number,
+  durationS: number,
+  volume: number,
+  type: OscillatorType = "triangle",
+) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(fromHz, startAt);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(toHz, 1), startAt + durationS);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationS);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + durationS + 0.02);
+}
+
+function playGameOutcomeSound(state: SymbolAudioState, outcome: GameResult, enabled: boolean): number {
+  if (!enabled) return GAME_OUTCOME_SILENT_DELAY_MS;
+
+  const ctx = ensureSymbolAudio(state);
+  if (!ctx) return 1800;
+
+  const now = ctx.currentTime;
+
+  if (outcome === "win") {
+    const sparkle = [
+      523.25, 587.33, 659.25, 698.46, 783.99, 880, 987.77, 1174.66, 1318.51, 1567.98, 1760, 2093,
+    ];
+    const sparkleStep = 0.048;
+    sparkle.forEach((freq, index) => {
+      scheduleTone(ctx, now + index * sparkleStep, freq, 0.09, 0.17, "sine");
+      if (index % 2 === 0) {
+        scheduleTone(ctx, now + index * sparkleStep + 0.012, freq * 2, 0.055, 0.09, "triangle");
+      }
+    });
+
+    const fanfareStart = now + sparkle.length * sparkleStep + 0.06;
+    const fanfare = [523.25, 659.25, 783.99, 987.77, 1174.66];
+    fanfare.forEach((freq, index) => {
+      const t = fanfareStart + index * 0.1;
+      scheduleTone(ctx, t, freq, 0.15, 0.3, "square");
+      scheduleTone(ctx, t, freq * 0.5, 0.15, 0.14, "sawtooth");
+      scheduleTone(ctx, t + 0.04, freq * 1.5, 0.08, 0.08, "triangle");
+    });
+
+    const chordAt = fanfareStart + fanfare.length * 0.1 + 0.1;
+    const chord = [261.63, 392, 523.25, 659.25, 783.99, 1046.5, 1318.51];
+    chord.forEach((freq, index) => {
+      const type: OscillatorType = index < 2 ? "sawtooth" : "triangle";
+      scheduleTone(ctx, chordAt, freq, 0.78, index < 2 ? 0.11 : 0.13, type);
+    });
+
+    const glitterStart = chordAt + 0.12;
+    const glitter = [2093, 2349, 2637, 2793, 3136, 3520];
+    glitter.forEach((freq, index) => {
+      scheduleTone(ctx, glitterStart + index * 0.045, freq, 0.11, 0.11, "sine");
+    });
+
+    const shimmerStart = glitterStart + glitter.length * 0.045 + 0.08;
+    for (let i = 0; i < 6; i += 1) {
+      scheduleTone(ctx, shimmerStart + i * 0.06, 1760 + i * 110, 0.07, 0.09, "sine");
+    }
+
+    const endTime = shimmerStart + 6 * 0.06 + 0.35;
+    return (endTime - now) * 1000 + GAME_OUTCOME_OVERLAY_PAD_MS;
+  }
+
+  // Sad descending "wah wah" for a loss.
+  scheduleSlide(ctx, now, 340, 190, 0.52, 0.2, "sawtooth");
+  scheduleSlide(ctx, now + 0.62, 290, 130, 0.58, 0.18, "sawtooth");
+  scheduleSlide(ctx, now + 1.28, 220, 95, 0.72, 0.16, "triangle");
+  return 2.05 * 1000 + GAME_OUTCOME_OVERLAY_PAD_MS;
+}
+
 function GameSymbolIcon({ typeId }: { typeId: number }) {
   const entry = SYMBOL_TYPES[typeId] ?? SYMBOL_TYPES[0];
   const Icon = entry.icon;
@@ -140,6 +319,18 @@ function GameSymbolIcon({ typeId }: { typeId: number }) {
 
 function scratchZoomEasing(bounce: boolean) {
   return bounce ? "cubic-bezier(0.34, 1.56, 0.64, 1)" : "ease-out";
+}
+
+function loadSoundEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = localStorage.getItem(SOUND_STORAGE_KEY);
+    if (!raw) return true;
+    const parsed = JSON.parse(raw) as { enabled?: boolean };
+    return parsed.enabled ?? true;
+  } catch {
+    return true;
+  }
 }
 
 function loadScratchZoomSettings(): ScratchZoomSettings {
@@ -171,14 +362,12 @@ const AUTO_SCRATCH_MAX_PER_FRAME = 32;
 type AutoScratchSettings = {
   enabled: boolean;
   speed: number;
-  loop: boolean;
   flakes: boolean;
 };
 
 const AUTO_SCRATCH_DEFAULTS: AutoScratchSettings = {
   enabled: false,
   speed: 58,
-  loop: false,
   flakes: true,
 };
 
@@ -191,7 +380,6 @@ function loadAutoScratchSettings(): AutoScratchSettings {
     return {
       enabled: parsed.enabled ?? AUTO_SCRATCH_DEFAULTS.enabled,
       speed: clampValue(Number(parsed.speed) || AUTO_SCRATCH_DEFAULTS.speed, 1, 120),
-      loop: parsed.loop ?? AUTO_SCRATCH_DEFAULTS.loop,
       flakes: parsed.flakes ?? AUTO_SCRATCH_DEFAULTS.flakes,
     };
   } catch {
@@ -635,6 +823,7 @@ export function ScratchPrototype() {
   showMeshRef.current = showMesh;
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
+  const [gameResult, setGameResult] = useState<GameResult | null>(null);
   const [sessionSymbols, setSessionSymbols] = useState(buildSessionSymbols);
   const [revealedSymbols, setRevealedSymbols] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -642,6 +831,12 @@ export function ScratchPrototype() {
   const [isPaused, setIsPaused] = useState(false);
   const progressRef = useRef(progress);
   const claimedRef = useRef(claimed);
+  const gameResultRef = useRef<GameResult | null>(gameResult);
+  gameResultRef.current = gameResult;
+  const gameResultPendingRef = useRef<GameResult | null>(null);
+  const gameResultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionSymbolsRef = useRef(sessionSymbols);
+  sessionSymbolsRef.current = sessionSymbols;
   const revealedSymbolsRef = useRef(revealedSymbols);
   revealedSymbolsRef.current = revealedSymbols;
   const uiStateRef = useRef({
@@ -656,17 +851,37 @@ export function ScratchPrototype() {
   const [autoScratch, setAutoScratch] = useState<AutoScratchSettings>(loadAutoScratchSettings);
   const autoScratchRef = useRef(autoScratch);
   autoScratchRef.current = autoScratch;
+  const [soundEnabled, setSoundEnabled] = useState(loadSoundEnabled);
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
   const autoPathRef = useRef<Vec2[]>([]);
   const autoPathIndexRef = useRef(0);
   const autoPathProgressRef = useRef(0);
   const applyScratchAtUvRef = useRef<(u: number, v: number, radius: number, worldPoint?: Vec2 | null) => void>(() => undefined);
+  const tryResolveGameRef = useRef<() => void>(() => undefined);
   const resetScratchRef = useRef<() => void>(() => undefined);
+  const symbolAudioRef = useRef<SymbolAudioState>({ ctx: null });
   // Phones hide the side panel, so the scratch-zoom config lives behind a gear
   // button that opens this sheet.
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
+  const [desktopSettingsTab, setDesktopSettingsTab] = useState<DesktopSettingsTab>("scratch-zoom");
 
-  // Create the WebGL renderer once so the scratch texture persists across mesh
+  function clearGameResultTimer() {
+    if (gameResultTimerRef.current !== null) {
+      window.clearTimeout(gameResultTimerRef.current);
+      gameResultTimerRef.current = null;
+    }
+  }
+
+  function resetGameOutcome() {
+    clearGameResultTimer();
+    gameResultPendingRef.current = null;
+    gameResultRef.current = null;
+    setGameResult(null);
+  }
+
+  useEffect(() => () => clearGameResultTimer(), []);
   // / showMesh changes (those are read live via refs).
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -715,7 +930,7 @@ export function ScratchPrototype() {
       camera.y += (targetCamY - camera.y) * CHEST_SMOOTH;
 
       const autoSettings = autoScratchRef.current;
-      if (autoSettings.enabled && trackedSample) {
+      if (autoSettings.enabled && trackedSample && gameResultPendingRef.current === null) {
         const path = autoPathRef.current;
         if (path.length > 0 && autoPathIndexRef.current < path.length) {
           autoPathProgressRef.current += autoSettings.speed * dt;
@@ -752,12 +967,6 @@ export function ScratchPrototype() {
             const worldPos = sampleMeshUvToWorld(trackedSample, pt.x, pt.y);
             applyScratchAtUvRef.current(pt.x, pt.y, AUTO_SCRATCH_RADIUS, worldPos);
             filled += 1;
-          }
-
-          if (autoSettings.loop && revealedCountRef.current >= samples.length && samples.length > 0) {
-            resetScratchRef.current();
-            autoPathIndexRef.current = 0;
-            autoPathProgressRef.current = 0;
           }
         }
       }
@@ -799,6 +1008,7 @@ export function ScratchPrototype() {
       if (hideForeground && !claimedRef.current) {
         claimedRef.current = true;
         setClaimed(true);
+        tryResolveGameRef.current();
       }
 
       renderer.render(
@@ -867,6 +1077,7 @@ export function ScratchPrototype() {
     glRendererRef.current?.resetForeground();
     progressRef.current = 0;
     claimedRef.current = false;
+    resetGameOutcome();
     revealedSymbolsRef.current = 0;
     setSessionSymbols(buildSessionSymbols());
     setProgress(0);
@@ -902,6 +1113,7 @@ export function ScratchPrototype() {
     );
     claimedRef.current = nextClaimed;
     setClaimed(nextClaimed);
+    if (nextClaimed) tryResolveGameRef.current();
   }, [trackedMesh]);
 
   useEffect(() => {
@@ -971,6 +1183,10 @@ export function ScratchPrototype() {
     localStorage.setItem(AUTO_SCRATCH_STORAGE_KEY, JSON.stringify(autoScratch));
   }, [autoScratch]);
 
+  useEffect(() => {
+    localStorage.setItem(SOUND_STORAGE_KEY, JSON.stringify({ enabled: soundEnabled }));
+  }, [soundEnabled]);
+
   function syncScratchZoomTransition(canvas: HTMLCanvasElement, settings = scratchZoomRef.current) {
     canvas.style.setProperty("--scratch-zoom-duration", `${settings.durationMs}ms`);
     canvas.style.setProperty("--scratch-zoom-easing", scratchZoomEasing(settings.bounce));
@@ -986,7 +1202,13 @@ export function ScratchPrototype() {
   }
 
   function updateAutoScratch(patch: Partial<AutoScratchSettings>) {
+    if (patch.enabled && soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
     setAutoScratch((current) => ({ ...current, ...patch }));
+  }
+
+  function updateSoundEnabled(enabled: boolean) {
+    if (enabled) ensureSymbolAudio(symbolAudioRef.current);
+    setSoundEnabled(enabled);
   }
 
   function isPhoneLayout() {
@@ -1001,6 +1223,7 @@ export function ScratchPrototype() {
     revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
+    resetGameOutcome();
     revealedSymbolsRef.current = 0;
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
@@ -1010,6 +1233,31 @@ export function ScratchPrototype() {
     setRevealedSymbols(0);
   }
   resetScratchRef.current = resetScratch;
+
+  function tryResolveGame() {
+    if (gameResultPendingRef.current !== null) return;
+    if (revealedSymbolsRef.current < SYMBOL_SLOT_COUNT) return;
+    const autoMode = autoScratchRef.current.enabled;
+    const sampleCount = revealSamplesRef.current.length;
+    if (!isGarmentFullyRevealed(progressRef.current, revealedCountRef.current, sampleCount, autoMode)) {
+      return;
+    }
+    const outcome: GameResult = evaluateSessionWin(sessionSymbolsRef.current) ? "win" : "lose";
+    gameResultPendingRef.current = outcome;
+    setAutoScratch((current) => (current.enabled ? { ...current, enabled: false } : current));
+    const overlayDelayMs = playGameOutcomeSound(
+      symbolAudioRef.current,
+      outcome,
+      soundEnabledRef.current,
+    );
+    clearGameResultTimer();
+    gameResultTimerRef.current = window.setTimeout(() => {
+      gameResultTimerRef.current = null;
+      gameResultRef.current = outcome;
+      setGameResult(outcome);
+    }, overlayDelayMs);
+  }
+  tryResolveGameRef.current = tryResolveGame;
 
   // On phones the canvas is centered with a translate that fills the screen, so
   // the magnify scale has to be composed on top of it rather than replacing it.
@@ -1056,6 +1304,8 @@ export function ScratchPrototype() {
   }
 
   function applyScratchAtUv(u: number, v: number, radius: number, worldPoint?: Vec2 | null) {
+    if (gameResultPendingRef.current !== null) return;
+
     marksRef.current = [...marksRef.current, { u, v, radius }].slice(-180);
     glRendererRef.current?.paintScratch(u, v, radius);
 
@@ -1079,13 +1329,16 @@ export function ScratchPrototype() {
     const autoMode = autoScratchRef.current.enabled;
     const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
     if (nextSymbolCount !== revealedSymbolsRef.current) {
+      const prevCount = revealedSymbolsRef.current;
       revealedSymbolsRef.current = nextSymbolCount;
       setRevealedSymbols(nextSymbolCount);
+      playNewSymbolNotes(symbolAudioRef.current, prevCount, nextSymbolCount, soundEnabledRef.current);
     }
     if (isGarmentFullyRevealed(nextProgress, revealedCountRef.current, samples.length, autoMode)) {
       claimedRef.current = true;
       setClaimed(true);
     }
+    tryResolveGame();
   }
   applyScratchAtUvRef.current = applyScratchAtUv;
 
@@ -1183,6 +1436,20 @@ export function ScratchPrototype() {
     </fieldset>
   );
 
+  const soundControls = (
+    <fieldset className="scratch-zoom-settings">
+      <legend>Sound</legend>
+      <label className="checkbox-label">
+        <input
+          checked={soundEnabled}
+          onChange={(event) => updateSoundEnabled(event.currentTarget.checked)}
+          type="checkbox"
+        />
+        Game sounds
+      </label>
+    </fieldset>
+  );
+
   const autoScratchControls = (
     <fieldset className="scratch-zoom-settings">
       <legend>Auto scratch</legend>
@@ -1208,15 +1475,6 @@ export function ScratchPrototype() {
       </label>
       <label className="checkbox-label">
         <input
-          checked={autoScratch.loop}
-          disabled={!autoScratch.enabled}
-          onChange={(event) => updateAutoScratch({ loop: event.currentTarget.checked })}
-          type="checkbox"
-        />
-        Loop
-      </label>
-      <label className="checkbox-label">
-        <input
           checked={autoScratch.flakes}
           onChange={(event) => updateAutoScratch({ flakes: event.currentTarget.checked })}
           type="checkbox"
@@ -1226,10 +1484,62 @@ export function ScratchPrototype() {
     </fieldset>
   );
 
+  const desktopSettingsTabs = (
+    <div className="panel-settings-tabs">
+      <div
+        className="panel-settings-tablist"
+        role="tablist"
+        aria-label="Settings"
+      >
+        {DESKTOP_SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            id={`panel-tab-${tab.id}`}
+            aria-selected={desktopSettingsTab === tab.id}
+            aria-controls={`panel-tabpanel-${tab.id}`}
+            className={`panel-settings-tab${desktopSettingsTab === tab.id ? " is-active" : ""}`}
+            onClick={() => setDesktopSettingsTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      <div
+        id="panel-tabpanel-scratch-zoom"
+        role="tabpanel"
+        aria-labelledby="panel-tab-scratch-zoom"
+        hidden={desktopSettingsTab !== "scratch-zoom"}
+        className="panel-settings-tabpanel"
+      >
+        {scratchZoomControls}
+      </div>
+      <div
+        id="panel-tabpanel-sound"
+        role="tabpanel"
+        aria-labelledby="panel-tab-sound"
+        hidden={desktopSettingsTab !== "sound"}
+        className="panel-settings-tabpanel"
+      >
+        {soundControls}
+      </div>
+      <div
+        id="panel-tabpanel-auto-scratch"
+        role="tabpanel"
+        aria-labelledby="panel-tab-auto-scratch"
+        hidden={desktopSettingsTab !== "auto-scratch"}
+        className="panel-settings-tabpanel"
+      >
+        {autoScratchControls}
+      </div>
+    </div>
+  );
+
   return (
     <main className="app-shell">
       <section className="prototype">
-        <div className="stage">
+        <div className={`stage${gameResult ? " is-game-over" : ""}`}>
           <div
             className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
             aria-label="Game symbols"
@@ -1269,6 +1579,7 @@ export function ScratchPrototype() {
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
+              if (soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
               const bottomVideo = bottomVideoRef.current;
               const foregroundVideo = foregroundVideoRef.current;
               if (bottomVideo?.paused) void bottomVideo.play().catch(() => undefined);
@@ -1300,6 +1611,21 @@ export function ScratchPrototype() {
               clearScratchZoom();
             }}
           />
+          <div className="mobile-sound-wrap">
+            <button
+              type="button"
+              className={`mobile-reset mobile-sound-toggle${soundEnabled ? "" : " is-muted"}`}
+              aria-label={soundEnabled ? "Mute sounds" : "Unmute sounds"}
+              aria-pressed={soundEnabled}
+              onClick={() => updateSoundEnabled(!soundEnabled)}
+            >
+              {soundEnabled ? (
+                <Volume2 aria-hidden="true" size={20} strokeWidth={2.2} />
+              ) : (
+                <VolumeX aria-hidden="true" size={20} strokeWidth={2.2} />
+              )}
+            </button>
+          </div>
           {/* Phones hide the dev panel, so surface compact controls on the stage
               itself. Hidden on desktop where the panel is used. */}
           <div className="mobile-controls-wrap">
@@ -1425,6 +1751,25 @@ export function ScratchPrototype() {
               </div>
             )}
           </div>
+          {gameResult ? (
+            <div
+              className={`game-result game-result--${gameResult}`}
+              role="status"
+              aria-live="polite"
+            >
+              <p className="game-result-title">
+                {gameResult === "win" ? "You win!" : "No luck this time"}
+              </p>
+              <p className="game-result-detail">
+                {gameResult === "win"
+                  ? "Three matching symbols — nice!"
+                  : "No three-of-a-kind — try again."}
+              </p>
+              <button type="button" className="game-result-button" onClick={resetScratch}>
+                Play again
+              </button>
+            </div>
+          ) : null}
         </div>
         <aside className="panel">
           <div>
@@ -1512,8 +1857,7 @@ export function ScratchPrototype() {
               Reload mesh
             </button>
           </div>
-          {scratchZoomControls}
-          {autoScratchControls}
+          {desktopSettingsTabs}
         </aside>
       </section>
     </main>
