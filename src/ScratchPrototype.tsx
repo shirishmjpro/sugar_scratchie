@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, Volume2, VolumeX, type LucideIcon } from "lucide-react";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 
@@ -12,6 +12,24 @@ type ScratchMark = {
   v: number;
   radius: number;
 };
+
+// A coin that animates from the scratch origin up to a symbol slot in the top
+// bar each time a new symbol ("coin") is earned. Positions are stage-relative
+// pixels; the CSS keyframe arcs the coin from `from*` to `to*`.
+type FlyingCoin = {
+  id: number;
+  typeId: number;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  midX: number;
+  midY: number;
+  delayMs: number;
+};
+
+const COIN_FLIGHT_DURATION_MS = 620;
+const COIN_FLIGHT_STAGGER_MS = 80;
 
 const CANVAS_WIDTH = 390;
 const CANVAS_HEIGHT = 672;
@@ -789,6 +807,13 @@ function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
 
 export function ScratchPrototype() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const symbolSlotRefs = useRef<(HTMLDivElement | null)[]>([]);
+  // Most recent pointer position in viewport coords; used as the origin of the
+  // flying-coin animation for manual scratches.
+  const lastPointerClientRef = useRef<Vec2 | null>(null);
+  const coinIdRef = useRef(0);
+  const [flyingCoins, setFlyingCoins] = useState<FlyingCoin[]>([]);
   const bottomVideoRef = useRef<HTMLVideoElement | null>(null);
   const foregroundVideoRef = useRef<HTMLVideoElement | null>(null);
   const glRendererRef = useRef<GarmentGLRenderer | null>(null);
@@ -1083,6 +1108,7 @@ export function ScratchPrototype() {
     setProgress(0);
     setClaimed(false);
     setRevealedSymbols(0);
+    setFlyingCoins([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCardId]);
 
@@ -1231,6 +1257,7 @@ export function ScratchPrototype() {
     setProgress(0);
     setClaimed(false);
     setRevealedSymbols(0);
+    setFlyingCoins([]);
   }
   resetScratchRef.current = resetScratch;
 
@@ -1303,6 +1330,82 @@ export function ScratchPrototype() {
     };
   }
 
+  // Fly a coin from the scratch origin up to each newly revealed symbol slot.
+  // Auto scratch starts the flight from the stage center; manual scratch starts
+  // it from the user's finger. Coordinates are resolved against the live stage
+  // and symbol-bar layout so the coins land on the correct slots.
+  // Convert a canvas reference-frame point (the space scratches live in) to a
+  // stage-relative pixel. Applies the same chest-follow camera + present-zoom
+  // forward transform the GL renderer uses, then maps presented canvas pixels
+  // through the live canvas rect so it lands where the point visually appears.
+  function worldToStagePoint(worldPoint: Vec2): Vec2 | null {
+    const canvas = canvasRef.current;
+    const stage = stageRef.current;
+    if (!canvas || !stage) return null;
+    const canvasRect = canvas.getBoundingClientRect();
+    const stageRect = stage.getBoundingClientRect();
+    const cam = cameraRef.current;
+    const refClipX = (worldPoint.x / CANVAS_WIDTH) * 2 - 1;
+    const refClipY = 1 - (worldPoint.y / CANVAS_HEIGHT) * 2;
+    const presentX = ((refClipX * PRESENT_ZOOM + cam.x) + 1) / 2 * CANVAS_WIDTH;
+    const presentY = (1 - (refClipY * PRESENT_ZOOM + cam.y)) / 2 * CANVAS_HEIGHT;
+    const clientX = canvasRect.left + (presentX / CANVAS_WIDTH) * canvasRect.width;
+    const clientY = canvasRect.top + (presentY / CANVAS_HEIGHT) * canvasRect.height;
+    return { x: clientX - stageRect.left, y: clientY - stageRect.top };
+  }
+
+  function spawnSymbolCoins(prevCount: number, nextCount: number, worldPoint?: Vec2 | null) {
+    const stage = stageRef.current;
+    if (!stage || nextCount <= prevCount) return;
+    const stageRect = stage.getBoundingClientRect();
+
+    const autoMode = autoScratchRef.current.enabled;
+    let originX: number;
+    let originY: number;
+    const autoOrigin = autoMode && worldPoint ? worldToStagePoint(worldPoint) : null;
+    if (autoOrigin) {
+      originX = autoOrigin.x;
+      originY = autoOrigin.y;
+    } else if (autoMode || !lastPointerClientRef.current) {
+      originX = stageRect.width / 2;
+      originY = stageRect.height / 2;
+    } else {
+      originX = lastPointerClientRef.current.x - stageRect.left;
+      originY = lastPointerClientRef.current.y - stageRect.top;
+    }
+
+    const symbols = sessionSymbolsRef.current;
+    const coins: FlyingCoin[] = [];
+    for (let slot = prevCount; slot < nextCount; slot += 1) {
+      const slotEl = symbolSlotRefs.current[slot];
+      if (!slotEl) continue;
+      const slotRect = slotEl.getBoundingClientRect();
+      const toX = slotRect.left - stageRect.left + slotRect.width / 2;
+      const toY = slotRect.top - stageRect.top + slotRect.height / 2;
+      // Lift the midpoint above the straight line for a gentle arc toward the bar.
+      const midX = (originX + toX) / 2;
+      const midY = Math.min(originY, toY) - 56;
+      coins.push({
+        id: (coinIdRef.current += 1),
+        typeId: symbols[slot] ?? 0,
+        fromX: originX,
+        fromY: originY,
+        toX,
+        toY,
+        midX,
+        midY,
+        delayMs: (slot - prevCount) * COIN_FLIGHT_STAGGER_MS,
+      });
+    }
+    if (coins.length > 0) {
+      setFlyingCoins((current) => [...current, ...coins]);
+    }
+  }
+
+  function removeFlyingCoin(id: number) {
+    setFlyingCoins((current) => current.filter((coin) => coin.id !== id));
+  }
+
   function applyScratchAtUv(u: number, v: number, radius: number, worldPoint?: Vec2 | null) {
     if (gameResultPendingRef.current !== null) return;
 
@@ -1333,6 +1436,7 @@ export function ScratchPrototype() {
       revealedSymbolsRef.current = nextSymbolCount;
       setRevealedSymbols(nextSymbolCount);
       playNewSymbolNotes(symbolAudioRef.current, prevCount, nextSymbolCount, soundEnabledRef.current);
+      spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
     }
     if (isGarmentFullyRevealed(nextProgress, revealedCountRef.current, samples.length, autoMode)) {
       claimedRef.current = true;
@@ -1539,7 +1643,7 @@ export function ScratchPrototype() {
   return (
     <main className="app-shell">
       <section className="prototype">
-        <div className={`stage${gameResult ? " is-game-over" : ""}`}>
+        <div ref={stageRef} className={`stage${gameResult ? " is-game-over" : ""}`}>
           <div
             className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
             aria-label="Game symbols"
@@ -1547,6 +1651,9 @@ export function ScratchPrototype() {
             {sessionSymbols.map((typeId, index) => (
               <div
                 key={index}
+                ref={(el) => {
+                  symbolSlotRefs.current[index] = el;
+                }}
                 className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
                 title={index < revealedSymbols ? SYMBOL_TYPES[typeId]?.label : undefined}
               >
@@ -1554,6 +1661,28 @@ export function ScratchPrototype() {
               </div>
             ))}
           </div>
+          {flyingCoins.map((coin) => (
+            <div
+              key={coin.id}
+              className="flying-coin"
+              style={
+                {
+                  "--coin-from-x": `${coin.fromX}px`,
+                  "--coin-from-y": `${coin.fromY}px`,
+                  "--coin-mid-x": `${coin.midX}px`,
+                  "--coin-mid-y": `${coin.midY}px`,
+                  "--coin-to-x": `${coin.toX}px`,
+                  "--coin-to-y": `${coin.toY}px`,
+                  animationDuration: `${COIN_FLIGHT_DURATION_MS}ms`,
+                  animationDelay: `${coin.delayMs}ms`,
+                } as CSSProperties
+              }
+              onAnimationEnd={() => removeFlyingCoin(coin.id)}
+              aria-hidden="true"
+            >
+              <GameSymbolIcon typeId={coin.typeId} />
+            </div>
+          ))}
           <video
             ref={bottomVideoRef}
             className="source-video"
@@ -1585,6 +1714,7 @@ export function ScratchPrototype() {
               if (bottomVideo?.paused) void bottomVideo.play().catch(() => undefined);
               if (foregroundVideo?.paused) void foregroundVideo.play().catch(() => undefined);
               drawingRef.current = true;
+              lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
               const point = getCanvasPoint(event.clientX, event.clientY);
               hoverPointRef.current = point;
               event.currentTarget.setPointerCapture(event.pointerId);
@@ -1592,6 +1722,7 @@ export function ScratchPrototype() {
               addScratch(event.clientX, event.clientY);
             }}
             onPointerMove={(event) => {
+              lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
               hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
               if (!drawingRef.current) return;
               addScratch(event.clientX, event.clientY);
