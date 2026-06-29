@@ -112,6 +112,46 @@ function loadScratchZoomSettings(): ScratchZoomSettings {
   }
 }
 
+const AUTO_SCRATCH_STORAGE_KEY = "sugar-scratchie:auto-scratch";
+const SCRATCH_RADIUS = 0.045;
+const AUTO_SCRATCH_RADIUS = 0.092;
+const AUTO_SCRATCH_DIAGONAL_LINES = 18;
+// Step along each ↘ stroke (top-left → bottom-right) so brush circles overlap.
+const AUTO_SCRATCH_PATH_STEP_UV = AUTO_SCRATCH_RADIUS * 0.72;
+const AUTO_SCRATCH_FILL_BATCH = 36;
+const AUTO_SCRATCH_MAX_PER_FRAME = 32;
+
+type AutoScratchSettings = {
+  enabled: boolean;
+  speed: number;
+  loop: boolean;
+  flakes: boolean;
+};
+
+const AUTO_SCRATCH_DEFAULTS: AutoScratchSettings = {
+  enabled: false,
+  speed: 58,
+  loop: false,
+  flakes: true,
+};
+
+function loadAutoScratchSettings(): AutoScratchSettings {
+  if (typeof window === "undefined") return AUTO_SCRATCH_DEFAULTS;
+  try {
+    const raw = localStorage.getItem(AUTO_SCRATCH_STORAGE_KEY);
+    if (!raw) return AUTO_SCRATCH_DEFAULTS;
+    const parsed = JSON.parse(raw) as Partial<AutoScratchSettings>;
+    return {
+      enabled: parsed.enabled ?? AUTO_SCRATCH_DEFAULTS.enabled,
+      speed: clampValue(Number(parsed.speed) || AUTO_SCRATCH_DEFAULTS.speed, 1, 120),
+      loop: parsed.loop ?? AUTO_SCRATCH_DEFAULTS.loop,
+      flakes: parsed.flakes ?? AUTO_SCRATCH_DEFAULTS.flakes,
+    };
+  } catch {
+    return AUTO_SCRATCH_DEFAULTS;
+  }
+}
+
 function clampValue(value: number, lo: number, hi: number) {
   return value < lo ? lo : value > hi ? hi : value;
 }
@@ -244,6 +284,91 @@ function buildRevealSamples(mesh: TrackedMesh | null): Vec2[] {
   }
 
   return points;
+}
+
+function densifyScratchPath(points: Vec2[], maxStep: number): Vec2[] {
+  if (points.length === 0) return [];
+  const out: Vec2[] = [{ x: points[0].x, y: points[0].y }];
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= maxStep) {
+      out.push(b);
+      continue;
+    }
+    const steps = Math.ceil(dist / maxStep);
+    for (let s = 1; s <= steps; s += 1) {
+      const t = s / steps;
+      out.push({ x: a.x + dx * t, y: a.y + dy * t });
+    }
+  }
+  return out;
+}
+
+function isGarmentUv(mesh: TrackedMesh | null, u: number, v: number) {
+  const garment = mesh?.garment ?? null;
+  const cols = mesh?.cols ?? 0;
+  const rows = mesh?.rows ?? 0;
+  if (!garment || cols <= 0 || rows <= 0) return true;
+  const col = Math.round(clampValue(u, 0, 1) * (cols - 1));
+  const row = Math.round(clampValue(v, 0, 1) * (rows - 1));
+  return Boolean(garment[row * cols + col]);
+}
+
+// Parallel ↙ strokes (u+v = const): top → bottom on each line; lines sweep top-left → bottom-right.
+function buildAutoScratchPath(mesh: TrackedMesh | null): Vec2[] {
+  const lineCount = AUTO_SCRATCH_DIAGONAL_LINES;
+  const lines: { startU: number; startV: number; points: Vec2[] }[] = [];
+
+  for (let i = 0; i <= lineCount; i += 1) {
+    const s = (i / lineCount) * 2;
+    let startU: number;
+    let startV: number;
+    let endU: number;
+    let endV: number;
+    if (s <= 1) {
+      // ↙ along u+v=s: top (high u, low v) → bottom (low u, high v)
+      startU = s;
+      startV = 0;
+      endU = 0;
+      endV = s;
+    } else {
+      const t = s - 1;
+      startU = 1;
+      startV = 1 - t;
+      endU = 1 - t;
+      endV = 1;
+    }
+
+    const span = Math.hypot(endU - startU, endV - startV);
+    if (span < 1e-6) continue;
+
+    const linePoints: Vec2[] = [];
+    const stepsAlong = Math.max(2, Math.ceil(span / (AUTO_SCRATCH_PATH_STEP_UV * 1.8)));
+    for (let j = 0; j <= stepsAlong; j += 1) {
+      const f = j / stepsAlong;
+      const u = startU + (endU - startU) * f;
+      const v = startV + (endV - startV) * f;
+      if (!isGarmentUv(mesh, u, v)) continue;
+      linePoints.push({ x: u, y: v });
+    }
+    if (linePoints.length === 0) continue;
+    lines.push({ startU: linePoints[0].x, startV: linePoints[0].y, points: linePoints });
+  }
+
+  lines.sort((a, b) => {
+    if (Math.abs(a.startV - b.startV) > 1e-4) return a.startV - b.startV;
+    return a.startU - b.startU;
+  });
+
+  const sparse: Vec2[] = [];
+  for (const line of lines) {
+    sparse.push(...densifyScratchPath(line.points, AUTO_SCRATCH_PATH_STEP_UV));
+  }
+  return sparse;
 }
 
 type TrackedMeshFrame = {
@@ -477,6 +602,14 @@ export function ScratchPrototype() {
   const [scratchZoom, setScratchZoom] = useState<ScratchZoomSettings>(loadScratchZoomSettings);
   const scratchZoomRef = useRef(scratchZoom);
   scratchZoomRef.current = scratchZoom;
+  const [autoScratch, setAutoScratch] = useState<AutoScratchSettings>(loadAutoScratchSettings);
+  const autoScratchRef = useRef(autoScratch);
+  autoScratchRef.current = autoScratch;
+  const autoPathRef = useRef<Vec2[]>([]);
+  const autoPathIndexRef = useRef(0);
+  const autoPathProgressRef = useRef(0);
+  const applyScratchAtUvRef = useRef<(u: number, v: number, radius: number, worldPoint?: Vec2 | null) => void>(() => undefined);
+  const resetScratchRef = useRef<() => void>(() => undefined);
   // Phones hide the side panel, so the scratch-zoom config lives behind a gear
   // button that opens this sheet.
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
@@ -498,9 +631,13 @@ export function ScratchPrototype() {
 
     let animationId = 0;
     const startedAt = performance.now();
+    let lastFrameTime = performance.now();
 
     const render = () => {
-      const time = (performance.now() - startedAt) / 1000;
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+      lastFrameTime = now;
+      const time = (now - startedAt) / 1000;
       const bottomVideo = bottomVideoRef.current;
       const foregroundVideo = foregroundVideoRef.current;
       const trackedMeshNow = trackedMeshRef.current;
@@ -524,6 +661,46 @@ export function ScratchPrototype() {
       }
       camera.x += (targetCamX - camera.x) * CHEST_SMOOTH;
       camera.y += (targetCamY - camera.y) * CHEST_SMOOTH;
+
+      const autoSettings = autoScratchRef.current;
+      if (autoSettings.enabled && trackedSample) {
+        const path = autoPathRef.current;
+        if (path.length > 0 && autoPathIndexRef.current < path.length) {
+          autoPathProgressRef.current += autoSettings.speed * dt;
+          let scratched = 0;
+          while (
+            autoPathProgressRef.current >= 1
+            && autoPathIndexRef.current < path.length
+            && scratched < AUTO_SCRATCH_MAX_PER_FRAME
+          ) {
+            autoPathProgressRef.current -= 1;
+            const pt = path[autoPathIndexRef.current];
+            const worldPos = sampleMeshUvToWorld(trackedSample, pt.x, pt.y);
+            applyScratchAtUvRef.current(pt.x, pt.y, AUTO_SCRATCH_RADIUS, worldPos);
+            autoPathIndexRef.current += 1;
+            scratched += 1;
+          }
+        }
+
+        if (path.length > 0 && autoPathIndexRef.current >= path.length) {
+          const samples = revealSamplesRef.current;
+          const revealed = revealedRef.current;
+          let filled = 0;
+          for (let i = 0; i < samples.length && filled < AUTO_SCRATCH_FILL_BATCH; i += 1) {
+            if (revealed[i]) continue;
+            const pt = samples[i];
+            const worldPos = sampleMeshUvToWorld(trackedSample, pt.x, pt.y);
+            applyScratchAtUvRef.current(pt.x, pt.y, AUTO_SCRATCH_RADIUS, worldPos);
+            filled += 1;
+          }
+
+          if (autoSettings.loop && revealedCountRef.current >= samples.length && samples.length > 0) {
+            resetScratchRef.current();
+            autoPathIndexRef.current = 0;
+            autoPathProgressRef.current = 0;
+          }
+        }
+      }
 
       if (bottomVideo && foregroundVideo && bottomVideo.readyState >= 2 && foregroundVideo.readyState >= 1) {
         syncVideoTime(bottomVideo, foregroundVideo);
@@ -634,6 +811,12 @@ export function ScratchPrototype() {
   }, [trackedMesh]);
 
   useEffect(() => {
+    autoPathRef.current = buildAutoScratchPath(trackedMesh);
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
+  }, [trackedMesh]);
+
+  useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
     const foregroundVideo = foregroundVideoRef.current;
     if (!bottomVideo || !foregroundVideo) return;
@@ -690,6 +873,10 @@ export function ScratchPrototype() {
     localStorage.setItem(SCRATCH_ZOOM_STORAGE_KEY, JSON.stringify(scratchZoom));
   }, [scratchZoom]);
 
+  useEffect(() => {
+    localStorage.setItem(AUTO_SCRATCH_STORAGE_KEY, JSON.stringify(autoScratch));
+  }, [autoScratch]);
+
   function syncScratchZoomTransition(canvas: HTMLCanvasElement, settings = scratchZoomRef.current) {
     canvas.style.setProperty("--scratch-zoom-duration", `${settings.durationMs}ms`);
     canvas.style.setProperty("--scratch-zoom-easing", scratchZoomEasing(settings.bounce));
@@ -704,6 +891,10 @@ export function ScratchPrototype() {
     setScratchZoom((current) => ({ ...current, ...patch }));
   }
 
+  function updateAutoScratch(patch: Partial<AutoScratchSettings>) {
+    setAutoScratch((current) => ({ ...current, ...patch }));
+  }
+
   function isPhoneLayout() {
     return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
   }
@@ -711,13 +902,17 @@ export function ScratchPrototype() {
   function resetScratch() {
     marksRef.current = [];
     glRendererRef.current?.clearScratch();
+    glRendererRef.current?.clearFlakes();
     revealedRef.current = new Array(revealSamplesRef.current.length).fill(false);
     revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
     setProgress(0);
     setClaimed(false);
   }
+  resetScratchRef.current = resetScratch;
 
   // On phones the canvas is centered with a translate that fills the screen, so
   // the magnify scale has to be composed on top of it rather than replacing it.
@@ -763,28 +958,19 @@ export function ScratchPrototype() {
     };
   }
 
-  function addScratch(clientX: number, clientY: number) {
-    const point = getCanvasPoint(clientX, clientY);
-    if (!point) return;
+  function applyScratchAtUv(u: number, v: number, radius: number, worldPoint?: Vec2 | null) {
+    marksRef.current = [...marksRef.current, { u, v, radius }].slice(-180);
+    glRendererRef.current?.paintScratch(u, v, radius);
 
-    // Invert the deforming lattice to get garment UV, so the scratch rides the
-    // tracked fabric.
-    const trackedSample = trackedSampleRef.current;
-    if (!trackedSample) return;
-    const uv = trackedWorldToUv(trackedSample, point);
-    if (!uv) return;
+    if (autoScratchRef.current.flakes && worldPoint) {
+      glRendererRef.current?.spawnFlakes(worldPoint.x, worldPoint.y);
+    }
 
-    const radius = 0.045;
-    marksRef.current = [...marksRef.current, { u: uv.x, v: uv.y, radius }].slice(-180);
-    glRendererRef.current?.paintScratch(uv.x, uv.y, radius);
-
-    // Mark any newly covered reveal samples (monotonic — the scratch texture is
-    // permanent, so progress only ever grows for a given clip).
     const samples = revealSamplesRef.current;
     const revealed = revealedRef.current;
     for (let i = 0; i < samples.length; i += 1) {
       if (revealed[i]) continue;
-      const distance = Math.hypot((uv.x - samples[i].x) / radius, (uv.y - samples[i].y) / radius);
+      const distance = Math.hypot((u - samples[i].x) / radius, (v - samples[i].y) / radius);
       if (distance <= 1) {
         revealed[i] = true;
         revealedCountRef.current += 1;
@@ -797,6 +983,19 @@ export function ScratchPrototype() {
       claimedRef.current = true;
       setClaimed(true);
     }
+  }
+  applyScratchAtUvRef.current = applyScratchAtUv;
+
+  function addScratch(clientX: number, clientY: number) {
+    const point = getCanvasPoint(clientX, clientY);
+    if (!point) return;
+
+    const trackedSample = trackedSampleRef.current;
+    if (!trackedSample) return;
+    const uv = trackedWorldToUv(trackedSample, point);
+    if (!uv) return;
+
+    applyScratchAtUv(uv.x, uv.y, SCRATCH_RADIUS, point);
   }
 
   function setVideoTime(time: number) {
@@ -877,6 +1076,49 @@ export function ScratchPrototype() {
           type="checkbox"
         />
         Bounce easing
+      </label>
+    </fieldset>
+  );
+
+  const autoScratchControls = (
+    <fieldset className="scratch-zoom-settings">
+      <legend>Auto scratch</legend>
+      <label className="checkbox-label">
+        <input
+          checked={autoScratch.enabled}
+          onChange={(event) => updateAutoScratch({ enabled: event.currentTarget.checked })}
+          type="checkbox"
+        />
+        Enable auto scratch
+      </label>
+      <label>
+        Speed ({autoScratch.speed.toFixed(0)} pts/s)
+        <input
+          disabled={!autoScratch.enabled}
+          max={120}
+          min={1}
+          onChange={(event) => updateAutoScratch({ speed: Number(event.currentTarget.value) })}
+          step={1}
+          type="range"
+          value={autoScratch.speed}
+        />
+      </label>
+      <label className="checkbox-label">
+        <input
+          checked={autoScratch.loop}
+          disabled={!autoScratch.enabled}
+          onChange={(event) => updateAutoScratch({ loop: event.currentTarget.checked })}
+          type="checkbox"
+        />
+        Loop
+      </label>
+      <label className="checkbox-label">
+        <input
+          checked={autoScratch.flakes}
+          onChange={(event) => updateAutoScratch({ flakes: event.currentTarget.checked })}
+          type="checkbox"
+        />
+        Flying flakes
       </label>
     </fieldset>
   );
@@ -991,6 +1233,27 @@ export function ScratchPrototype() {
             </button>
             <button
               type="button"
+              className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}`}
+              aria-label={autoScratch.enabled ? "Disable auto scratch" : "Enable auto scratch"}
+              aria-pressed={autoScratch.enabled}
+              onClick={() => updateAutoScratch({ enabled: !autoScratch.enabled })}
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+            </button>
+            <button
+              type="button"
               className="mobile-reset mobile-settings-toggle"
               aria-label="Animation settings"
               aria-expanded={mobileSettingsOpen}
@@ -1019,6 +1282,7 @@ export function ScratchPrototype() {
               aria-label="Animation settings"
             >
               {scratchZoomControls}
+              {autoScratchControls}
             </div>
           )}
         </div>
@@ -1109,6 +1373,7 @@ export function ScratchPrototype() {
             </button>
           </div>
           {scratchZoomControls}
+          {autoScratchControls}
         </aside>
       </section>
     </main>

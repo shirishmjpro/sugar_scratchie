@@ -168,6 +168,69 @@ precision highp float;
 out vec4 frag;
 void main() { frag = vec4(1.0, 1.0, 1.0, 0.2); }`;
 
+// Flying fabric flakes: peel off at scratch points, scale up toward the viewer,
+// spin, drift, and fade. Fabric color is sampled from fgColorTex at spawn UV.
+const FLAKE_VS = `#version 300 es
+in vec2 aPos;
+uniform vec2 uCanvas;
+uniform vec2 uCenter;
+uniform vec2 uSpawnUV;
+uniform float uSize;
+uniform float uRotation;
+uniform vec2 uPresentScale;
+uniform vec2 uPresentOffset;
+out vec2 vLocal;
+out vec2 vFabricUV;
+void main() {
+  vLocal = aPos * 2.0 - 1.0;
+  vFabricUV = uSpawnUV;
+  vec2 local = vLocal * uSize;
+  float c = cos(uRotation);
+  float s = sin(uRotation);
+  vec2 rotated = vec2(local.x * c - local.y * s, local.x * s + local.y * c);
+  vec2 refPx = uCenter + rotated;
+  vec2 clip = vec2(refPx.x / uCanvas.x * 2.0 - 1.0, 1.0 - refPx.y / uCanvas.y * 2.0);
+  gl_Position = vec4(clip * uPresentScale + uPresentOffset, 0.0, 1.0);
+}`;
+
+const FLAKE_FS = `#version 300 es
+precision highp float;
+in vec2 vLocal;
+in vec2 vFabricUV;
+uniform sampler2D uFabric;
+uniform float uAlpha;
+out vec4 frag;
+void main() {
+  vec4 fabric = texture(uFabric, vFabricUV);
+  float d = length(vLocal);
+  float round = smoothstep(1.0, 0.25, d);
+  float tear = smoothstep(0.95, 0.55, abs(vLocal.x) + abs(vLocal.y) * 0.35);
+  float mask = round * tear;
+  frag = vec4(fabric.rgb, mask * uAlpha);
+}`;
+
+const FLAKE_COUNT_PER_SCRATCH = 2;
+const FLAKE_MAX = 120;
+const FLAKE_LIFE = 0.7;
+const FLAKE_SCALE_MIN = 0.2;
+const FLAKE_SCALE_MAX = 0.55;
+const FLAKE_BASE_SIZE = 6;
+const FLAKE_GRAVITY = 140;
+
+type Flake = {
+  x: number;
+  y: number;
+  spawnU: number;
+  spawnV: number;
+  baseSize: number;
+  rotation: number;
+  angularVel: number;
+  vx: number;
+  vy: number;
+  age: number;
+  life: number;
+};
+
 export class GarmentGLRenderer {
   private gl: WebGL2RenderingContext;
   private width: number;
@@ -178,6 +241,7 @@ export class GarmentGLRenderer {
   private punch: WebGLProgram;
   private paint: WebGLProgram;
   private line: WebGLProgram;
+  private flake: WebGLProgram;
 
   private quadBuf: WebGLBuffer;
   private meshPosBuf: WebGLBuffer;
@@ -198,6 +262,8 @@ export class GarmentGLRenderer {
   // flashing black when the bottom video wraps.
   private fgEverReady = false;
   private bottomEverReady = false;
+  private flakes: Flake[] = [];
+  private lastRenderTime = 0;
 
   constructor(canvas: HTMLCanvasElement, width: number, height: number) {
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: false });
@@ -211,6 +277,7 @@ export class GarmentGLRenderer {
     this.punch = program(gl, PUNCH_VS, PUNCH_FS);
     this.paint = program(gl, PAINT_VS, PAINT_FS);
     this.line = program(gl, LINE_VS, LINE_FS);
+    this.flake = program(gl, FLAKE_VS, FLAKE_FS);
 
     this.quadBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
@@ -244,6 +311,34 @@ export class GarmentGLRenderer {
   resetForeground() {
     this.fgEverReady = false;
     this.bottomEverReady = false;
+    this.clearFlakes();
+  }
+
+  clearFlakes() {
+    this.flakes = [];
+  }
+
+  spawnFlakes(refX: number, refY: number, count = FLAKE_COUNT_PER_SCRATCH) {
+    for (let i = 0; i < count; i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 40 + Math.random() * 60;
+      this.flakes.push({
+        x: refX + (Math.random() - 0.5) * 8,
+        y: refY + (Math.random() - 0.5) * 8,
+        spawnU: refX / this.width,
+        spawnV: refY / this.height,
+        baseSize: FLAKE_BASE_SIZE * (0.75 + Math.random() * 0.5),
+        rotation: Math.random() * Math.PI * 2,
+        angularVel: (Math.random() - 0.5) * 10,
+        vx: Math.cos(angle) * speed * 0.35,
+        vy: Math.sin(angle) * speed * 0.35 - 30,
+        age: 0,
+        life: FLAKE_LIFE * (0.85 + Math.random() * 0.3),
+      });
+    }
+    while (this.flakes.length > FLAKE_MAX) {
+      this.flakes.shift();
+    }
   }
 
   clearScratch() {
@@ -348,6 +443,11 @@ export class GarmentGLRenderer {
     const camX = clamp(camera.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
     const camY = clamp(camera.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
 
+    const now = performance.now();
+    const dt = this.lastRenderTime > 0 ? Math.min(0.05, (now - this.lastRenderTime) / 1000) : 0;
+    this.lastRenderTime = now;
+    this.updateFlakes(dt);
+
     // 1. bottom video to screen
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
@@ -401,6 +501,9 @@ export class GarmentGLRenderer {
     gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), camX, camY);
     this.bindQuad(this.composite);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // 4.5. flying fabric flakes over the composite
+    this.drawFlakes(camX, camY);
 
     // 5. mesh overlay
     if (showMesh && sample) {
@@ -472,6 +575,56 @@ export class GarmentGLRenderer {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.meshIndexBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.DYNAMIC_DRAW);
     gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+  }
+
+  private updateFlakes(dt: number) {
+    if (dt <= 0 || this.flakes.length === 0) return;
+    const next: Flake[] = [];
+    for (const flake of this.flakes) {
+      flake.age += dt;
+      if (flake.age >= flake.life) continue;
+      flake.x += flake.vx * dt;
+      flake.y += flake.vy * dt;
+      flake.vy += FLAKE_GRAVITY * dt;
+      flake.rotation += flake.angularVel * dt;
+      next.push(flake);
+    }
+    this.flakes = next;
+  }
+
+  private drawFlakes(camX: number, camY: number) {
+    if (this.flakes.length === 0 || !this.fgEverReady) return;
+    const gl = this.gl;
+    gl.useProgram(this.flake);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
+    gl.uniform1i(gl.getUniformLocation(this.flake, "uFabric"), 0);
+    gl.uniform2f(gl.getUniformLocation(this.flake, "uCanvas"), this.width, this.height);
+    gl.uniform2f(gl.getUniformLocation(this.flake, "uPresentScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+    gl.uniform2f(gl.getUniformLocation(this.flake, "uPresentOffset"), camX, camY);
+    this.bindQuad(this.flake);
+
+    const centerLoc = gl.getUniformLocation(this.flake, "uCenter");
+    const spawnLoc = gl.getUniformLocation(this.flake, "uSpawnUV");
+    const sizeLoc = gl.getUniformLocation(this.flake, "uSize");
+    const rotLoc = gl.getUniformLocation(this.flake, "uRotation");
+    const alphaLoc = gl.getUniformLocation(this.flake, "uAlpha");
+
+    for (const flake of this.flakes) {
+      const t = flake.age / flake.life;
+      const ease = 1 - (1 - t) * (1 - t);
+      const scaleMult = FLAKE_SCALE_MIN + (FLAKE_SCALE_MAX - FLAKE_SCALE_MIN) * ease;
+      const alpha = t < 0.65 ? 1 : 1 - (t - 0.65) / 0.35;
+      gl.uniform2f(centerLoc, flake.x, flake.y);
+      gl.uniform2f(spawnLoc, flake.spawnU, 1 - flake.spawnV);
+      gl.uniform1f(sizeLoc, flake.baseSize * scaleMult);
+      gl.uniform1f(rotLoc, flake.rotation);
+      gl.uniform1f(alphaLoc, alpha);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
   }
 
   private drawMeshLines(sample: GLMeshSample) {

@@ -528,6 +528,11 @@ textarea:focus-visible {
     cursor: pointer;
   }
 
+  .mobile-reset.is-active {
+    background: rgba(255, 200, 80, 0.25);
+    border-color: rgba(255, 200, 80, 0.85);
+  }
+
   .mobile-settings-sheet {
     display: grid;
     position: absolute;
