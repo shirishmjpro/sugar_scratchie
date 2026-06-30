@@ -129,7 +129,6 @@ textarea:focus-visible {
   display: block;
   height: 100%;
   position: relative;
-  transition: transform var(--scratch-zoom-duration, 180ms) var(--scratch-zoom-easing, ease-out);
   width: 100%;
 }
 
@@ -700,7 +699,6 @@ textarea:focus-visible {
     position: absolute;
     top: 50%;
     transform: translate(-50%, -50%);
-    transition: transform var(--scratch-zoom-duration, 180ms) var(--scratch-zoom-easing, ease-out);
     width: max(100dvw, 100dvh * 390 / 672);
   }
 

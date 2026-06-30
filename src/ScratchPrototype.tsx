@@ -114,7 +114,7 @@ type ScratchZoomSettings = {
 const SCRATCH_ZOOM_DEFAULTS: ScratchZoomSettings = {
   enabled: true,
   scale: 1.35,
-  durationMs: 180,
+  durationMs: 450,
   bounce: false,
 };
 
@@ -335,10 +335,6 @@ function GameSymbolIcon({ typeId }: { typeId: number }) {
   return <Icon aria-hidden="true" color={entry.color} size={16} strokeWidth={2.2} />;
 }
 
-function scratchZoomEasing(bounce: boolean) {
-  return bounce ? "cubic-bezier(0.34, 1.56, 0.64, 1)" : "ease-out";
-}
-
 function loadSoundEnabled(): boolean {
   if (typeof window === "undefined") return true;
   try {
@@ -360,7 +356,7 @@ function loadScratchZoomSettings(): ScratchZoomSettings {
     return {
       enabled: parsed.enabled ?? SCRATCH_ZOOM_DEFAULTS.enabled,
       scale: clampValue(Number(parsed.scale) || SCRATCH_ZOOM_DEFAULTS.scale, 1, 2),
-      durationMs: clampValue(Number(parsed.durationMs) || SCRATCH_ZOOM_DEFAULTS.durationMs, 50, 800),
+      durationMs: clampValue(Number(parsed.durationMs) || SCRATCH_ZOOM_DEFAULTS.durationMs, 100, 1200),
       bounce: parsed.bounce ?? SCRATCH_ZOOM_DEFAULTS.bounce,
     };
   } catch {
@@ -407,6 +403,30 @@ function loadAutoScratchSettings(): AutoScratchSettings {
 
 function clampValue(value: number, lo: number, hi: number) {
   return value < lo ? lo : value > hi ? hi : value;
+}
+
+function scratchZoomBaseTransform() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches
+    ? "translate(-50%, -50%) "
+    : "";
+}
+
+function computeScratchZoomPanTarget(point: Vec2, scale: number): Vec2 {
+  const nx = point.x / CANVAS_WIDTH;
+  const ny = point.y / CANVAS_HEIGHT;
+  const dx = nx - 0.5;
+  const dy = ny - 0.5;
+  const maxPan = (scale - 1) / 2;
+  return {
+    x: clampValue(-dx * 2 * maxPan, -maxPan, maxPan),
+    y: clampValue(-dy * 2 * maxPan, -maxPan, maxPan),
+  };
+}
+
+function applyScratchZoomTransform(canvas: HTMLCanvasElement, panX: number, panY: number, scale: number) {
+  canvas.style.transition = "none";
+  canvas.style.transformOrigin = "50% 50%";
+  canvas.style.transform = `${scratchZoomBaseTransform()}translate(${panX * 100}%, ${panY * 100}%) scale(${scale})`;
 }
 
 function foregroundTimeFromBottom(source: HTMLVideoElement, target: HTMLVideoElement) {
@@ -873,6 +893,11 @@ export function ScratchPrototype() {
   const [scratchZoom, setScratchZoom] = useState<ScratchZoomSettings>(loadScratchZoomSettings);
   const scratchZoomRef = useRef(scratchZoom);
   scratchZoomRef.current = scratchZoom;
+  const scratchZoomActiveRef = useRef(false);
+  const scratchZoomPanRef = useRef({ x: 0, y: 0 });
+  const scratchZoomPanTargetRef = useRef({ x: 0, y: 0 });
+  const scratchZoomScaleRef = useRef(1);
+  const scratchZoomScaleTargetRef = useRef(1);
   const [autoScratch, setAutoScratch] = useState<AutoScratchSettings>(loadAutoScratchSettings);
   const autoScratchRef = useRef(autoScratch);
   autoScratchRef.current = autoScratch;
@@ -953,6 +978,28 @@ export function ScratchPrototype() {
       }
       camera.x += (targetCamX - camera.x) * CHEST_SMOOTH;
       camera.y += (targetCamY - camera.y) * CHEST_SMOOTH;
+
+      const canvas = canvasRef.current;
+      const zoomSettings = scratchZoomRef.current;
+      if (canvas && zoomSettings.enabled) {
+        const pan = scratchZoomPanRef.current;
+        const panTarget = scratchZoomPanTargetRef.current;
+        const scaleTarget = scratchZoomScaleTargetRef.current;
+        const tau = Math.max(0.08, zoomSettings.durationMs / 1000);
+        const k = 1 - Math.exp(-dt / tau);
+
+        pan.x += (panTarget.x - pan.x) * k;
+        pan.y += (panTarget.y - pan.y) * k;
+        scratchZoomScaleRef.current += (scaleTarget - scratchZoomScaleRef.current) * k;
+
+        const settling =
+          Math.abs(pan.x - panTarget.x) > 0.0005
+          || Math.abs(pan.y - panTarget.y) > 0.0005
+          || Math.abs(scratchZoomScaleRef.current - scaleTarget) > 0.001;
+        if (scratchZoomActiveRef.current || settling) {
+          applyScratchZoomTransform(canvas, pan.x, pan.y, scratchZoomScaleRef.current);
+        }
+      }
 
       const autoSettings = autoScratchRef.current;
       if (autoSettings.enabled && trackedSample && gameResultPendingRef.current === null) {
@@ -1213,16 +1260,6 @@ export function ScratchPrototype() {
     localStorage.setItem(SOUND_STORAGE_KEY, JSON.stringify({ enabled: soundEnabled }));
   }, [soundEnabled]);
 
-  function syncScratchZoomTransition(canvas: HTMLCanvasElement, settings = scratchZoomRef.current) {
-    canvas.style.setProperty("--scratch-zoom-duration", `${settings.durationMs}ms`);
-    canvas.style.setProperty("--scratch-zoom-easing", scratchZoomEasing(settings.bounce));
-  }
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (canvas) syncScratchZoomTransition(canvas);
-  }, [scratchZoom]);
-
   function updateScratchZoom(patch: Partial<ScratchZoomSettings>) {
     setScratchZoom((current) => ({ ...current, ...patch }));
   }
@@ -1235,10 +1272,6 @@ export function ScratchPrototype() {
   function updateSoundEnabled(enabled: boolean) {
     if (enabled) ensureSymbolAudio(symbolAudioRef.current);
     setSoundEnabled(enabled);
-  }
-
-  function isPhoneLayout() {
-    return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
   }
 
   function resetScratch() {
@@ -1288,27 +1321,22 @@ export function ScratchPrototype() {
 
   // On phones the canvas is centered with a translate that fills the screen, so
   // the magnify scale has to be composed on top of it rather than replacing it.
-  const canvasBaseTransform = () => (isPhoneLayout() ? "translate(-50%, -50%) " : "");
-
   function applyScratchZoom(point: Vec2) {
     const settings = scratchZoomRef.current;
     if (!settings.enabled) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    syncScratchZoomTransition(canvas, settings);
-    canvas.style.transformOrigin = `${(point.x / CANVAS_WIDTH) * 100}% ${(point.y / CANVAS_HEIGHT) * 100}%`;
-    canvas.style.transform = `${canvasBaseTransform()}scale(${settings.scale})`;
+    scratchZoomActiveRef.current = true;
+    scratchZoomScaleTargetRef.current = settings.scale;
+    scratchZoomPanTargetRef.current = computeScratchZoomPanTarget(point, settings.scale);
   }
 
   function clearScratchZoom() {
     const settings = scratchZoomRef.current;
     if (!settings.enabled) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    syncScratchZoomTransition(canvas, settings);
-    canvas.style.transform = `${canvasBaseTransform()}scale(1)`;
+    scratchZoomActiveRef.current = false;
+    scratchZoomScaleTargetRef.current = 1;
+    scratchZoomPanTargetRef.current = { x: 0, y: 0 };
   }
 
   function getCanvasPoint(clientX: number, clientY: number) {
@@ -1520,8 +1548,8 @@ export function ScratchPrototype() {
         Animation ({scratchZoom.durationMs} ms)
         <input
           disabled={!scratchZoom.enabled}
-          max={800}
-          min={50}
+          max={1200}
+          min={100}
           onChange={(event) => updateScratchZoom({ durationMs: Number(event.currentTarget.value) })}
           step={10}
           type="range"
@@ -1723,8 +1751,10 @@ export function ScratchPrototype() {
             }}
             onPointerMove={(event) => {
               lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
-              hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
+              const point = getCanvasPoint(event.clientX, event.clientY);
+              hoverPointRef.current = point;
               if (!drawingRef.current) return;
+              if (point) applyScratchZoom(point);
               addScratch(event.clientX, event.clientY);
             }}
             onPointerUp={() => {
