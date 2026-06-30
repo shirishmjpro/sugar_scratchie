@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, Volume2, VolumeX, type LucideIcon } from "lucide-react";
-import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
+import { GarmentGLRenderer, PRESENT_ZOOM, SCRATCH_TEX_SIZE } from "./glRenderer";
 
 type Vec2 = {
   x: number;
@@ -152,6 +152,50 @@ function isGarmentFullyRevealed(
     progress >= FULL_REVEAL_MANUAL_THRESHOLD
     || revealedCount >= Math.ceil(sampleCount * FULL_REVEAL_MANUAL_THRESHOLD)
   );
+}
+
+// performance.memory.usedJSHeapSize is quantized on mobile (often stuck ~10–16 MB).
+// Build a live page-memory estimate from media buffers plus session data that
+// grows while scratching. Real RAM APIs need HTTPS (measureUserAgentSpecificMemory)
+// or return bucketed values on http://LAN-IP dev URLs.
+function estimateLiveMemoryMb(
+  bottomVideo: HTMLVideoElement | null,
+  foregroundVideo: HTMLVideoElement | null,
+  markCount: number,
+  revealedCount: number,
+  mesh: TrackedMesh | null,
+) {
+  const rgba = 4;
+  let bytes = 0;
+
+  bytes += SCRATCH_TEX_SIZE * SCRATCH_TEX_SIZE * rgba;
+  bytes += CANVAS_WIDTH * CANVAS_HEIGHT * rgba * 3;
+
+  for (const video of [bottomVideo, foregroundVideo]) {
+    const w = video?.videoWidth ?? CANVAS_WIDTH;
+    const h = video?.videoHeight ?? CANVAS_HEIGHT;
+    bytes += w * h * rgba * 4;
+  }
+
+  bytes += markCount * 8_192;
+  bytes += revealedCount * 1_024;
+
+  if (mesh) {
+    bytes += mesh.uv.length * 32;
+    bytes += mesh.frames.length * mesh.uv.length * 24;
+    if (mesh.garment) bytes += mesh.garment.length;
+  }
+
+  const mem = (performance as Performance & {
+    memory?: { totalJSHeapSize?: number; usedJSHeapSize?: number };
+  }).memory;
+  if (mem?.totalJSHeapSize) {
+    bytes = Math.max(bytes, mem.totalJSHeapSize);
+  } else if (mem?.usedJSHeapSize) {
+    bytes = Math.max(bytes, mem.usedJSHeapSize);
+  }
+
+  return bytes / (1024 * 1024);
 }
 
 function evaluateSessionWin(symbolIds: number[]) {
@@ -890,6 +934,7 @@ export function ScratchPrototype() {
   // button that opens this sheet.
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
+  const [measuredMemoryMb, setMeasuredMemoryMb] = useState<number | null>(null);
   const [desktopSettingsTab, setDesktopSettingsTab] = useState<DesktopSettingsTab>("scratch-zoom");
 
   function clearGameResultTimer() {
@@ -1147,6 +1192,40 @@ export function ScratchPrototype() {
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
   }, [trackedMesh]);
+
+  useEffect(() => {
+    let disposed = false;
+    let measuring = false;
+
+    const tick = async () => {
+      if (disposed) return;
+      const measure = (performance as Performance & {
+        measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
+      }).measureUserAgentSpecificMemory;
+
+      if (!window.isSecureContext || !window.crossOriginIsolated || !measure || measuring) {
+        if (!disposed) setMeasuredMemoryMb(null);
+        return;
+      }
+
+      measuring = true;
+      try {
+        const { bytes } = await measure();
+        if (!disposed) setMeasuredMemoryMb(bytes / (1024 * 1024));
+      } catch {
+        if (!disposed) setMeasuredMemoryMb(null);
+      } finally {
+        measuring = false;
+      }
+    };
+
+    void tick();
+    const id = window.setInterval(() => void tick(), 3000);
+    return () => {
+      disposed = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
@@ -1554,6 +1633,29 @@ export function ScratchPrototype() {
     </fieldset>
   );
 
+  const revealThreshold = autoScratch.enabled ? 1 : FULL_REVEAL_MANUAL_THRESHOLD;
+  const scratchedPct = Math.min(100, Math.round((progress / revealThreshold) * 100));
+  const liveMemoryMb = estimateLiveMemoryMb(
+    bottomVideoRef.current,
+    foregroundVideoRef.current,
+    marksRef.current.length,
+    revealedCountRef.current,
+    trackedMesh,
+  );
+  const memoryLabel = measuredMemoryMb != null
+    ? `${measuredMemoryMb.toFixed(1)} MB RAM`
+    : `${liveMemoryMb.toFixed(1)} MB`;
+
+  const mobileStatsReadout = (
+    <div className="mobile-stats-readout" aria-live="polite">
+      <span>{scratchedPct}% scratched</span>
+      <span className="mobile-stats-sep" aria-hidden="true">
+        ·
+      </span>
+      <span>{memoryLabel}</span>
+    </div>
+  );
+
   const autoScratchControls = (
     <fieldset className="scratch-zoom-settings">
       <legend>Auto scratch</legend>
@@ -1687,6 +1789,7 @@ export function ScratchPrototype() {
             ref={bottomVideoRef}
             className="source-video"
             autoPlay
+            crossOrigin="anonymous"
             muted
             loop
             playsInline
@@ -1697,6 +1800,7 @@ export function ScratchPrototype() {
             ref={foregroundVideoRef}
             className="source-video"
             autoPlay
+            crossOrigin="anonymous"
             muted
             loop
             playsInline
@@ -1787,7 +1891,9 @@ export function ScratchPrototype() {
               </svg>
             </button>
             {mobileControlsOpen && (
-              <div className="mobile-controls">
+              <>
+                {mobileStatsReadout}
+                <div className="mobile-controls">
                 <label className="mobile-card-switch">
                   <span className="visually-hidden">Card</span>
                   <select
@@ -1870,6 +1976,7 @@ export function ScratchPrototype() {
                   </svg>
                 </button>
               </div>
+              </>
             )}
             {mobileControlsOpen && mobileSettingsOpen && (
               <div

@@ -21,7 +21,7 @@ export type GLMeshSample = {
   vis: number[];
 };
 
-const SCRATCH_TEX_SIZE = 1024;
+export const SCRATCH_TEX_SIZE = 1024;
 // Zoom applied to the presented layers (bottom video + final composite) for a
 // tighter shot framed on the performer. It doubles as pan headroom: the
 // chest-follow camera offset stays below PRESENT_ZOOM-1 so no canvas edge shows.

@@ -21,9 +21,33 @@ function writeMeshIndex() {
   writeFileSync(meshIndexFile, JSON.stringify({ files: getMeshJsonFiles() }, null, 2));
 }
 
+const crossOriginIsolationHeaders = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+};
+
+function crossOriginIsolationPlugin() {
+  return {
+    name: "cross-origin-isolation",
+    configureServer(server: { middlewares: { use: (fn: (req: unknown, res: { setHeader: (k: string, v: string) => void }, next: () => void) => void) => void } }) {
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        next();
+      });
+    },
+    configurePreviewServer(server: { middlewares: { use: (fn: (req: unknown, res: { setHeader: (k: string, v: string) => void }, next: () => void) => void) => void } }) {
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
+    crossOriginIsolationPlugin(),
     {
       name: "mesh-json-index",
       buildStart() {
@@ -40,6 +64,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5080,
+    headers: crossOriginIsolationHeaders,
     proxy: {
       "/api": "http://127.0.0.1:8090",
     },
@@ -47,5 +72,6 @@ export default defineConfig({
   preview: {
     host: "0.0.0.0",
     port: 5080,
+    headers: crossOriginIsolationHeaders,
   },
 });
