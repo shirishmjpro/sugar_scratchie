@@ -23,11 +23,11 @@ Needs `ffmpeg`/`ffprobe` on `PATH`. Runs on Apple-Silicon Torch **MPS**.
 
 ## The two trackers
 
-| Tracker | `TRACKER=` | Strengths | Weaknesses |
-|---------|-----------|-----------|------------|
-| CoTracker3 | `cotracker` (default) | Low jitter, low drift, stable | Drops more hand/arm points on hard clips |
-| BootsTAPIR | `bootstapir` | Higher point survival (hands/arms) | More runaway drift on hard clips |
-| Blend | `blend` | Per-point: keeps whichever tracker is more confident | ~2× runtime (runs both) |
+| Tracker    | `TRACKER=`            | Strengths                                            | Weaknesses                               |
+| ---------- | --------------------- | ---------------------------------------------------- | ---------------------------------------- |
+| CoTracker3 | `cotracker` (default) | Low jitter, low drift, stable                        | Drops more hand/arm points on hard clips |
+| BootsTAPIR | `bootstapir`          | Higher point survival (hands/arms)                   | More runaway drift on hard clips         |
+| Blend      | `blend`               | Per-point: keeps whichever tracker is more confident | ~2× runtime (runs both)                  |
 
 `blend` runs both trackers and, for each point each frame, keeps the more
 confident one — then the usual driver pruning + loop-closure clean up the rest.
@@ -65,7 +65,7 @@ Point the generator at any foreground clip and choose where to write the mesh:
 
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=1 \
-  INPUT_VIDEO="public/cards/girl_2/foreground.mp4" \
+  INPUT_VIDEO="public/cards/girl_2/foreground.webm" \
   OUTPUT_JSON="public/mesh/girl_2.json" \
   TRACKER=cotracker \
   .venv/bin/python scripts/generate-mesh-tracking.py
@@ -83,11 +83,12 @@ overlays and exits **without** writing a mesh:
 
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=1 COMPARE_TRACKERS=1 DEBUG_OVERLAY=1 \
-  INPUT_VIDEO="public/cards/girl_1/foreground.mp4" \
+  INPUT_VIDEO="public/cards/girl_1/foreground.webm" \
   .venv/bin/python scripts/generate-mesh-tracking.py
 ```
 
 Outputs to `.tmp/track_overlay/`:
+
 - `cotracker_drv*.png` vs `bootstapir_drv*.png` — driver points per tracker
   (cyan = visible/confident, red = lost).
 - A printed table: `survival all`, `survival hand/arm`, `jitter`, `drift mean`,
@@ -98,22 +99,22 @@ survival), then regenerate normally with that `TRACKER=`.
 
 ## Key env knobs
 
-| Env | Default | Purpose |
-|-----|---------|---------|
-| `TRACKER` | `cotracker` | `cotracker` \| `bootstapir` \| `blend` |
-| `COMPARE_TRACKERS` | `0` | Run both, write overlays + metrics, no mesh |
-| `INPUT_VIDEO` | original clip | Foreground clip to track |
-| `OUTPUT_JSON` | `public/mesh/tracked-mesh.json` | Output path |
-| `DEBUG_OVERLAY` | off | Write overlays to `.tmp/track_overlay` (`trk*`=field, `drv*`=drivers) |
-| `FPS` | `20` | Sample/track frame rate |
-| `GRID_COLS` / `GRID_ROWS` | `24` / `36` | Mesh lattice density |
-| `SMOOTH_METHOD` | `savgol` | `savgol` (velocity-preserving) or `gaussian` |
-| `LOOP_CLOSE` | `1` | Distribute end→start drift for seamless looping (set `0` for non-looping clips) |
-| `HEAD_DILATE` | `1` | How far the hair/head mask grows before being removed; small keeps hair-draped arms trackable |
-| `CHROMA_GREEN_MIN` / `CHROMA_DOMINANCE_MIN` | `130` / `38` | Chroma-key thresholds; lower green-min for dark/uneven green screens |
-| `EXTRA_DRIVER_POINTS` | `320` | Extra hand/edge tracking seeds |
-| `PRUNE_SPEED_MAD_K` / `PRUNE_MIN_MEAN_VIS` | `6.0` / `0.15` | Driver outlier pruning |
-| `FULL_SCREEN_FIELD` | `1` | `0` = old performer-only mesh |
+| Env                                         | Default                         | Purpose                                                                                       |
+| ------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
+| `TRACKER`                                   | `cotracker`                     | `cotracker` \| `bootstapir` \| `blend`                                                        |
+| `COMPARE_TRACKERS`                          | `0`                             | Run both, write overlays + metrics, no mesh                                                   |
+| `INPUT_VIDEO`                               | original clip                   | Foreground clip to track                                                                      |
+| `OUTPUT_JSON`                               | `public/mesh/tracked-mesh.json` | Output path                                                                                   |
+| `DEBUG_OVERLAY`                             | off                             | Write overlays to `.tmp/track_overlay` (`trk*`=field, `drv*`=drivers)                         |
+| `FPS`                                       | `20`                            | Sample/track frame rate                                                                       |
+| `GRID_COLS` / `GRID_ROWS`                   | `24` / `36`                     | Mesh lattice density                                                                          |
+| `SMOOTH_METHOD`                             | `savgol`                        | `savgol` (velocity-preserving) or `gaussian`                                                  |
+| `LOOP_CLOSE`                                | `1`                             | Distribute end→start drift for seamless looping (set `0` for non-looping clips)               |
+| `HEAD_DILATE`                               | `1`                             | How far the hair/head mask grows before being removed; small keeps hair-draped arms trackable |
+| `CHROMA_GREEN_MIN` / `CHROMA_DOMINANCE_MIN` | `130` / `38`                    | Chroma-key thresholds; lower green-min for dark/uneven green screens                          |
+| `EXTRA_DRIVER_POINTS`                       | `320`                           | Extra hand/edge tracking seeds                                                                |
+| `PRUNE_SPEED_MAD_K` / `PRUNE_MIN_MEAN_VIS`  | `6.0` / `0.15`                  | Driver outlier pruning                                                                        |
+| `FULL_SCREEN_FIELD`                         | `1`                             | `0` = old performer-only mesh                                                                 |
 
 BootsTAPIR-specific (see [`scripts/bootstapir_tracker.py`](../scripts/bootstapir_tracker.py)):
 `BOOTSTAPIR_RES` (default 256, raise for tighter localization),

@@ -264,6 +264,19 @@ export class GarmentGLRenderer {
   private bottomEverReady = false;
   private flakes: Flake[] = [];
   private lastRenderTime = 0;
+  // Per-video-texture upload state: the dimensions we allocated storage at and
+  // the last video time we uploaded. Lets us (a) update with texSubImage2D
+  // instead of reallocating with texImage2D every frame, and (b) skip uploads
+  // entirely when the video hasn't advanced to a new frame. Both are large wins
+  // in Safari, where texImage2D-from-video is very expensive.
+  private videoTexState = new WeakMap<WebGLTexture, { w: number; h: number; t: number }>();
+  // requestVideoFrameCallback bookkeeping: which videos we've hooked, and whether
+  // a genuinely new decoded frame is waiting to be uploaded. rVFC fires exactly
+  // once per presented frame, so it's the precise way to avoid re-uploading the
+  // same frame (better than the currentTime heuristic, which is the fallback for
+  // browsers without rVFC).
+  private videoFrameHooked = new WeakSet<HTMLVideoElement>();
+  private videoFrameReady = new WeakMap<HTMLVideoElement, boolean>();
 
   constructor(canvas: HTMLCanvasElement, width: number, height: number) {
     const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: false });
@@ -311,6 +324,10 @@ export class GarmentGLRenderer {
   resetForeground() {
     this.fgEverReady = false;
     this.bottomEverReady = false;
+    // Force the next frame of each video to re-upload (and reallocate if the new
+    // clip differs in size) rather than being skipped as an unchanged frame.
+    this.videoTexState.delete(this.bottomTex);
+    this.videoTexState.delete(this.fgTex);
     this.clearFlakes();
   }
 
@@ -396,10 +413,56 @@ export class GarmentGLRenderer {
     gl.uniform2f(gl.getUniformLocation(prog, "uOffset"), clamp(camX, -(w - 1), w - 1), clamp(camY, -(h - 1), h - 1));
   }
 
+  // Hook requestVideoFrameCallback (once per video) so we know precisely when a
+  // new decoded frame is available. Returns false if rVFC is unsupported, so the
+  // caller falls back to the currentTime heuristic.
+  private hookVideoFrames(video: HTMLVideoElement): boolean {
+    type RVFCVideo = HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+    };
+    const rvfcVideo = video as RVFCVideo;
+    if (typeof rvfcVideo.requestVideoFrameCallback !== "function") return false;
+    if (this.videoFrameHooked.has(video)) return true;
+    this.videoFrameHooked.add(video);
+    this.videoFrameReady.set(video, true);
+    const onFrame = () => {
+      this.videoFrameReady.set(video, true);
+      rvfcVideo.requestVideoFrameCallback?.(onFrame);
+    };
+    rvfcVideo.requestVideoFrameCallback(onFrame);
+    return true;
+  }
+
   private uploadVideo(tex: WebGLTexture, video: HTMLVideoElement) {
     const gl = this.gl;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return;
+
+    const state = this.videoTexState.get(tex);
+    const sizeChanged = !state || state.w !== vw || state.h !== vh;
+
+    // Re-uploading a frame the texture already holds is pure waste (the render
+    // loop ticks faster than the clip's fps). Decide if there's anything new:
+    // prefer rVFC ("a new frame was presented"); fall back to a currentTime
+    // change. Either way this cuts uploads to roughly the clip's real fps.
+    if (this.hookVideoFrames(video)) {
+      if (!sizeChanged && !this.videoFrameReady.get(video)) return;
+      this.videoFrameReady.set(video, false);
+    } else if (!sizeChanged && state && state.t === video.currentTime) {
+      return;
+    }
+
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    if (sizeChanged) {
+      // First frame, or the source changed size (card switch): (re)allocate.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    } else {
+      // Steady state: update the existing texture in place. Much cheaper than a
+      // fresh texImage2D allocation each frame on Safari.
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    }
+    this.videoTexState.set(tex, { w: vw, h: vh, t: video.currentTime });
   }
 
   private drawVideo(

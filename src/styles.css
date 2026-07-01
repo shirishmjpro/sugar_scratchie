@@ -133,14 +133,21 @@ textarea:focus-visible {
   width: 100%;
 }
 
+/* The source videos are sampled into the WebGL canvas, never shown directly.
+   They must NOT be hidden via off-screen positioning / opacity:0 / 1px sizing:
+   Safari treats such videos as "not visible" and refuses to play them (it even
+   re-pauses after a play() call), leaving a frozen first frame. So we keep them
+   on-screen at full size, fully inside the stage, just stacked *behind* the
+   opaque canvas (which paints on top in DOM order) and at a near-zero opacity. */
 .source-video {
-  height: 1px;
-  left: -9999px;
-  opacity: 0;
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  opacity: 0.01;
   pointer-events: none;
   position: absolute;
-  top: 0;
-  width: 1px;
+  width: 100%;
+  z-index: 0;
 }
 
 /* Compact on-stage controls — only shown on phones, where the side panel

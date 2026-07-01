@@ -16,7 +16,7 @@ Output duration, resolution and aspect ratio always match the input.
 
 ```bash
 XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
-  --video public/cards/girl_1/foreground.mp4 \
+  --video public/cards/girl_1/foreground.webm \
   --prompt "Replace only her dress with a long red satin gown. Keep the person, face, pose, hair, lighting and background exactly the same." \
   --out .tmp/girl_1_red.mp4
 ```
@@ -28,7 +28,7 @@ The key can be `XAI_API_KEY` or `GROK_API_KEY`.
 1. Probes the input video (`ffprobe`).
 2. **Checks Grok's limits and rejects** if the clip exceeds them (duration
    > ~8.7 s, or resolution above 720p). It does **not** convert, downscale, or
-   re-encode — the original file is uploaded untouched.
+   > re-encode — the original file is uploaded untouched.
 3. Sends the local file inline (base64 data URI), or passes a remote URL through
    directly if `--video` is an `http(s)` URL.
 4. Submits to `POST /v1/videos/edits`, polls `GET /v1/videos/{request_id}` until
@@ -36,16 +36,16 @@ The key can be `XAI_API_KEY` or `GROK_API_KEY`.
 
 ## Options
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--video` | (required) | Local mp4 path **or** an `https` URL of the source clip. |
-| `--prompt` | (required) | Edit instruction (the new dress, etc.). |
-| `--out` | `.tmp/grok-edit.mp4` | Where to save the edited video. |
-| `--model` | `grok-imagine-video` | Override the video model id. |
-| `--video-field` | `video` | Request-body field name for the input video. |
-| `--enhance` | off | Rewrite the prompt via a Grok chat model before editing (see below). |
-| `--enhance-model` | `grok-4` | Chat model id used by `--enhance`. |
-| `--resolution` | `720p` | Output resolution: `720p` (max detail), `480p`, `auto`, or `''` to omit. |
+| Flag              | Default              | Purpose                                                                  |
+| ----------------- | -------------------- | ------------------------------------------------------------------------ |
+| `--video`         | (required)           | Local mp4 path **or** an `https` URL of the source clip.                 |
+| `--prompt`        | (required)           | Edit instruction (the new dress, etc.).                                  |
+| `--out`           | `.tmp/grok-edit.mp4` | Where to save the edited video.                                          |
+| `--model`         | `grok-imagine-video` | Override the video model id.                                             |
+| `--video-field`   | `video`              | Request-body field name for the input video.                             |
+| `--enhance`       | off                  | Rewrite the prompt via a Grok chat model before editing (see below).     |
+| `--enhance-model` | `grok-4`             | Chat model id used by `--enhance`.                                       |
+| `--resolution`    | `720p`               | Output resolution: `720p` (max detail), `480p`, `auto`, or `''` to omit. |
 
 ### Accuracy levers
 
@@ -69,7 +69,7 @@ edit.
 
 ```bash
 XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
-  --video public/cards/girl_2/foreground.mp4 \
+  --video public/cards/girl_2/foreground.webm \
   --prompt "red satin gown" \
   --enhance \
   --out .tmp/girl_2_red.mp4
@@ -93,10 +93,10 @@ pixels can drift. If `--enhance-model` is wrong for your account, override it
 
 This is a **prompt-driven** edit, not a masked one — so steer it explicitly:
 
-- Name the change precisely: *"Replace her dress with a knee-length white linen
-  sundress with thin straps."*
-- Pin everything else: *"Keep the person, face, hair, body, pose, hands,
-  lighting, shadows, colors and background exactly the same."*
+- Name the change precisely: _"Replace her dress with a knee-length white linen
+  sundress with thin straps."_
+- Pin everything else: _"Keep the person, face, hair, body, pose, hands,
+  lighting, shadows, colors and background exactly the same."_
 - Avoid asking for motion/camera changes unless you want them.
 
 ## Limitations (read before relying on output)
@@ -123,11 +123,11 @@ regenerate its tracked mesh — see the "Regenerating the tracked mesh" section 
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| `Set XAI_API_KEY ...` | Export `XAI_API_KEY` (or `GROK_API_KEY`). |
-| `API error 4xx ... model` | Set `XAI_VIDEO_EDIT_MODEL` or pass `--model` to an edit-capable model. |
-| `API error 4xx` mentioning the video field | Try `--video-field video_url`. |
-| `Incompatible with Grok ...` | Provide a clip within ≤8.7 s and ≤720p. |
-| `Encoded video is N MB (> cap)` | Host the clip; pass an `https` URL to `--video`. |
-| Stuck `status=...` then timeout | Re-run; raise `POLL_TIMEOUT_S` in the script if your clips are large. |
+| Symptom                                    | Fix                                                                    |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| `Set XAI_API_KEY ...`                      | Export `XAI_API_KEY` (or `GROK_API_KEY`).                              |
+| `API error 4xx ... model`                  | Set `XAI_VIDEO_EDIT_MODEL` or pass `--model` to an edit-capable model. |
+| `API error 4xx` mentioning the video field | Try `--video-field video_url`.                                         |
+| `Incompatible with Grok ...`               | Provide a clip within ≤8.7 s and ≤720p.                                |
+| `Encoded video is N MB (> cap)`            | Host the clip; pass an `https` URL to `--video`.                       |
+| Stuck `status=...` then timeout            | Re-run; raise `POLL_TIMEOUT_S` in the script if your clips are large.  |

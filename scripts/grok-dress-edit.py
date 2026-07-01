@@ -8,7 +8,7 @@ for (e.g. the dress). Output duration, resolution and aspect ratio match the
 input automatically.
 
   XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
-      --video public/cards/girl_1/foreground.mp4 \
+      --video public/cards/girl_1/foreground.webm \
       --prompt "Replace only her dress with a long red satin gown. Keep the
                 person, face, pose, hair, lighting and background exactly the
                 same." \

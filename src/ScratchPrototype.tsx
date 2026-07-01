@@ -2,6 +2,117 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, Volume2, VolumeX, type LucideIcon } from "lucide-react";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 
+// On-screen diagnostics (FPS, layer drift, raw video state) shown only when the
+// page is opened with ?debug=1. Self-contained: it polls the DOM/video elements
+// directly so it adds no coupling to the render loop. Used to debug Safari, which
+// can't be driven from the dev tooling here.
+function DebugHud() {
+  const [lines, setLines] = useState<string[]>(["debug: starting…"]);
+
+  useEffect(() => {
+    let frames = 0;
+    let rafId = 0;
+    // Per-video: how many distinct currentTime values we saw (= delivered video
+    // frames) and the last value, so we can report the *effective* playback fps
+    // separately from the render fps. A low video fps while render fps stays high
+    // is the signature of decode stutter (the canvas redraws fine, but it's
+    // showing the same decoded frame repeatedly).
+    const vstate = new Map<HTMLVideoElement, { last: number; count: number }>();
+    const tick = () => {
+      frames += 1;
+      for (const v of document.querySelectorAll<HTMLVideoElement>(".source-video")) {
+        const s = vstate.get(v);
+        if (!s) {
+          vstate.set(v, { last: v.currentTime, count: 0 });
+        } else if (v.currentTime !== s.last) {
+          s.last = v.currentTime;
+          s.count += 1;
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+
+    let last = performance.now();
+    let peakHeap = 0;
+    const intervalId = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = Math.max(1, now - last);
+      const fps = Math.round((frames * 1000) / elapsed);
+      frames = 0;
+      last = now;
+
+      const vids = Array.from(
+        document.querySelectorAll<HTMLVideoElement>(".source-video"),
+      );
+      const [bottom, foreground] = vids;
+      const out: string[] = [`render ${fps}fps`];
+
+      // JS heap usage. performance.memory is non-standard (Chromium only) but
+      // works on plain http/localhost — unlike measureUserAgentSpecificMemory,
+      // which needs cross-origin isolation. Safari exposes neither, so we note
+      // it as unavailable there.
+      const mem = (performance as Performance & {
+        memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number };
+      }).memory;
+      const mb = (n: number) => (n / 1048576).toFixed(1);
+      if (mem) {
+        // Show one decimal + running peak so small allocations are visible; the
+        // whole-MB rounding before made it look frozen. NOTE: this is only the JS
+        // heap — GPU textures and video decode buffers (what actually grows while
+        // scratching) live outside it, so use Chrome's Task Manager for true RAM.
+        if (mem.usedJSHeapSize > peakHeap) peakHeap = mem.usedJSHeapSize;
+        out.push(`heap ${mb(mem.usedJSHeapSize)}MB peak ${mb(peakHeap)} (lim ${mb(mem.jsHeapSizeLimit)})`);
+      } else {
+        out.push("heap n/a (no perf.memory)");
+      }
+      const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+      if (deviceMemory) out.push(`devMem ~${deviceMemory}GB`);
+
+      if (bottom && foreground) {
+        const drift = bottom.currentTime - foreground.currentTime;
+        out.push(`drift ${drift.toFixed(3)}s  fgRate ${foreground.playbackRate.toFixed(3)}`);
+      }
+      vids.forEach((v, i) => {
+        const tag = i === 0 ? "btm" : "fg ";
+        const s = vstate.get(v);
+        const vfps = s ? Math.round((s.count * 1000) / elapsed) : 0;
+        if (s) s.count = 0;
+        out.push(
+          `${tag} ${vfps}vfps rs${v.readyState} ${v.paused ? "PAUSED" : "play"}${v.seeking ? " SEEK" : ""} t${v.currentTime.toFixed(2)}${v.error ? ` ERR${v.error.code}` : ""}`,
+        );
+      });
+      setLines(out);
+    }, 500);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 6,
+        left: 6,
+        zIndex: 50,
+        padding: "6px 8px",
+        background: "rgba(0,0,0,0.72)",
+        color: "#7CFC00",
+        font: "11px/1.35 ui-monospace, Menlo, monospace",
+        whiteSpace: "pre",
+        borderRadius: 6,
+        pointerEvents: "none",
+        maxWidth: "92%",
+      }}
+    >
+      {lines.join("\n")}
+    </div>
+  );
+}
+
 type Vec2 = {
   x: number;
   y: number;
@@ -55,36 +166,36 @@ const CARDS: Card[] = [
   {
     id: "girl_1",
     label: "Girl 1",
-    bottom: "/cards/girl_1/background.mp4",
-    foreground: "/cards/girl_1/foreground.mp4",
+    bottom: "/cards/girl_1/background.webm",
+    foreground: "/cards/girl_1/foreground.webm",
     mesh: "girl_1.json",
   },
   {
     id: "girl_2",
     label: "Girl 2",
-    bottom: "/cards/girl_2/background.mp4",
-    foreground: "/cards/girl_2/foreground.mp4",
+    bottom: "/cards/girl_2/background.webm",
+    foreground: "/cards/girl_2/foreground.webm",
     mesh: "girl_2.json",
   },
   {
     id: "juliana_1",
     label: "Juliana 1",
-    bottom: "/cards/juliana_1/background.mp4",
-    foreground: "/cards/juliana_1/foreground.mp4",
+    bottom: "/cards/juliana_1/background.webm",
+    foreground: "/cards/juliana_1/foreground.webm",
     mesh: "juliana_1.json",
   },
   {
     id: "juliana_2",
     label: "Juliana 2",
-    bottom: "/cards/juliana_2/background.mp4",
-    foreground: "/cards/juliana_2/foreground.mp4",
+    bottom: "/cards/juliana_2/background.webm",
+    foreground: "/cards/juliana_2/foreground.webm",
     mesh: "juliana_2.json",
   },
   {
     id: "chinese_1",
     label: "Chinese 1",
-    bottom: "/cards/chinese_1/background.mp4",
-    foreground: "/cards/chinese_1/foreground.mp4",
+    bottom: "/cards/chinese_1/background.webm",
+    foreground: "/cards/chinese_1/foreground.webm",
     mesh: "chinese_1.json",
   },
 ];
@@ -454,14 +565,13 @@ function sampleMeshUvToWorld(sample: TrackedMeshSample, u: number, v: number): V
   return { x: topX + (botX - topX) * fy, y: topY + (botY - topY) * fy };
 }
 
-// Drift past this (seconds) is treated as a discontinuity (e.g. a loop wrap) and
-// corrected with a hard seek. Below it we steer with playbackRate instead.
-const HARD_SEEK_DRIFT = 0.5;
-// Below this drift we consider the clips synced and run at 1×.
-const SOFT_SYNC_DEADBAND = 0.02;
-// How hard playbackRate bends to close small drift (clamped to ±12%).
-const SYNC_RATE_GAIN = 0.5;
-const SYNC_RATE_MAX = 0.12;
+// Drift past this (seconds) is a genuine discontinuity (loop wrap) and is the
+// only case we correct with a hard seek — seeks stall the decoder, and on
+// Safari, whose currentTime is coarse, a low threshold makes us seek constantly
+// (every stale reading crosses it) which reads as continuous lag. Keep it high:
+// a normal startup offset is closed smoothly by the gentle rate steering below,
+// not by seeking.
+const HARD_SEEK_DRIFT = 0.45;
 
 function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
   if (source.paused && !target.paused) {
@@ -476,28 +586,25 @@ function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
     return;
   }
 
+  // A seek hasn't landed yet (Safari resolves seeks asynchronously, and its
+  // currentTime lags during one). Acting now would compare against a stale time
+  // and pile on more seeks — a seek storm that looks like a hard stutter.
+  if (target.seeking) return;
+
+  // Let the foreground free-run at 1×. The two clips are near-identical length,
+  // so left alone they stay visually locked. Actively steering the foreground
+  // (changing playbackRate / seeking it) knocks Safari's video decoder off its
+  // smooth-decode path, which starves the foreground to a few fps and makes it
+  // fall behind — the opposite of what the steering is trying to do.
+  if (target.playbackRate !== 1) target.playbackRate = 1;
+
   const targetTime = foregroundTimeFromBottom(source, target);
   const drift = targetTime - target.currentTime;
-  const absDrift = Math.abs(drift);
 
-  // Large jump (loop wrap / seek): snap once. Frequent hard seeks stall the
-  // mobile decoder, so we reserve them for genuine discontinuities.
-  if (absDrift > HARD_SEEK_DRIFT) {
+  // Only correct a genuine discontinuity (a loop wrap), with a single snap.
+  if (Math.abs(drift) > HARD_SEEK_DRIFT) {
     target.currentTime = targetTime;
-    target.playbackRate = 1;
-    return;
   }
-
-  // Small drift: steer with playbackRate so the foreground smoothly catches up
-  // or eases off without a single seek — this is what keeps the two clips
-  // visually locked on a phone.
-  if (target.paused) return;
-  if (absDrift <= SOFT_SYNC_DEADBAND) {
-    if (target.playbackRate !== 1) target.playbackRate = 1;
-    return;
-  }
-  const correction = clampValue(drift * SYNC_RATE_GAIN, -SYNC_RATE_MAX, SYNC_RATE_MAX);
-  target.playbackRate = 1 + correction;
 }
 
 function parseMeshIndex(value: unknown) {
@@ -933,9 +1040,16 @@ export function ScratchPrototype() {
       const bottomVideo = bottomVideoRef.current;
       const foregroundVideo = foregroundVideoRef.current;
       const trackedMeshNow = trackedMeshRef.current;
-      const videoTime = bottomVideo?.currentTime ?? time;
-      const trackedSample = trackedMeshNow ? sampleTrackedMesh(trackedMeshNow, videoTime) : null;
+      // Sample the mesh on the FOREGROUND clock — the mesh was tracked from the
+      // foreground (performer) clip, so this keeps scratch holes glued to the
+      // body regardless of any residual drift between the two free-running
+      // videos. The bottom video is just the revealed image underneath, where a
+      // few frames of offset is invisible. Fall back to the bottom clock, then
+      // wall-clock, before either video has a valid currentTime.
+      const meshTime = foregroundVideo?.currentTime ?? bottomVideo?.currentTime ?? time;
+      const trackedSample = trackedMeshNow ? sampleTrackedMesh(trackedMeshNow, meshTime) : null;
       trackedSampleRef.current = trackedSample;
+      const videoTime = bottomVideo?.currentTime ?? time;
 
       // Subtle chest-follow camera: pan toward keeping the chest anchor at its
       // target framing point, clamped + smoothed.
@@ -1644,6 +1758,10 @@ export function ScratchPrototype() {
     <main className="app-shell">
       <section className="prototype">
         <div ref={stageRef} className={`stage${gameResult ? " is-game-over" : ""}`}>
+          {typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).has("debug") ? (
+            <DebugHud />
+          ) : null}
           <div
             className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
             aria-label="Game symbols"
