@@ -541,6 +541,9 @@ function loadScratchZoomSettings(): ScratchZoomSettings {
 
 const AUTO_SCRATCH_STORAGE_KEY = "sugar-scratchie:auto-scratch";
 const SCRATCH_RADIUS = 0.045;
+// Max canvas-space step between manual scratch stamps so fast swipes stay continuous.
+const MANUAL_SCRATCH_PATH_STEP = SCRATCH_RADIUS * 0.65 * CANVAS_HEIGHT;
+const MANUAL_SCRATCH_MAX_POINTS = 40;
 const AUTO_SCRATCH_RADIUS = 0.092;
 const AUTO_SCRATCH_DIAGONAL_LINES = 18;
 // Step along each ↘ stroke (top-left → bottom-right) so brush circles overlap.
@@ -754,6 +757,24 @@ function densifyScratchPath(points: Vec2[], maxStep: number): Vec2[] {
     }
   }
   return out;
+}
+
+function densifyStrokeSegment(
+  from: Vec2,
+  to: Vec2,
+  maxStep: number,
+  maxPoints: number,
+): Vec2[] {
+  const points = densifyScratchPath([from, to], maxStep);
+  if (points.length <= maxPoints) return points;
+  const kept: Vec2[] = [points[0]];
+  const lastIndex = points.length - 1;
+  for (let i = 1; i < maxPoints - 1; i += 1) {
+    const idx = Math.round((i / (maxPoints - 1)) * lastIndex);
+    kept.push(points[idx]);
+  }
+  kept.push(points[lastIndex]);
+  return kept;
 }
 
 function isGarmentUv(mesh: TrackedMesh | null, u: number, v: number) {
@@ -1054,6 +1075,7 @@ export function ScratchPrototype() {
   const glRendererRef = useRef<GarmentGLRenderer | null>(null);
   const marksRef = useRef<ScratchMark[]>([]);
   const hoverPointRef = useRef<Vec2 | null>(null);
+  const lastScratchWorldRef = useRef<Vec2 | null>(null);
   const drawingRef = useRef(false);
   // Reveal progress is measured against a fixed UV sample grid. We track which
   // samples have *ever* been scratched (monotonic), so the percentage matches
@@ -1569,6 +1591,7 @@ export function ScratchPrototype() {
 
   function resetScratch() {
     marksRef.current = [];
+    lastScratchWorldRef.current = null;
     glRendererRef.current?.clearScratch();
     glRendererRef.current?.clearFlakes();
     revealedRef.current = new Array(revealSamplesRef.current.length).fill(
@@ -1760,15 +1783,12 @@ export function ScratchPrototype() {
     v: number,
     radius: number,
     worldPoint?: Vec2 | null,
+    finalize = true,
   ) {
     if (gameResultPendingRef.current !== null) return;
 
     marksRef.current = [...marksRef.current, { u, v, radius }].slice(-180);
     glRendererRef.current?.paintScratch(u, v, radius);
-
-    if (autoScratchRef.current.flakes && worldPoint) {
-      glRendererRef.current?.spawnFlakes(worldPoint.x, worldPoint.y);
-    }
 
     const samples = revealSamplesRef.current;
     const revealed = revealedRef.current;
@@ -1783,6 +1803,12 @@ export function ScratchPrototype() {
         revealedCountRef.current += 1;
       }
     }
+    if (!finalize) return;
+
+    if (autoScratchRef.current.flakes && worldPoint) {
+      glRendererRef.current?.spawnFlakes(worldPoint.x, worldPoint.y);
+    }
+
     const nextProgress = samples.length
       ? revealedCountRef.current / samples.length
       : 0;
@@ -1823,10 +1849,35 @@ export function ScratchPrototype() {
 
     const trackedSample = trackedSampleRef.current;
     if (!trackedSample) return;
-    const uv = trackedWorldToUv(trackedSample, point);
-    if (!uv) return;
 
-    applyScratchAtUv(uv.x, uv.y, SCRATCH_RADIUS, point);
+    const last = lastScratchWorldRef.current;
+    const strokePoints =
+      last !== null
+        ? densifyStrokeSegment(
+            last,
+            point,
+            MANUAL_SCRATCH_PATH_STEP,
+            MANUAL_SCRATCH_MAX_POINTS,
+          )
+        : [point];
+
+    let applied = false;
+    for (let i = 0; i < strokePoints.length; i += 1) {
+      const strokePoint = strokePoints[i];
+      const uv = trackedWorldToUv(trackedSample, strokePoint);
+      if (!uv) continue;
+      const isLast = i === strokePoints.length - 1;
+      applyScratchAtUv(
+        uv.x,
+        uv.y,
+        SCRATCH_RADIUS,
+        isLast ? point : null,
+        isLast,
+      );
+      applied = true;
+    }
+
+    if (applied) lastScratchWorldRef.current = point;
   }
 
   function setVideoTime(time: number) {
@@ -2123,6 +2174,7 @@ export function ScratchPrototype() {
               if (foregroundVideo?.paused)
                 void foregroundVideo.play().catch(() => undefined);
               drawingRef.current = true;
+              lastScratchWorldRef.current = null;
               lastPointerClientRef.current = {
                 x: event.clientX,
                 y: event.clientY,
@@ -2147,15 +2199,18 @@ export function ScratchPrototype() {
             }}
             onPointerUp={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               clearScratchZoom();
             }}
             onPointerLeave={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
             onPointerCancel={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
