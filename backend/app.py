@@ -316,8 +316,8 @@ def assets() -> dict:
         )
     ]
     for directory in sorted(path for path in CARDS_DIR.iterdir() if path.is_dir()):
-        background = directory / "background.webm"
-        foreground = directory / "foreground.webm"
+        background = directory / "background.mp4"
+        foreground = directory / "foreground.mp4"
         if not background.exists() or not foreground.exists():
             continue
         mesh = f"{directory.name}.json"

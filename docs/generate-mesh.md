@@ -65,7 +65,7 @@ Point the generator at any foreground clip and choose where to write the mesh:
 
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=1 \
-  INPUT_VIDEO="public/cards/girl_2/foreground.webm" \
+  INPUT_VIDEO="public/cards/girl_2/foreground.mp4" \
   OUTPUT_JSON="public/mesh/girl_2.json" \
   TRACKER=cotracker \
   .venv/bin/python scripts/generate-mesh-tracking.py
@@ -83,7 +83,7 @@ overlays and exits **without** writing a mesh:
 
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=1 COMPARE_TRACKERS=1 DEBUG_OVERLAY=1 \
-  INPUT_VIDEO="public/cards/girl_1/foreground.webm" \
+  INPUT_VIDEO="public/cards/girl_1/foreground.mp4" \
   .venv/bin/python scripts/generate-mesh-tracking.py
 ```
 

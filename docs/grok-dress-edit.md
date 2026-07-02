@@ -16,7 +16,7 @@ Output duration, resolution and aspect ratio always match the input.
 
 ```bash
 XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
-  --video public/cards/girl_1/foreground.webm \
+  --video public/cards/girl_1/foreground.mp4 \
   --prompt "Replace only her dress with a long red satin gown. Keep the person, face, pose, hair, lighting and background exactly the same." \
   --out .tmp/girl_1_red.mp4
 ```
@@ -69,7 +69,7 @@ edit.
 
 ```bash
 XAI_API_KEY=sk-... python scripts/grok-dress-edit.py \
-  --video public/cards/girl_2/foreground.webm \
+  --video public/cards/girl_2/foreground.mp4 \
   --prompt "red satin gown" \
   --enhance \
   --out .tmp/girl_2_red.mp4
