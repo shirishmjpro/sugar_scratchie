@@ -188,10 +188,17 @@ jobs: dict[str, Job] = {}
 jobs_lock = threading.Lock()
 
 
+def cors_origins() -> list[str]:
+    raw = os.environ.get("CORS_ORIGINS", "").strip()
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return ["http://localhost:5080", "http://127.0.0.1:5080"]
+
+
 app = FastAPI(title="Sugar Scratchie Dashboard API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5080", "http://127.0.0.1:5080"],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

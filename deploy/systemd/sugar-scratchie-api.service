@@ -1,0 +1,16 @@
+[Unit]
+Description=Sugar Scratchie Dashboard API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/sugar-scratchie
+EnvironmentFile=/opt/sugar-scratchie/.env
+ExecStart=/opt/sugar-scratchie/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
