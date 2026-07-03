@@ -1,10 +1,13 @@
 {
   "files": [
+    "asian_1.json",
+    "asian_2.json",
     "chinese_1.json",
     "girl_1.json",
     "girl_2.json",
     "juliana_1.json",
     "juliana_2.json",
+    "juliana_3.json",
     "tracked-mesh.json"
   ]
 }
