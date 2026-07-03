@@ -55,6 +55,13 @@
       "bottom": "/cards/juliana_2/background.mp4",
       "foreground": "/cards/juliana_2/foreground.mp4",
       "mesh": "juliana_2.json"
+    },
+    {
+      "id": "juliana_3",
+      "label": "Juliana 3",
+      "bottom": "/cards/juliana_3/background.mp4",
+      "foreground": "/cards/juliana_3/foreground.mp4",
+      "mesh": "juliana_3.json"
     }
   ]
 }
