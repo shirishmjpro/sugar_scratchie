@@ -43,6 +43,13 @@
       "mesh": "girl_2.json"
     },
     {
+      "id": "julia_1",
+      "label": "Julia 1",
+      "bottom": "/cards/julia_1/background.mp4",
+      "foreground": "/cards/julia_1/foreground.mp4",
+      "mesh": "julia_1.json"
+    },
+    {
       "id": "juliana_1",
       "label": "Juliana 1",
       "bottom": "/cards/juliana_1/background.mp4",
