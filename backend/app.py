@@ -19,6 +19,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from backend.cards import (
+    CardInfo,
+    CreateCardRequest,
+    UpdateCardRequest,
+    create_card,
+    delete_card,
+    list_cards,
+    update_card,
+    write_cards_index,
+)
 from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
 from backend.services.mesh_tracking import generate_mesh as run_generate_mesh
 
@@ -75,15 +85,6 @@ def workspace_path(value: str, *, must_exist: bool = False) -> Path:
 
 def relative(path: Path) -> str:
     return path.resolve().relative_to(ROOT).as_posix()
-
-
-class CardInfo(BaseModel):
-    id: str
-    label: str
-    background: str
-    foreground: str
-    mesh: str
-    has_mesh: bool
 
 
 class MeshInfo(BaseModel):
@@ -205,6 +206,11 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def ensure_cards_index() -> None:
+    write_cards_index(ROOT, CARDS_DIR, MESH_DIR)
+
+
 class JobLogWriter(TextIOBase):
     def __init__(self, job: Job) -> None:
         self.job = job
@@ -311,37 +317,35 @@ def health() -> dict:
 @app.get("/api/assets")
 def assets() -> dict:
     meshes = sorted(MESH_DIR.glob("*.json"))
-    mesh_names = {path.name for path in meshes if path.name != "index.json"}
-    cards: list[CardInfo] = [
-        CardInfo(
-            id="original",
-            label="Original",
-            background="public/cards/ai girl 2.mp4",
-            foreground="public/cards/Green bg sample 2 swap.mp4",
-            mesh="tracked-mesh.json",
-            has_mesh="tracked-mesh.json" in mesh_names,
-        )
-    ]
-    for directory in sorted(path for path in CARDS_DIR.iterdir() if path.is_dir()):
-        background = directory / "background.mp4"
-        foreground = directory / "foreground.mp4"
-        if not background.exists() or not foreground.exists():
-            continue
-        mesh = f"{directory.name}.json"
-        cards.append(
-            CardInfo(
-                id=directory.name,
-                label=directory.name.replace("_", " ").title(),
-                background=relative(background),
-                foreground=relative(foreground),
-                mesh=mesh,
-                has_mesh=mesh in mesh_names,
-            )
-        )
+    cards = list_cards(ROOT, CARDS_DIR, MESH_DIR)
     return {
         "cards": [card.dict() for card in cards],
         "meshes": [read_mesh_info(path).dict() for path in meshes if path.name != "index.json"],
     }
+
+
+@app.get("/api/cards")
+def get_cards() -> dict:
+    cards = list_cards(ROOT, CARDS_DIR, MESH_DIR)
+    return {"cards": [card.dict() for card in cards]}
+
+
+@app.post("/api/cards")
+def post_card(request: CreateCardRequest) -> dict:
+    card = create_card(ROOT, CARDS_DIR, MESH_DIR, request)
+    return card.dict()
+
+
+@app.put("/api/cards/{card_id}")
+def put_card(card_id: str, request: UpdateCardRequest) -> dict:
+    card = update_card(ROOT, CARDS_DIR, MESH_DIR, card_id, request)
+    return card.dict()
+
+
+@app.delete("/api/cards/{card_id}")
+def remove_card(card_id: str) -> dict:
+    delete_card(ROOT, CARDS_DIR, MESH_DIR, card_id)
+    return {"ok": True, "id": card_id}
 
 
 @app.post("/api/files/upload")

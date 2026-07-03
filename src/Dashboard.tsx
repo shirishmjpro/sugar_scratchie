@@ -7,6 +7,7 @@ import {
   Play,
   SlidersHorizontal,
   Square,
+  Trash2,
   Video,
   WandSparkles,
   Workflow,
@@ -1090,6 +1091,232 @@ function FilePathPicker({
   );
 }
 
+function VideoManagerPanel({
+  cards,
+  editingCardId,
+  onEditingCardChange,
+  onRefresh,
+  onError,
+}: {
+  cards: CardInfo[];
+  editingCardId: string;
+  onEditingCardChange: (value: string) => void;
+  onRefresh: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [newCardId, setNewCardId] = useState("");
+  const [newCardLabel, setNewCardLabel] = useState("");
+  const [newBackground, setNewBackground] = useState("");
+  const [newForeground, setNewForeground] = useState("");
+  const [editLabel, setEditLabel] = useState("");
+  const [editBackground, setEditBackground] = useState("");
+  const [editForeground, setEditForeground] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const editingCard = useMemo(
+    () => cards.find((card) => card.id === editingCardId) ?? cards[0],
+    [cards, editingCardId],
+  );
+
+  useEffect(() => {
+    if (!editingCard) return;
+    setEditLabel(editingCard.label);
+    setEditBackground("");
+    setEditForeground("");
+  }, [editingCard]);
+
+  async function saveCard() {
+    if (!editingCard) return;
+    setIsSaving(true);
+    onError("");
+    try {
+      await api<CardInfo>(`/api/cards/${editingCard.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          label: editLabel,
+          ...(editBackground ? { background: editBackground } : {}),
+          ...(editForeground ? { foreground: editForeground } : {}),
+        }),
+      });
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function createCard() {
+    setIsCreating(true);
+    onError("");
+    try {
+      await api<CardInfo>("/api/cards", {
+        method: "POST",
+        body: JSON.stringify({
+          id: newCardId,
+          label: newCardLabel,
+          background: newBackground,
+          foreground: newForeground,
+        }),
+      });
+      setNewCardId("");
+      setNewCardLabel("");
+      setNewBackground("");
+      setNewForeground("");
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  async function deleteCard() {
+    if (!editingCard || editingCard.id === "original") return;
+    if (!window.confirm(`Delete card "${editingCard.label}" and its video files?`)) return;
+    setIsDeleting(true);
+    onError("");
+    try {
+      await api<{ ok: boolean }>(`/api/cards/${editingCard.id}`, { method: "DELETE" });
+      onEditingCardChange(cards.find((card) => card.id === "original")?.id ?? cards[0]?.id ?? "");
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  const canCreate = Boolean(newCardId.trim() && newCardLabel.trim() && newBackground && newForeground);
+
+  return (
+    <Grid
+      columns={{ initial: "1", lg: "2" }}
+      gap="5"
+    >
+      <Flex
+        direction="column"
+        gap="4"
+      >
+        <Heading size="4">Edit card</Heading>
+        <Field label="Card">
+          <CardSelect
+            cards={cards}
+            selectedCardId={editingCard?.id ?? ""}
+            onValueChange={onEditingCardChange}
+          />
+        </Field>
+        <Field label="Label">
+          <TextField.Root
+            value={editLabel}
+            onChange={(event) => setEditLabel(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Background video (reveal layer)">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel={editBackground ? "New background preview" : "Current background"}
+            value={editBackground || editingCard?.background || ""}
+            onChange={setEditBackground}
+            onError={onError}
+          />
+        </Field>
+        <Field label="Foreground video (green-screen scratch layer)">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel={editForeground ? "New foreground preview" : "Current foreground"}
+            value={editForeground || editingCard?.foreground || ""}
+            onChange={setEditForeground}
+            onError={onError}
+          />
+        </Field>
+        <Flex gap="2">
+          <Button
+            disabled={!editingCard || isSaving}
+            onClick={saveCard}
+          >
+            {isSaving ? <LoaderCircle {...iconProps} /> : <FileUp {...iconProps} />}
+            {isSaving ? "Saving" : "Save changes"}
+          </Button>
+          <Button
+            color="red"
+            disabled={!editingCard || editingCard.id === "original" || isDeleting}
+            variant="soft"
+            onClick={deleteCard}
+          >
+            {isDeleting ? <LoaderCircle {...iconProps} /> : <Trash2 {...iconProps} />}
+            Delete card
+          </Button>
+        </Flex>
+        <Text
+          color="gray"
+          size="1"
+        >
+          Upload replacements or pick a workspace path, then save. The original card can be updated but not deleted.
+        </Text>
+      </Flex>
+
+      <Flex
+        direction="column"
+        gap="4"
+      >
+        <Heading size="4">Create card</Heading>
+        <Field label="Card id">
+          <TextField.Root
+            placeholder="my_card_1"
+            value={newCardId}
+            onChange={(event) => setNewCardId(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Label">
+          <TextField.Root
+            placeholder="My Card 1"
+            value={newCardLabel}
+            onChange={(event) => setNewCardLabel(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Background video">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel="Background preview"
+            value={newBackground}
+            onChange={setNewBackground}
+            onError={onError}
+          />
+        </Field>
+        <Field label="Foreground video">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel="Foreground preview"
+            value={newForeground}
+            onChange={setNewForeground}
+            onError={onError}
+          />
+        </Field>
+        <Button
+          disabled={!canCreate || isCreating}
+          onClick={createCard}
+        >
+          {isCreating ? <LoaderCircle {...iconProps} /> : <Video {...iconProps} />}
+          {isCreating ? "Creating" : "Create card"}
+        </Button>
+        <Text
+          color="gray"
+          size="1"
+        >
+          New cards are stored under public/cards/&lt;id&gt;/ and appear in the prototype card switcher after refresh.
+        </Text>
+      </Flex>
+    </Grid>
+  );
+}
+
 export function Dashboard() {
   const [assets, setAssets] = useState<AssetsResponse>({ cards: [], meshes: [] });
   const [jobs, setJobs] = useState<JobInfo[]>([]);
@@ -1120,6 +1347,7 @@ export function Dashboard() {
   );
   const [flowBaseOut, setFlowBaseOut] = useState(".tmp/image-video-base.mp4");
   const [flowOut, setFlowOut] = useState(".tmp/image-dress-video.mp4");
+  const [videoManagerCardId, setVideoManagerCardId] = useState("");
 
   const selectedCard = useMemo(() => {
     return assets.cards.find((card) => card.id === selectedCardId) ?? assets.cards[0];
@@ -1129,6 +1357,7 @@ export function Dashboard() {
     const data = await api<AssetsResponse>("/api/assets");
     setAssets(data);
     setSelectedCardId((current) => current || data.cards[0]?.id || "");
+    setVideoManagerCardId((current) => current || data.cards[0]?.id || "");
   }
 
   async function refreshJobs() {
@@ -1442,6 +1671,10 @@ export function Dashboard() {
               <Tabs.Trigger value="dress-edit">
                 <WandSparkles {...iconProps} />
                 Dress Edit
+              </Tabs.Trigger>
+              <Tabs.Trigger value="videos">
+                <Video {...iconProps} />
+                Videos
               </Tabs.Trigger>
               <Tabs.Trigger value="assets">Assets</Tabs.Trigger>
               <Tabs.Trigger value="jobs">Jobs</Tabs.Trigger>
@@ -1808,6 +2041,37 @@ export function Dashboard() {
                       <Play {...iconProps} />
                       Start edit job
                     </Button>
+                  </Flex>
+                </Card>
+              </Tabs.Content>
+
+              <Tabs.Content value="videos">
+                <Card>
+                  <Flex
+                    direction="column"
+                    gap="5"
+                  >
+                    <Flex
+                      align="center"
+                      justify="between"
+                    >
+                      <Heading size="4">Manage Videos</Heading>
+                      <Button
+                        color="gray"
+                        variant="soft"
+                        onClick={() => refreshAssets().catch((caught) => setError(String(caught)))}
+                      >
+                        <LoaderCircle {...iconProps} />
+                        Refresh cards
+                      </Button>
+                    </Flex>
+                    <VideoManagerPanel
+                      cards={assets.cards}
+                      editingCardId={videoManagerCardId || selectedCard?.id || ""}
+                      onEditingCardChange={setVideoManagerCardId}
+                      onError={setError}
+                      onRefresh={refreshAssets}
+                    />
                   </Flex>
                 </Card>
               </Tabs.Content>

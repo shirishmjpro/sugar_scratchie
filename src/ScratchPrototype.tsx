@@ -180,7 +180,9 @@ type Card = {
   mesh: string;
 };
 
-const CARDS: Card[] = [
+const CARDS_INDEX_SRC = "/cards/index.json";
+
+const DEFAULT_CARDS: Card[] = [
   {
     id: "original",
     label: "Original",
@@ -224,6 +226,51 @@ const CARDS: Card[] = [
     mesh: "chinese_1.json",
   },
 ];
+
+type CardsIndexResponse = {
+  cards?: Array<{
+    id: string;
+    label: string;
+    bottom: string;
+    foreground: string;
+    mesh: string;
+  }>;
+};
+
+function parseCardsIndex(data: CardsIndexResponse): Card[] | null {
+  if (!Array.isArray(data.cards) || data.cards.length === 0) return null;
+  const cards: Card[] = [];
+  for (const entry of data.cards) {
+    if (
+      typeof entry.id !== "string" ||
+      typeof entry.label !== "string" ||
+      typeof entry.bottom !== "string" ||
+      typeof entry.foreground !== "string" ||
+      typeof entry.mesh !== "string"
+    ) {
+      continue;
+    }
+    cards.push({
+      id: entry.id,
+      label: entry.label,
+      bottom: entry.bottom,
+      foreground: entry.foreground,
+      mesh: entry.mesh,
+    });
+  }
+  return cards.length > 0 ? cards : null;
+}
+
+async function loadCards(): Promise<Card[]> {
+  try {
+    const response = await fetch(CARDS_INDEX_SRC, { cache: "no-store" });
+    if (!response.ok) return DEFAULT_CARDS;
+    const data = (await response.json()) as CardsIndexResponse;
+    return parseCardsIndex(data) ?? DEFAULT_CARDS;
+  } catch {
+    return DEFAULT_CARDS;
+  }
+}
 
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
@@ -1092,10 +1139,11 @@ export function ScratchPrototype() {
   // to invert the pan when mapping a tap back to fabric UV.
   const cameraRef = useRef({ x: 0, y: 0 });
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
-  const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[1].mesh);
+  const [cards, setCards] = useState<Card[]>(DEFAULT_CARDS);
+  const [selectedMeshFile, setSelectedMeshFile] = useState(DEFAULT_CARDS[1].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [selectedCardId, setSelectedCardId] = useState(CARDS[1].id);
-  const card = CARDS.find((entry) => entry.id === selectedCardId) ?? CARDS[1];
+  const [selectedCardId, setSelectedCardId] = useState(DEFAULT_CARDS[1].id);
+  const card = cards.find((entry) => entry.id === selectedCardId) ?? cards[1] ?? cards[0];
   // The mesh lattice is a dev overlay — default it off on phones (where the
   // toggle is hidden).
   const [showMesh, setShowMesh] = useState(
@@ -1369,6 +1417,24 @@ export function ScratchPrototype() {
     return () => {
       cancelAnimationFrame(animationId);
       glRendererRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isCancelled = false;
+    loadCards()
+      .then((loaded) => {
+        if (isCancelled) return;
+        setCards(loaded);
+        setSelectedCardId((current) =>
+          loaded.some((entry) => entry.id === current)
+            ? current
+            : loaded[1]?.id ?? loaded[0]?.id ?? "",
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      isCancelled = true;
     };
   }, []);
 
@@ -2272,7 +2338,7 @@ export function ScratchPrototype() {
                     }
                     value={selectedCardId}
                   >
-                    {CARDS.map((entry) => (
+                    {cards.map((entry) => (
                       <option key={entry.id} value={entry.id}>
                         {entry.label}
                       </option>
@@ -2398,7 +2464,7 @@ export function ScratchPrototype() {
               onChange={(event) => setSelectedCardId(event.currentTarget.value)}
               value={selectedCardId}
             >
-              {CARDS.map((entry) => (
+              {cards.map((entry) => (
                 <option key={entry.id} value={entry.id}>
                   {entry.label}
                 </option>
