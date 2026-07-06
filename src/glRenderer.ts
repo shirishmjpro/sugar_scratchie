@@ -497,6 +497,7 @@ export class GarmentGLRenderer {
     showMesh: boolean,
     camera: { x: number; y: number } = { x: 0, y: 0 },
     hideForeground = false,
+    foregroundChroma = true,
   ) {
     const gl = this.gl;
 
@@ -538,7 +539,7 @@ export class GarmentGLRenderer {
       gl.disable(gl.BLEND);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
-      this.drawVideo(this.blit, this.fgTex, foregroundVideo!, true);
+      this.drawVideo(this.blit, this.fgTex, foregroundVideo!, foregroundChroma);
 
       // 3. punch holes where scratched, within the tracked mesh
       if (sample) {

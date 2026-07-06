@@ -13,11 +13,15 @@ from fastapi import HTTPException
 from backend.cards import CreateCardRequest, UpdateCardRequest, card_paths, create_card, update_card
 from backend.services.grok import (
     DRESS_ENHANCE_SYSTEM,
+    DEFAULT_PORTRAIT_PROMPT,
     edit_video,
+    generate_portrait_image,
     image_to_video,
+    is_stock_portrait_prompt,
     output_video_ready,
     probe_video,
     request_id_sidecar,
+    swap_face_on_image,
 )
 from backend.services.mesh_symbols import (
     clear_symbol_points,
@@ -392,6 +396,10 @@ def draft_path(work: Path) -> Path:
     return work / "draft.json"
 
 
+def source_image_path(work: Path) -> Path:
+    return work / "source-image.png"
+
+
 def save_flow_draft(
     *,
     image: str | Path,
@@ -408,6 +416,10 @@ def save_flow_draft(
     enhance_dress_prompt: bool,
     tracker: str,
     write_webm: bool,
+    source_mode: str = "upload",
+    source_prompt: str = "",
+    face_image: str = "",
+    base_image: str = "",
 ) -> dict:
     work = work_dir(card_id)
     draft = {
@@ -425,10 +437,102 @@ def save_flow_draft(
         "enhance_dress_prompt": enhance_dress_prompt,
         "tracker": tracker,
         "write_webm": write_webm,
+        "source_mode": source_mode,
+        "source_prompt": source_prompt,
+        "face_image": face_image,
+        "base_image": base_image,
         "updated_at": time.time(),
     }
     draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
     return draft
+
+
+def patch_flow_draft_source(
+    card_id: str,
+    *,
+    image: str | Path,
+    source_mode: str,
+    source_prompt: str = "",
+    face_image: str = "",
+    base_image: str = "",
+) -> dict:
+    work = work_dir(card_id)
+    existing = read_flow_draft(card_id) or {}
+    draft = {
+        **existing,
+        "image": str(image),
+        "source_mode": source_mode,
+        "source_prompt": source_prompt,
+        "face_image": face_image,
+        "base_image": base_image,
+        "card_id": card_id,
+        "updated_at": time.time(),
+    }
+    draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
+    return draft
+
+
+def _draft_path_value(value: str | Path) -> str:
+    if not value:
+        return ""
+    path = Path(value)
+    if not path.is_absolute():
+        return str(value)
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def run_generate_source_image(
+    *,
+    card_id: str,
+    mode: Literal["prompt", "face_swap"],
+    prompt: str = "",
+    face_image: str | Path = "",
+    base_image: str | Path = "",
+    aspect_ratio: str = "9:16",
+) -> dict:
+    work = work_dir(card_id)
+    out = source_image_path(work)
+    text = prompt.strip() or DEFAULT_PORTRAIT_PROMPT
+    if mode == "prompt":
+        generate_portrait_image(
+            prompt=text,
+            out=out,
+            face_image=face_image or None,
+            aspect_ratio=aspect_ratio,
+        )
+        patched = patch_flow_draft_source(
+            card_id,
+            image=out.relative_to(ROOT).as_posix(),
+            source_mode="prompt",
+            source_prompt=text,
+            face_image=_draft_path_value(face_image) if face_image else "",
+            base_image="",
+        )
+    elif mode == "face_swap":
+        if not base_image or not face_image:
+            raise RuntimeError("Face swap requires base_image and face_image.")
+        swap_face_on_image(
+            base_image=base_image,
+            face_image=face_image,
+            out=out,
+            prompt=None if is_stock_portrait_prompt(prompt) else prompt.strip(),
+            aspect_ratio=aspect_ratio,
+        )
+        patched = patch_flow_draft_source(
+            card_id,
+            image=out.relative_to(ROOT).as_posix(),
+            source_mode="face_swap",
+            source_prompt="" if is_stock_portrait_prompt(prompt) else prompt.strip(),
+            face_image=_draft_path_value(face_image),
+            base_image=_draft_path_value(base_image),
+        )
+    else:  # pragma: no cover
+        raise RuntimeError(f"Unknown source image mode: {mode}")
+    print(f"Source image written: {out.name}")
+    return patched
 
 
 def read_flow_draft(card_id: str) -> dict | None:

@@ -4,6 +4,8 @@ import { labelFromProjectId } from "./projects";
 import type { VideoFlowProject } from "./projects";
 import { DEFAULT_VIDEO_FLOW_JSON, parseVideoFlowJson, stringifyVideoFlowJson, type VideoFlowJson } from "./schema";
 import {
+  DEFAULT_PORTRAIT_PROMPT,
+  isStockPortraitPrompt,
   readActiveProjectId,
   readFlowJsonText,
   readStoredFlowJson,
@@ -12,6 +14,7 @@ import {
   writeActiveProjectId,
   writeStoredFlowJson,
   writeStoredVideoFlowDraft,
+  type SourceImageMode,
   type StoredVideoFlowDraft,
 } from "./storage";
 import { TRACKERS } from "./ui";
@@ -47,6 +50,10 @@ function draftPayload(
     enhance_dress_prompt: enhancePrompt,
     tracker: draft.tracker || flow.defaults.tracker,
     write_webm: draft.writeWebm,
+    source_mode: draft.sourceMode,
+    source_prompt: draft.sourcePrompt,
+    face_image: draft.faceImage,
+    base_image: draft.baseImage,
   };
 }
 
@@ -82,6 +89,13 @@ export function useVideoFlowState() {
   const [tracker, setTracker] = useState<(typeof TRACKERS)[number]>(
     storedDraft?.tracker ?? flow.defaults.tracker,
   );
+  const [sourceMode, setSourceMode] = useState<SourceImageMode>(storedDraft?.sourceMode ?? "upload");
+  const [sourcePrompt, setSourcePrompt] = useState(() => {
+    const saved = storedDraft?.sourcePrompt || DEFAULT_PORTRAIT_PROMPT;
+    return isStockPortraitPrompt(saved) ? DEFAULT_PORTRAIT_PROMPT : saved;
+  });
+  const [faceImage, setFaceImage] = useState(storedDraft?.faceImage ?? "");
+  const [baseImage, setBaseImage] = useState(storedDraft?.baseImage ?? "");
 
   const canUseGrok = Boolean(health?.xai_key_loaded);
   const activeProjectId = cardId.trim();
@@ -116,6 +130,12 @@ export function useVideoFlowState() {
     setWriteWebm(draft.writeWebm);
     setResolution(draft.resolution);
     setTracker(draft.tracker);
+    setSourceMode(draft.sourceMode);
+    setSourcePrompt(
+      isStockPortraitPrompt(draft.sourcePrompt) ? DEFAULT_PORTRAIT_PROMPT : draft.sourcePrompt || DEFAULT_PORTRAIT_PROMPT,
+    );
+    setFaceImage(draft.faceImage);
+    setBaseImage(draft.baseImage);
     writeStoredVideoFlowDraft(draft);
     writeActiveProjectId(draft.cardId);
   }, []);
@@ -158,6 +178,10 @@ export function useVideoFlowState() {
         writeWebm: flow.defaults.write_webm,
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
+        sourceMode: "upload",
+        sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
+        faceImage: "",
+        baseImage: "",
       });
     },
     [applyVideoFlowDraft, flow.defaults, projects],
@@ -176,6 +200,10 @@ export function useVideoFlowState() {
         writeWebm: flow.defaults.write_webm,
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
+        sourceMode: "upload",
+        sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
+        faceImage: "",
+        baseImage: "",
       };
 
       await api(`/api/video-flow/${encodeURIComponent(id)}/draft`, {
@@ -224,9 +252,26 @@ export function useVideoFlowState() {
       writeWebm,
       resolution,
       tracker,
+      sourceMode,
+      sourcePrompt,
+      faceImage,
+      baseImage,
     });
     if (cardId.trim()) writeActiveProjectId(cardId.trim());
-  }, [image, backgroundMotionPrompt, dressPrompt, cardId, cardLabel, writeWebm, resolution, tracker]);
+  }, [
+    image,
+    backgroundMotionPrompt,
+    dressPrompt,
+    cardId,
+    cardLabel,
+    writeWebm,
+    resolution,
+    tracker,
+    sourceMode,
+    sourcePrompt,
+    faceImage,
+    baseImage,
+  ]);
 
   function applyFlowDefinition(next: VideoFlowJson) {
     setFlow(next);
@@ -271,6 +316,14 @@ export function useVideoFlowState() {
     setResolution,
     tracker,
     setTracker,
+    sourceMode,
+    setSourceMode,
+    sourcePrompt,
+    setSourcePrompt,
+    faceImage,
+    setFaceImage,
+    baseImage,
+    setBaseImage,
     canUseGrok,
     refreshHealth,
     refreshJobs,

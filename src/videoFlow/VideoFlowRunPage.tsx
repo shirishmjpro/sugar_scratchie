@@ -28,6 +28,14 @@ export function VideoFlowRunPage() {
     setResolution,
     tracker,
     setTracker,
+    sourceMode,
+    setSourceMode,
+    sourcePrompt,
+    setSourcePrompt,
+    faceImage,
+    setFaceImage,
+    baseImage,
+    setBaseImage,
     error,
     setError,
     refreshHealth,
@@ -37,6 +45,7 @@ export function VideoFlowRunPage() {
     activeProjectId,
     selectProject,
     createProject,
+    applyVideoFlowDraft,
   } = state;
 
   return (
@@ -85,6 +94,10 @@ export function VideoFlowRunPage() {
           writeWebm={writeWebm}
           resolution={resolution}
           tracker={tracker}
+          sourceMode={sourceMode}
+          sourcePrompt={sourcePrompt}
+          faceImage={faceImage}
+          baseImage={baseImage}
           onImageChange={setImage}
           onBackgroundMotionPromptChange={setBackgroundMotionPrompt}
           onDressPromptChange={setDressPrompt}
@@ -93,6 +106,11 @@ export function VideoFlowRunPage() {
           onWriteWebmChange={setWriteWebm}
           onTrackerChange={setTracker}
           onResolutionChange={setResolution}
+          onSourceModeChange={setSourceMode}
+          onSourcePromptChange={setSourcePrompt}
+          onFaceImageChange={setFaceImage}
+          onBaseImageChange={setBaseImage}
+          onApplyDraft={applyVideoFlowDraft}
           onRefreshJobs={refreshJobs}
           onRefreshAssets={async () => undefined}
           onError={setError}

@@ -43,6 +43,7 @@ from backend.services.video_flow import (
     list_flows,
     read_flow_draft,
     reject_flow_step,
+    run_generate_source_image,
     run_video_flow_step,
     save_flow_draft,
     video_flow as run_video_flow,
@@ -179,6 +180,19 @@ class VideoFlowRequest(BaseModel):
     image_field: str = "image"
     video_field: str = "video"
     endpoint: str = "/v1/videos/generations"
+    source_mode: Literal["upload", "prompt", "face_swap"] = "upload"
+    source_prompt: str = ""
+    face_image: str = ""
+    base_image: str = ""
+
+
+class GenerateSourceImageRequest(BaseModel):
+    mode: Literal["prompt", "face_swap"]
+    card_id: str = Field(min_length=1, max_length=64)
+    prompt: str = ""
+    face_image: str = ""
+    base_image: str = ""
+    aspect_ratio: str = "9:16"
 
 
 class VideoFlowStepRequest(VideoFlowRequest):
@@ -574,6 +588,69 @@ def image_dress_flow(request: ImageDressFlowRequest) -> dict:
     return job.public()
 
 
+def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> dict:
+    return {
+        "image": image,
+        "background_motion_prompt": request.background_motion_prompt,
+        "foreground_motion_prompt": request.foreground_motion_prompt,
+        "dress_prompt": request.dress_prompt,
+        "card_id": request.card_id,
+        "card_label": request.card_label,
+        "model": request.model,
+        "resolution": request.resolution,
+        "image_field": request.image_field,
+        "endpoint": request.endpoint,
+        "video_field": request.video_field,
+        "enhance_dress_prompt": request.enhance_dress_prompt,
+        "tracker": request.tracker,
+        "write_webm": request.write_webm,
+        "source_mode": request.source_mode,
+        "source_prompt": request.source_prompt,
+        "face_image": request.face_image,
+        "base_image": request.base_image,
+    }
+
+
+@app.post("/api/jobs/generate-source-image")
+def generate_source_image_job(request: GenerateSourceImageRequest) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", request.card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    if request.mode == "face_swap":
+        if not request.base_image.strip() or not request.face_image.strip():
+            raise HTTPException(status_code=400, detail="Face swap requires base_image and face_image")
+        base_image = (
+            request.base_image
+            if request.base_image.startswith(("http://", "https://"))
+            else workspace_path(request.base_image, must_exist=True)
+        )
+        face_image = (
+            request.face_image
+            if request.face_image.startswith(("http://", "https://"))
+            else workspace_path(request.face_image, must_exist=True)
+        )
+    else:
+        base_image = ""
+        face_image = (
+            workspace_path(request.face_image, must_exist=True)
+            if request.face_image.strip()
+            and not request.face_image.startswith(("http://", "https://"))
+            else request.face_image.strip()
+        )
+    job = enqueue(
+        "generate-source-image",
+        ["generate-source-image", request.card_id, request.mode],
+        lambda request=request, base_image=base_image, face_image=face_image: run_generate_source_image(
+            card_id=request.card_id,
+            mode=request.mode,
+            prompt=request.prompt,
+            face_image=face_image,
+            base_image=base_image,
+            aspect_ratio=request.aspect_ratio,
+        ),
+    )
+    return job.public()
+
+
 @app.get("/api/video-flow")
 def get_video_flows() -> dict:
     return {"flows": list_flows()}
@@ -593,22 +670,7 @@ def save_video_flow_draft(card_id: str, request: VideoFlowRequest) -> dict:
     if request.card_id != card_id:
         raise HTTPException(status_code=400, detail="card_id in body must match URL")
     image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=False)
-    draft = save_flow_draft(
-        image=image,
-        background_motion_prompt=request.background_motion_prompt,
-        foreground_motion_prompt=request.foreground_motion_prompt,
-        dress_prompt=request.dress_prompt,
-        card_id=request.card_id,
-        card_label=request.card_label,
-        model=request.model,
-        resolution=request.resolution,
-        image_field=request.image_field,
-        endpoint=request.endpoint,
-        video_field=request.video_field,
-        enhance_dress_prompt=request.enhance_dress_prompt,
-        tracker=request.tracker,
-        write_webm=request.write_webm,
-    )
+    draft = save_flow_draft(**video_flow_draft_kwargs(request, image=image))
     return {"draft": draft}
 
 
@@ -677,22 +739,7 @@ def save_symbol_points(card_id: str, request: SymbolPointsRequest) -> dict:
 @app.post("/api/jobs/video-flow/step")
 def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
     image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
-    save_flow_draft(
-        image=image,
-        background_motion_prompt=request.background_motion_prompt,
-        foreground_motion_prompt=request.foreground_motion_prompt,
-        dress_prompt=request.dress_prompt,
-        card_id=request.card_id,
-        card_label=request.card_label,
-        model=request.model,
-        resolution=request.resolution,
-        image_field=request.image_field,
-        endpoint=request.endpoint,
-        video_field=request.video_field,
-        enhance_dress_prompt=request.enhance_dress_prompt,
-        tracker=request.tracker,
-        write_webm=request.write_webm,
-    )
+    save_flow_draft(**video_flow_draft_kwargs(request, image=image))
     job = enqueue(
         "video-flow-step",
         ["video-flow-step", request.step, request.card_id],

@@ -14,6 +14,28 @@ from pathlib import Path
 EDITS_PATH = "/v1/videos/edits"
 POLL_PATH = "/v1/videos/{request_id}"
 CHAT_PATH = "/v1/chat/completions"
+IMAGE_GENERATIONS_PATH = "/v1/images/generations"
+IMAGE_EDITS_PATH = "/v1/images/edits"
+
+DEFAULT_PORTRAIT_PROMPT = (
+    "Full-body portrait of a woman in casual fitted resort wear, plain white studio background, "
+    "facing camera, fashion editorial photo."
+)
+LEGACY_BIKINI_PORTRAIT_PROMPT = (
+    "Full-body portrait of a woman in a black bikini, plain white studio background, "
+    "facing camera, fashion photo."
+)
+FACE_SWAP_PROMPT = (
+    "Replace the face in <IMAGE_0> with the face from <IMAGE_1>. "
+    "Keep body, pose, outfit, background, and lighting identical."
+)
+PROMPT_WITH_FACE_PREFIX = (
+    "Full-body portrait photo of the person from <IMAGE_0>, matching their face and identity. "
+)
+FACE_GUIDED_PORTRAIT_PROMPT = (
+    "Full-body portrait photo of the person from <IMAGE_0>, matching their face and identity. "
+    "Casual fitted resort wear, plain white studio background, facing camera, fashion editorial."
+)
 
 MAX_DURATION_S = 8.7
 MAX_SHORT_SIDE = 720
@@ -75,6 +97,10 @@ def video_edit_model(requested: str | None = None) -> str:
     if requested and requested not in ("grok-imagine-video-1.5",):
         return requested
     return "grok-imagine-video"
+
+
+def image_generation_model() -> str:
+    return os.environ.get("XAI_IMAGE_MODEL", "grok-imagine-image-quality")
 
 
 def run_media_command(cmd: list[str]) -> bytes:
@@ -191,6 +217,11 @@ def media_value(value: str | Path, default_mime: str) -> dict[str, str]:
     return {"url": to_data_uri(path, mime)}
 
 
+def image_input(value: str | Path) -> dict[str, str]:
+    media = media_value(value, "image/png")
+    return {"url": media["url"], "type": "image_url"}
+
+
 def api_post(path: str, payload: dict, key: str) -> dict:
     req = urllib.request.Request(
         api_base() + path,
@@ -224,6 +255,23 @@ def output_video_ready(path: Path) -> bool:
     return True
 
 
+def format_http_error(exc: urllib.error.HTTPError, body: str) -> str:
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return f"API error {exc.code}:\n{body}"
+    err = data.get("error") or data.get("message")
+    if isinstance(err, str):
+        lowered = err.lower()
+        if "content moderation" in lowered:
+            return (
+                "xAI rejected the result (content moderation). "
+                "Try a less revealing prompt, different source photos, or use Upload instead."
+            )
+        return f"xAI API error: {err}"
+    return f"API error {exc.code}:\n{body}"
+
+
 def send(req: urllib.request.Request, *, retries: int = API_MAX_RETRIES) -> dict:
     last_error: Exception | None = None
     for attempt in range(retries):
@@ -241,7 +289,7 @@ def send(req: urllib.request.Request, *, retries: int = API_MAX_RETRIES) -> dict
                 time.sleep(wait)
                 last_error = exc
                 continue
-            raise RuntimeError(f"API error {exc.code} on {req.full_url}:\n{body}") from exc
+            raise RuntimeError(format_http_error(exc, body)) from exc
         except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
             last_error = exc
             if attempt < retries - 1:
@@ -324,6 +372,162 @@ def download_video(url: str, out: Path) -> None:
                 continue
             break
     raise RuntimeError(f"Failed to download video to {out}: {last_error}") from last_error
+
+
+def download_image(url: str, out: Path) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading image -> {out}")
+    last_error: Exception | None = None
+    for attempt in range(DOWNLOAD_MAX_RETRIES):
+        try:
+            urllib.request.urlretrieve(url, out)
+            if not out.exists() or out.stat().st_size == 0:
+                raise RuntimeError("Downloaded image is empty")
+            print(f"Saved {out} ({out.stat().st_size} bytes)")
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError, RuntimeError) as exc:
+            last_error = exc
+            if out.exists():
+                out.unlink(missing_ok=True)
+            if attempt < DOWNLOAD_MAX_RETRIES - 1:
+                wait = API_RETRY_BASE_S * (2**attempt)
+                print(
+                    f"  image download failed (attempt {attempt + 1}/{DOWNLOAD_MAX_RETRIES}): "
+                    f"{exc}; retry in {wait}s ..."
+                )
+                time.sleep(wait)
+                continue
+            break
+    raise RuntimeError(f"Failed to download image to {out}: {last_error}") from last_error
+
+
+def _save_image_bytes(raw: bytes, out: Path) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(raw)
+    print(f"Saved {out} ({len(raw)} bytes)")
+
+
+def _image_url_from_response(result: dict) -> str | None:
+    data = result.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    entry = data[0]
+    if not isinstance(entry, dict):
+        return None
+    url = entry.get("url")
+    return url if isinstance(url, str) and url.strip() else None
+
+
+def _save_image_response(result: dict, out: Path) -> None:
+    data = result.get("data")
+    if not isinstance(data, list) or not data:
+        raise RuntimeError(f"No image data in response:\n{json.dumps(result, indent=2)}")
+    entry = data[0]
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"Unexpected image entry:\n{json.dumps(result, indent=2)}")
+    b64 = entry.get("b64_json")
+    if isinstance(b64, str) and b64.strip():
+        _save_image_bytes(base64.b64decode(b64), out)
+        return
+    url = entry.get("url")
+    if isinstance(url, str) and url.strip():
+        download_image(url, out)
+        return
+    raise RuntimeError(f"No image url or b64_json in response:\n{json.dumps(result, indent=2)}")
+
+
+def _generate_image(*, prompt: str, aspect_ratio: str, key: str) -> dict:
+    payload = {
+        "model": image_generation_model(),
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "response_format": "b64_json",
+        "n": 1,
+    }
+    print(f"Generating image via {api_base()}{IMAGE_GENERATIONS_PATH} ...")
+    print(f"Prompt: {prompt[:200]}{'...' if len(prompt) > 200 else ''}")
+    return api_post(IMAGE_GENERATIONS_PATH, payload, key)
+
+
+def _edit_image(
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    key: str,
+    images: list[str | Path] | None = None,
+    image: str | Path | None = None,
+) -> dict:
+    payload: dict = {
+        "model": image_generation_model(),
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "response_format": "b64_json",
+        "n": 1,
+    }
+    if images:
+        payload["images"] = [image_input(source) for source in images]
+    elif image is not None:
+        payload["image"] = image_input(image)
+    else:
+        raise RuntimeError("Image edit requires at least one source image.")
+    print(f"Editing image via {api_base()}{IMAGE_EDITS_PATH} ...")
+    print(f"Prompt: {prompt[:200]}{'...' if len(prompt) > 200 else ''}")
+    return api_post(IMAGE_EDITS_PATH, payload, key)
+
+
+def generate_portrait_image(
+    *,
+    prompt: str,
+    out: Path,
+    face_image: str | Path | None = None,
+    aspect_ratio: str = "9:16",
+) -> Path:
+    key = api_key()
+    text = prompt.strip() or DEFAULT_PORTRAIT_PROMPT
+    if face_image:
+        user_customized = bool(prompt.strip()) and not is_stock_portrait_prompt(prompt)
+        final_prompt = (
+            f"{PROMPT_WITH_FACE_PREFIX}{text}" if user_customized else FACE_GUIDED_PORTRAIT_PROMPT
+        )
+        result = _edit_image(
+            prompt=final_prompt,
+            aspect_ratio=aspect_ratio,
+            key=key,
+            image=face_image,
+        )
+    else:
+        result = _generate_image(prompt=text, aspect_ratio=aspect_ratio, key=key)
+    _save_image_response(result, out)
+    return out
+
+
+def is_stock_portrait_prompt(prompt: str) -> bool:
+    stripped = prompt.strip()
+    return not stripped or stripped in (DEFAULT_PORTRAIT_PROMPT, LEGACY_BIKINI_PORTRAIT_PROMPT)
+
+
+def swap_face_on_image(
+    *,
+    base_image: str | Path,
+    face_image: str | Path,
+    out: Path,
+    prompt: str | None = None,
+    aspect_ratio: str = "9:16",
+) -> Path:
+    key = api_key()
+    final_prompt = (
+        FACE_SWAP_PROMPT
+        if is_stock_portrait_prompt(prompt or "")
+        else (prompt or FACE_SWAP_PROMPT).strip()
+    )
+    result = _edit_image(
+        prompt=final_prompt,
+        aspect_ratio=aspect_ratio,
+        key=key,
+        images=[base_image, face_image],
+    )
+    _save_image_response(result, out)
+    return out
 
 
 def submit_video_job(

@@ -1,4 +1,4 @@
-import { Check, Play, RotateCcw } from "lucide-react";
+import { Check, Loader2, Play, RotateCcw } from "lucide-react";
 import {
   Badge,
   Box,
@@ -11,6 +11,7 @@ import {
   Heading,
   Select,
   Separator,
+  Tabs,
   Text,
   TextArea,
   TextField,
@@ -18,8 +19,6 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../shared/api";
 import { flowStepBadge, type FlowNodeRuntime } from "./flowCanvas";
-import { FlowCanvas } from "./flowCanvas";
-import { layoutFlowForRunView } from "./runFlowLayout";
 import {
   nodeToStep,
   stepToNode,
@@ -30,6 +29,7 @@ import {
 import { MaskEditor } from "./MaskEditor";
 import { SymbolPointPicker } from "./SymbolPointPicker";
 import { Field, FilePathPicker, iconProps, MediaPreview, TRACKERS } from "./ui";
+import { isStockPortraitPrompt, storedDraftFromApi, type SourceImageMode, type StoredVideoFlowDraft } from "./storage";
 
 type JobInfo = {
   id: string;
@@ -75,6 +75,18 @@ function pipelineFocusStep(
     if (status === "review" || status === "ready") return step;
   }
   return null;
+}
+
+function formatSourceImageJobError(log: string | undefined): string {
+  if (!log) return "Source image job failed — check the Jobs tab for details.";
+  const cleaned = log.replace(/^Job runner error: /, "");
+  if (cleaned.toLowerCase().includes("content moderation")) {
+    return (
+      "xAI rejected the result (content moderation). " +
+      "Try a less revealing prompt, different photos, or use Upload instead."
+    );
+  }
+  return cleaned;
 }
 
 function resolveFlowNodeStatuses(
@@ -135,6 +147,10 @@ type RunModeProps = {
   writeWebm: boolean;
   resolution: string;
   tracker: (typeof TRACKERS)[number];
+  sourceMode: SourceImageMode;
+  sourcePrompt: string;
+  faceImage: string;
+  baseImage: string;
   onImageChange: (value: string) => void;
   onBackgroundMotionPromptChange: (value: string) => void;
   onDressPromptChange: (value: string) => void;
@@ -143,6 +159,11 @@ type RunModeProps = {
   onWriteWebmChange: (value: boolean) => void;
   onTrackerChange: (value: (typeof TRACKERS)[number]) => void;
   onResolutionChange: (value: string) => void;
+  onSourceModeChange: (value: SourceImageMode) => void;
+  onSourcePromptChange: (value: string) => void;
+  onFaceImageChange: (value: string) => void;
+  onBaseImageChange: (value: string) => void;
+  onApplyDraft: (draft: StoredVideoFlowDraft) => void;
   onRefreshJobs: () => Promise<void>;
   onRefreshAssets: () => Promise<void>;
   onError: (message: string) => void;
@@ -162,6 +183,10 @@ export function RunMode(props: RunModeProps) {
     writeWebm,
     resolution,
     tracker,
+    sourceMode,
+    sourcePrompt,
+    faceImage,
+    baseImage,
     onImageChange,
     onBackgroundMotionPromptChange,
     onDressPromptChange,
@@ -170,6 +195,11 @@ export function RunMode(props: RunModeProps) {
     onWriteWebmChange,
     onTrackerChange,
     onResolutionChange,
+    onSourceModeChange,
+    onSourcePromptChange,
+    onFaceImageChange,
+    onBaseImageChange,
+    onApplyDraft,
     onRefreshJobs,
     onRefreshAssets,
     onError,
@@ -182,6 +212,22 @@ export function RunMode(props: RunModeProps) {
   const [activeNode, setActiveNode] = useState<FlowNodeId>("source");
   const [flowState, setFlowState] = useState<VideoFlowState | null>(null);
   const [flowBusy, setFlowBusy] = useState(false);
+  const [showFaceSwapPrompt, setShowFaceSwapPrompt] = useState(false);
+  const [sourceJobHandledId, setSourceJobHandledId] = useState("");
+
+  const sourceImageJob = useMemo(() => {
+    const scoped = jobs.filter(
+      (job) => job.kind === "generate-source-image" && job.command[1] === cardId.trim(),
+    );
+    return (
+      scoped.find((job) => job.status === "running" || job.status === "queued") ??
+      scoped[0] ??
+      null
+    );
+  }, [jobs, cardId]);
+
+  const sourceImageBusy =
+    sourceImageJob?.status === "running" || sourceImageJob?.status === "queued";
 
   const stepJob = useMemo(() => {
     const scoped = jobs.filter(
@@ -237,6 +283,25 @@ export function RunMode(props: RunModeProps) {
     }
   }, [stepJob?.id, stepJob?.status]);
 
+  useEffect(() => {
+    if (!sourceImageJob || sourceImageJob.status !== "succeeded") return;
+    if (sourceJobHandledId === sourceImageJob.id) return;
+    const id = cardId.trim();
+    if (!id) return;
+    setSourceJobHandledId(sourceImageJob.id);
+    void (async () => {
+      try {
+        const data = await api<{ draft: NonNullable<Parameters<typeof storedDraftFromApi>[0]> }>(
+          `/api/video-flow/${encodeURIComponent(id)}/draft`,
+        );
+        const parsed = storedDraftFromApi(data.draft);
+        if (parsed) onApplyDraft(parsed);
+      } catch (caught) {
+        onError(caught instanceof Error ? caught.message : String(caught));
+      }
+    })();
+  }, [cardId, onApplyDraft, onError, sourceImageJob, sourceJobHandledId]);
+
   const focusStep = useMemo(
     () => pipelineFocusStep(flow, flowState, runningStep, failedStep),
     [flow, flowState, runningStep, failedStep],
@@ -262,17 +327,6 @@ export function RunMode(props: RunModeProps) {
     () => resolveFlowNodeStatuses(flow, flowState, Boolean(image), cardId.trim(), runningStep, failedStep),
     [flow, flowState, image, cardId, runningStep, failedStep],
   );
-
-  const runFlowMap = useMemo(() => layoutFlowForRunView(flow), [flow]);
-
-  function onFlowNodeClick(nodeId: FlowNodeId) {
-    if (nodeId === "source") {
-      selectStep("source");
-      return;
-    }
-    const step = nodeToStepMap[nodeId];
-    if (step) selectStep(step);
-  }
 
   const activeMeta = flow.nodes.find((node) => node.id === activeNode) ?? flow.nodes[0];
   const activeStep = nodeToStepMap[activeNode];
@@ -303,7 +357,46 @@ export function RunMode(props: RunModeProps) {
     enhance_dress_prompt: enhancePrompt,
     tracker,
     write_webm: writeWebm,
+    source_mode: sourceMode,
+    source_prompt: sourcePrompt,
+    face_image: faceImage,
+    base_image: baseImage,
   };
+
+  const canGeneratePromptImage = Boolean(cardId.trim() && canUseGrok && !sourceImageBusy);
+  const canGenerateFaceSwap = Boolean(
+    cardId.trim() && baseImage.trim() && faceImage.trim() && canUseGrok && !sourceImageBusy,
+  );
+
+  async function generateSourceImage(mode: "prompt" | "face_swap") {
+    const id = cardId.trim();
+    if (!id) return;
+    setFlowBusy(true);
+    onError("");
+    try {
+      await api<JobInfo>("/api/jobs/generate-source-image", {
+        method: "POST",
+        body: JSON.stringify({
+          mode,
+          card_id: id,
+          prompt:
+            mode === "face_swap" && !showFaceSwapPrompt
+              ? ""
+              : mode === "face_swap" && isStockPortraitPrompt(sourcePrompt)
+                ? ""
+                : sourcePrompt.trim(),
+          face_image: faceImage.trim(),
+          base_image: baseImage.trim(),
+          aspect_ratio: "9:16",
+        }),
+      });
+      await onRefreshJobs();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setFlowBusy(false);
+    }
+  }
 
   const canRunActionStep = Boolean(
     actionStep &&
@@ -403,19 +496,6 @@ export function RunMode(props: RunModeProps) {
 
   return (
     <Flex direction="column" gap="4">
-      <div className="video-flow-run-map">
-        <Text size="2" weight="bold" mb="2">
-          Flow map
-        </Text>
-        <FlowCanvas
-          flow={runFlowMap}
-          activeNode={activeNode}
-          nodeStates={nodeStates}
-          wireLayout="vertical"
-          onNodeClick={onFlowNodeClick}
-        />
-      </div>
-
       <div className="video-flow-run-layout">
         <aside className="video-flow-run-steps">
           <Text size="2" weight="bold" mb="3">
@@ -532,18 +612,172 @@ export function RunMode(props: RunModeProps) {
 
         {activeNode === "source" ? (
           <Flex direction="column" gap="4">
-            <Field label="Source image path or URL">
-              <FilePathPicker
-                accept="image/*"
-                placeholder="Pick an image or paste a path/URL"
-                preview="image"
-                previewLabel="Source image"
-                previewSize="compact"
-                value={image}
-                onChange={onImageChange}
-                onError={onError}
-              />
-            </Field>
+            <Tabs.Root value={sourceMode} onValueChange={(value) => onSourceModeChange(value as SourceImageMode)}>
+              <Tabs.List className="dashboard-tabs">
+                <Tabs.Trigger value="upload">Upload</Tabs.Trigger>
+                <Tabs.Trigger value="prompt">Generate from prompt</Tabs.Trigger>
+                <Tabs.Trigger value="face_swap">Face swap</Tabs.Trigger>
+              </Tabs.List>
+
+              <Box pt="4">
+                <Tabs.Content value="upload">
+                  <Field label="Source image path or URL">
+                    <FilePathPicker
+                      accept="image/*"
+                      placeholder="Pick an image or paste a path/URL"
+                      preview="image"
+                      previewLabel="Source image"
+                      previewSize="compact"
+                      value={image}
+                      onChange={onImageChange}
+                      onError={onError}
+                    />
+                  </Field>
+                </Tabs.Content>
+
+                <Tabs.Content value="prompt">
+                  <Flex direction="column" gap="4">
+                    <Field label="Portrait prompt">
+                      <TextArea
+                        className="dashboard-textarea"
+                        value={sourcePrompt}
+                        onChange={(event) => onSourcePromptChange(event.currentTarget.value)}
+                      />
+                    </Field>
+                    <Text color="gray" size="2">
+                      Bikini styling is added in the next step (image to video). Keep this prompt
+                      neutral to avoid xAI moderation rejections.
+                    </Text>
+                    <Field label="Optional face reference (steers identity)">
+                      <FilePathPicker
+                        accept="image/*"
+                        placeholder="Pick a face photo or paste a path/URL"
+                        preview="image"
+                        previewLabel="Face reference"
+                        previewSize="compact"
+                        value={faceImage}
+                        onChange={onFaceImageChange}
+                        onError={onError}
+                      />
+                    </Field>
+                    {faceImage.trim() ? (
+                      <Callout.Root color="orange">
+                        <Callout.Text>
+                          Face-guided generation uses a moderation-safe resort-wear default unless you
+                          change the prompt. Bikini or revealing prompts are often rejected.
+                        </Callout.Text>
+                      </Callout.Root>
+                    ) : null}
+                    <Flex align="center" gap="3" wrap="wrap">
+                      <Button
+                        disabled={!canGeneratePromptImage}
+                        type="button"
+                        onClick={() => void generateSourceImage("prompt")}
+                      >
+                        {sourceImageBusy ? <Loader2 {...iconProps} className="spin" /> : <Play {...iconProps} />}
+                        Generate source image
+                      </Button>
+                      {!canUseGrok ? (
+                        <Text color="gray" size="2">
+                          Add XAI_API_KEY to .env first.
+                        </Text>
+                      ) : null}
+                    </Flex>
+                  </Flex>
+                </Tabs.Content>
+
+                <Tabs.Content value="face_swap">
+                  <Flex direction="column" gap="4">
+                    <Field label="Base image (body / scene to keep)">
+                      <FilePathPicker
+                        accept="image/*"
+                        placeholder="Pick a body or scene photo"
+                        preview="image"
+                        previewLabel="Base image"
+                        previewSize="compact"
+                        value={baseImage}
+                        onChange={onBaseImageChange}
+                        onError={onError}
+                      />
+                    </Field>
+                    <Field label="Face image">
+                      <FilePathPicker
+                        accept="image/*"
+                        placeholder="Pick a face photo"
+                        preview="image"
+                        previewLabel="Face image"
+                        previewSize="compact"
+                        value={faceImage}
+                        onChange={onFaceImageChange}
+                        onError={onError}
+                      />
+                    </Field>
+                    <label className="checkbox-label">
+                      <Checkbox
+                        checked={showFaceSwapPrompt}
+                        onCheckedChange={(checked) => setShowFaceSwapPrompt(checked === true)}
+                      />
+                      Custom swap prompt (advanced)
+                    </label>
+                    {showFaceSwapPrompt ? (
+                      <Field label="Face swap prompt">
+                        <TextArea
+                          className="dashboard-textarea"
+                          placeholder="Leave empty for the default swap instruction"
+                          value={sourcePrompt}
+                          onChange={(event) => onSourcePromptChange(event.currentTarget.value)}
+                        />
+                      </Field>
+                    ) : null}
+                    <Callout.Root color="orange">
+                      <Callout.Text>
+                        Face swap can be rejected by xAI moderation depending on the photos. Try
+                        neutral studio portraits, or upload a finished source image instead.
+                      </Callout.Text>
+                    </Callout.Root>
+                    <Flex align="center" gap="3" wrap="wrap">
+                      <Button
+                        disabled={!canGenerateFaceSwap}
+                        type="button"
+                        onClick={() => void generateSourceImage("face_swap")}
+                      >
+                        {sourceImageBusy ? <Loader2 {...iconProps} className="spin" /> : <Play {...iconProps} />}
+                        Apply face swap
+                      </Button>
+                      {!canUseGrok ? (
+                        <Text color="gray" size="2">
+                          Add XAI_API_KEY to .env first.
+                        </Text>
+                      ) : null}
+                    </Flex>
+                  </Flex>
+                </Tabs.Content>
+              </Box>
+            </Tabs.Root>
+
+            {sourceImageJob ? (
+              <Callout.Root
+                color={
+                  sourceImageJob.status === "failed" || sourceImageJob.status === "cancelled"
+                    ? "red"
+                    : sourceImageJob.status === "succeeded"
+                      ? "green"
+                      : "blue"
+                }
+              >
+                <Callout.Text>
+                  Source image job {sourceImageJob.status}
+                  {sourceImageJob.status === "failed"
+                    ? ` — ${formatSourceImageJobError(sourceImageJob.logs[sourceImageJob.logs.length - 1])}`
+                    : ""}
+                </Callout.Text>
+              </Callout.Root>
+            ) : null}
+
+            {image ? (
+              <MediaPreview label="Resolved source image" size="compact" type="image" value={image} />
+            ) : null}
+
             <Field label="Grok resolution">
               <Select.Root
                 value={resolution || "default"}

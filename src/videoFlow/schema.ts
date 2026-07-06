@@ -75,7 +75,8 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
       kind: "input",
       title: "Flow input",
       subtitle: "Source image",
-      description: "Still photo used to generate the background clip",
+      description:
+        "Upload a still, generate a portrait from a prompt (optional face reference), or face-swap onto a body photo",
       x: 20,
       y: 56,
       step: null,

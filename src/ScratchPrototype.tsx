@@ -182,6 +182,7 @@ type Card = {
   bottom: string;
   foreground: string;
   mesh: string;
+  chromaKey: boolean;
 };
 
 const CARDS_INDEX_SRC = "/cards/index.json";
@@ -193,6 +194,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/ai%20girl%202.mp4",
     foreground: "/cards/Green%20bg%20sample%202%20swap.mp4",
     mesh: "tracked-mesh.json",
+    chromaKey: true,
   },
   {
     id: "girl_1",
@@ -200,6 +202,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/girl_1/background.mp4",
     foreground: "/cards/girl_1/foreground.mp4",
     mesh: "girl_1.json",
+    chromaKey: false,
   },
   {
     id: "girl_2",
@@ -207,6 +210,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/girl_2/background.mp4",
     foreground: "/cards/girl_2/foreground.mp4",
     mesh: "girl_2.json",
+    chromaKey: false,
   },
   {
     id: "juliana_1",
@@ -214,6 +218,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/juliana_1/background.mp4",
     foreground: "/cards/juliana_1/foreground.mp4",
     mesh: "juliana_1.json",
+    chromaKey: false,
   },
   {
     id: "juliana_2",
@@ -221,6 +226,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/juliana_2/background.mp4",
     foreground: "/cards/juliana_2/foreground.mp4",
     mesh: "juliana_2.json",
+    chromaKey: false,
   },
   {
     id: "chinese_1",
@@ -228,6 +234,7 @@ const DEFAULT_CARDS: Card[] = [
     bottom: "/cards/chinese_1/background.mp4",
     foreground: "/cards/chinese_1/foreground.mp4",
     mesh: "chinese_1.json",
+    chromaKey: false,
   },
 ];
 
@@ -238,8 +245,14 @@ type CardsIndexResponse = {
     bottom: string;
     foreground: string;
     mesh: string;
+    chroma_key?: boolean;
   }>;
 };
+
+function cardUsesChromaKey(id: string, chromaKey: boolean | undefined): boolean {
+  if (typeof chromaKey === "boolean") return chromaKey;
+  return id === "original";
+}
 
 function parseCardsIndex(data: CardsIndexResponse): Card[] | null {
   if (!Array.isArray(data.cards) || data.cards.length === 0) return null;
@@ -260,6 +273,7 @@ function parseCardsIndex(data: CardsIndexResponse): Card[] | null {
       bottom: entry.bottom,
       foreground: entry.foreground,
       mesh: entry.mesh,
+      chromaKey: cardUsesChromaKey(entry.id, entry.chroma_key),
     });
   }
   return cards.length > 0 ? cards : null;
@@ -290,7 +304,6 @@ const GAME_OUTCOME_SILENT_DELAY_MS = 1500;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
 const SOUND_STORAGE_KEY = "sugar-scratchie:sound";
-const SHOW_SYMBOL_POINTS_STORAGE_KEY = "sugar-scratchie:show-symbol-points";
 const SYMBOL_REVEAL_UV_RADIUS = 0.045;
 
 type ScratchZoomSettings = {
@@ -543,11 +556,11 @@ function playGameOutcomeSound(
   return 2.05 * 1000 + GAME_OUTCOME_OVERLAY_PAD_MS;
 }
 
-function GameSymbolIcon({ typeId }: { typeId: number }) {
+function GameSymbolIcon({ typeId, size = 16 }: { typeId: number; size?: number }) {
   const entry = SYMBOL_TYPES[typeId] ?? SYMBOL_TYPES[0];
   const Icon = entry.icon;
   return (
-    <Icon aria-hidden="true" color={entry.color} size={16} strokeWidth={2.2} />
+    <Icon aria-hidden="true" color={entry.color} size={size} strokeWidth={2.2} />
   );
 }
 
@@ -559,18 +572,6 @@ function loadSoundEnabled(): boolean {
   if (typeof window === "undefined") return true;
   try {
     const raw = localStorage.getItem(SOUND_STORAGE_KEY);
-    if (!raw) return true;
-    const parsed = JSON.parse(raw) as { enabled?: boolean };
-    return parsed.enabled ?? true;
-  } catch {
-    return true;
-  }
-}
-
-function loadShowSymbolPoints(): boolean {
-  if (typeof window === "undefined") return true;
-  try {
-    const raw = localStorage.getItem(SHOW_SYMBOL_POINTS_STORAGE_KEY);
     if (!raw) return true;
     const parsed = JSON.parse(raw) as { enabled?: boolean };
     return parsed.enabled ?? true;
@@ -945,6 +946,8 @@ export function ScratchPrototype() {
   const [meshReloadToken, setMeshReloadToken] = useState(0);
   const [selectedCardId, setSelectedCardId] = useState(DEFAULT_CARDS[1].id);
   const card = cards.find((entry) => entry.id === selectedCardId) ?? cards[1] ?? cards[0];
+  const chromaKeyRef = useRef(card.chromaKey);
+  chromaKeyRef.current = card.chromaKey;
   // The mesh lattice is a dev overlay — default it off on phones (where the
   // toggle is hidden).
   const [showMesh, setShowMesh] = useState(
@@ -956,9 +959,6 @@ export function ScratchPrototype() {
   );
   const showMeshRef = useRef(showMesh);
   showMeshRef.current = showMesh;
-  const [showSymbolPoints, setShowSymbolPoints] = useState(loadShowSymbolPoints);
-  const showSymbolPointsRef = useRef(showSymbolPoints);
-  showSymbolPointsRef.current = showSymbolPoints;
   const bodyMarkerRefs = useRef<(HTMLDivElement | null)[]>([]);
   const useBodySymbolsRef = useRef(false);
   const revealedPointsRef = useRef<boolean[]>(
@@ -1221,6 +1221,7 @@ export function ScratchPrototype() {
         showMeshRef.current,
         camera,
         hideForeground,
+        chromaKeyRef.current,
       );
 
       const bodyPoints = trackedMeshNow?.symbolPoints;
@@ -1237,8 +1238,7 @@ export function ScratchPrototype() {
           const marker = bodyMarkerRefs.current[index];
           if (!marker) continue;
           const revealed = revealedPointsRef.current[index];
-          const showGuide = showSymbolPointsRef.current && !revealed;
-          if (!revealed && !showGuide) {
+          if (!revealed) {
             marker.style.display = "none";
             continue;
           }
@@ -1351,6 +1351,7 @@ export function ScratchPrototype() {
     setClaimed(false);
     setRevealedSymbols(0);
     setFlyingCoins([]);
+    setAutoScratch((current) => ({ ...current, enabled: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCardId]);
 
@@ -1370,18 +1371,25 @@ export function ScratchPrototype() {
     const next = samples.length ? revealedCountRef.current / samples.length : 0;
     progressRef.current = next;
     setProgress(next);
-    const nextSymbolCount = revealedSymbolCount(
-      next,
-      autoScratchRef.current.enabled,
-    );
+    const hasBodySymbols = trackedMesh?.symbolPoints?.length === SYMBOL_SLOT_COUNT;
+    const nextSymbolCount = hasBodySymbols
+      ? revealedPointsRef.current.filter(Boolean).length
+      : revealedSymbolCount(next, autoScratchRef.current.enabled);
     revealedSymbolsRef.current = nextSymbolCount;
     setRevealedSymbols(nextSymbolCount);
-    const nextClaimed = isGarmentFullyRevealed(
-      next,
-      revealedCountRef.current,
-      samples.length,
-      autoScratchRef.current.enabled,
-    );
+    if (hasBodySymbols && nextSymbolCount < SYMBOL_SLOT_COUNT) {
+      setAutoScratch((current) =>
+        current.enabled ? { ...current, enabled: false } : current,
+      );
+    }
+    const nextClaimed = hasBodySymbols
+      ? false
+      : isGarmentFullyRevealed(
+          next,
+          revealedCountRef.current,
+          samples.length,
+          autoScratchRef.current.enabled,
+        );
     claimedRef.current = nextClaimed;
     setClaimed(nextClaimed);
     if (nextClaimed) tryResolveGameRef.current();
@@ -1486,10 +1494,28 @@ export function ScratchPrototype() {
   }
 
   function updateAutoScratch(patch: Partial<AutoScratchSettings>) {
+    if (
+      patch.enabled &&
+      useBodySymbolsRef.current &&
+      revealedSymbolsRef.current < SYMBOL_SLOT_COUNT
+    ) {
+      return;
+    }
     if (patch.enabled && soundEnabledRef.current)
       ensureSymbolAudio(symbolAudioRef.current);
     setAutoScratch((current) => ({ ...current, ...patch }));
   }
+
+  function beginFinishAutoScratch() {
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
+    if (soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
+    setAutoScratch((current) => ({ ...current, enabled: true }));
+  }
+
+  const symbolsHuntComplete =
+    useBodySymbols && revealedSymbols >= SYMBOL_SLOT_COUNT;
+  const autoScratchLocked = useBodySymbols && !symbolsHuntComplete;
 
   function updateSoundEnabled(enabled: boolean) {
     if (enabled) ensureSymbolAudio(symbolAudioRef.current);
@@ -1527,6 +1553,7 @@ export function ScratchPrototype() {
     setClaimed(false);
     setRevealedSymbols(0);
     setFlyingCoins([]);
+    setAutoScratch((current) => ({ ...current, enabled: false }));
   }
   resetScratchRef.current = resetScratch;
 
@@ -1746,6 +1773,9 @@ export function ScratchPrototype() {
           nextSymbolCount,
           soundEnabledRef.current,
         );
+        if (nextSymbolCount >= SYMBOL_SLOT_COUNT) {
+          beginFinishAutoScratch();
+        }
       }
     } else {
       const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
@@ -1762,7 +1792,11 @@ export function ScratchPrototype() {
         spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
       }
     }
+    const canClaimGarment =
+      !useBodySymbolsRef.current ||
+      revealedSymbolsRef.current >= SYMBOL_SLOT_COUNT;
     if (
+      canClaimGarment &&
       isGarmentFullyRevealed(
         nextProgress,
         revealedCountRef.current,
@@ -1929,9 +1963,16 @@ export function ScratchPrototype() {
   const autoScratchControls = (
     <fieldset className="scratch-zoom-settings">
       <legend>Auto scratch</legend>
+      {autoScratchLocked ? (
+        <p className="auto-scratch-hint">
+          Find all {SYMBOL_SLOT_COUNT} symbols on the dress first — auto scratch
+          finishes the reveal.
+        </p>
+      ) : null}
       <label className="checkbox-label">
         <input
           checked={autoScratch.enabled}
+          disabled={autoScratchLocked}
           onChange={(event) =>
             updateAutoScratch({ enabled: event.currentTarget.checked })
           }
@@ -2066,7 +2107,7 @@ export function ScratchPrototype() {
                 >
                   <span className="body-symbol-number">{index + 1}</span>
                   <span className="body-symbol-icon">
-                    <GameSymbolIcon typeId={typeId} />
+                    <GameSymbolIcon typeId={typeId} size={22} />
                   </span>
                 </div>
               ))
@@ -2257,11 +2298,14 @@ export function ScratchPrototype() {
                 </button>
                 <button
                   type="button"
-                  className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}`}
+                  className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}${symbolsHuntComplete ? " is-symbols-complete" : ""}`}
+                  disabled={autoScratchLocked}
                   aria-label={
-                    autoScratch.enabled
-                      ? "Disable auto scratch"
-                      : "Enable auto scratch"
+                    autoScratchLocked
+                      ? `Find all ${SYMBOL_SLOT_COUNT} symbols first`
+                      : autoScratch.enabled
+                        ? "Auto scratch running"
+                        : "Enable auto scratch"
                   }
                   aria-pressed={autoScratch.enabled}
                   onClick={() =>
@@ -2414,28 +2458,6 @@ export function ScratchPrototype() {
             >
               {showMesh ? "Hide mesh" : "Show mesh"}
             </button>
-            {useBodySymbols ? (
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => {
-                  setShowSymbolPoints((current) => {
-                    const next = !current;
-                    try {
-                      localStorage.setItem(
-                        SHOW_SYMBOL_POINTS_STORAGE_KEY,
-                        JSON.stringify({ enabled: next }),
-                      );
-                    } catch {
-                      /* ignore */
-                    }
-                    return next;
-                  });
-                }}
-              >
-                {showSymbolPoints ? "Hide points" : "Show points"}
-              </button>
-            ) : null}
             <button
               type="button"
               className="secondary-button"

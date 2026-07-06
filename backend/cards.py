@@ -135,6 +135,7 @@ def write_cards_index(root: Path, cards_dir: Path, mesh_dir: Path) -> None:
                 "bottom": public_url(card.background),
                 "foreground": public_url(card.foreground),
                 "mesh": card.mesh,
+                "chroma_key": card.id == ORIGINAL_ID,
             }
             for card in cards
         ]
