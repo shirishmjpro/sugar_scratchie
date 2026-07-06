@@ -38,6 +38,7 @@ from backend.services.mesh_symbols import (
 from backend.services.mesh_tracking import generate_mesh as run_generate_mesh
 from backend.services.video_flow import (
     VideoFlowStep,
+    STEP_ORDER,
     approve_flow_step,
     flow_state,
     list_flows,
@@ -46,6 +47,7 @@ from backend.services.video_flow import (
     run_generate_source_image,
     run_video_flow_step,
     save_flow_draft,
+    validate_step_enqueue,
     video_flow as run_video_flow,
 )
 
@@ -297,6 +299,26 @@ class JobLogWriter(TextIOBase):
             with jobs_lock:
                 self.job.logs.append(self.buffer)
             self.buffer = ""
+
+
+def cancel_stale_video_flow_jobs(card_id: str) -> None:
+    """Cancel queued/running step jobs that no longer match pipeline approvals."""
+    try:
+        state = flow_state(card_id)
+    except Exception:
+        return
+    with jobs_lock:
+        for job in jobs.values():
+            if job.kind != "video-flow-step" or job.status not in ("queued", "running"):
+                continue
+            if len(job.command) < 3 or job.command[2] != card_id:
+                continue
+            step = job.command[1]
+            if step not in STEP_ORDER:
+                continue
+            if state["steps"][step]["status"] == "locked":
+                job.status = "cancelled"
+                job.logs.append("Cancelled — earlier pipeline steps changed.")
 
 
 def run_job(job: Job) -> None:
@@ -689,16 +711,20 @@ def approve_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
     if not re.fullmatch(r"[a-z0-9_]+", card_id):
         raise HTTPException(status_code=400, detail="Invalid card id")
     try:
-        return approve_flow_step(card_id, request.step)
+        result = approve_flow_step(card_id, request.step)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    cancel_stale_video_flow_jobs(card_id)
+    return result
 
 
 @app.post("/api/video-flow/{card_id}/reject")
 def reject_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
     if not re.fullmatch(r"[a-z0-9_]+", card_id):
         raise HTTPException(status_code=400, detail="Invalid card id")
-    return reject_flow_step(card_id, request.step)
+    result = reject_flow_step(card_id, request.step)
+    cancel_stale_video_flow_jobs(card_id)
+    return result
 
 
 @app.get("/api/video-flow/{card_id}/symbol-points")
@@ -738,6 +764,10 @@ def save_symbol_points(card_id: str, request: SymbolPointsRequest) -> dict:
 
 @app.post("/api/jobs/video-flow/step")
 def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
+    try:
+        validate_step_enqueue(request.card_id, request.step, force=request.force)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
     save_flow_draft(**video_flow_draft_kwargs(request, image=image))
     job = enqueue(

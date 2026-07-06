@@ -179,6 +179,28 @@ def step_unlocked(state: dict, step: VideoFlowStep) -> bool:
     return all(dep in state["approved"] for dep in STEP_DEPS[step])
 
 
+def validate_step_enqueue(card_id: str, step: VideoFlowStep, *, force: bool = False) -> None:
+    """Reject out-of-order step runs before a job is queued."""
+    work = work_dir(card_id)
+    state = read_state(work)
+    prev = STEP_DEPS[step]
+    if prev and not step_unlocked(state, step):
+        missing = next(dep for dep in prev if dep not in state["approved"])
+        raise RuntimeError(
+            f"Approve the {STEP_LABELS[missing]} result before running this step."
+        )
+    if step in state["approved"] and not force:
+        return
+    if (
+        step_artifact_ready(work, card_id, step, state)
+        and not force
+        and step in REVIEW_STEPS
+    ):
+        raise RuntimeError(
+            "Result already exists — approve or reject it in the dashboard before re-running."
+        )
+
+
 def previous_step(step: VideoFlowStep) -> VideoFlowStep | None:
     index = STEP_ORDER.index(step)
     return STEP_ORDER[index - 1] if index > 0 else None
@@ -632,6 +654,8 @@ def run_video_flow_step(
         write_webm=write_webm,
     )
 
+    # Re-read state in case approvals changed while the job was queued.
+    state = read_state(work)
     prev = STEP_DEPS[step]
     if prev and not step_unlocked(state, step):
         missing = next(dep for dep in prev if dep not in state["approved"])
@@ -647,6 +671,7 @@ def run_video_flow_step(
 
     if force:
         reject_flow_step(card_id, step)
+        state = read_state(work)
 
     if step == "background":
         image_to_video(

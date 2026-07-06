@@ -67,7 +67,12 @@ function pipelineFocusStep(
   runningStep: VideoFlowStepKey | null,
   failedStep: VideoFlowStepKey | null,
 ): VideoFlowStepKey | null {
-  if (runningStep) return runningStep;
+  if (
+    runningStep &&
+    flowState?.steps[runningStep]?.status !== "locked"
+  ) {
+    return runningStep;
+  }
   if (failedStep) return failedStep;
   if (!flowState) return flow.pipeline[0] ?? null;
   for (const step of flow.pipeline) {
@@ -118,7 +123,11 @@ function resolveFlowNodeStatuses(
   }
 
   for (const [step, nodeId] of Object.entries(stepToNodeMap) as [VideoFlowStepKey, FlowNodeId][]) {
-    if (runningStep === step) {
+    const stepState = flowState.steps[step];
+    if (
+      runningStep === step &&
+      stepState?.status !== "locked"
+    ) {
       next[nodeId] = "running";
       continue;
     }
@@ -126,7 +135,6 @@ function resolveFlowNodeStatuses(
       next[nodeId] = "failed";
       continue;
     }
-    const stepState = flowState.steps[step];
     if (stepState) next[nodeId] = stepState.status;
   }
 
@@ -247,6 +255,13 @@ export function RunMode(props: RunModeProps) {
     return null;
   }, [stepJob]);
 
+  const staleRunningStep = useMemo(() => {
+    if (!runningStep || !flowState) return null;
+    return flowState.steps[runningStep]?.status === "locked" ? runningStep : null;
+  }, [runningStep, flowState]);
+
+  const activeRunningStep = staleRunningStep ? null : runningStep;
+
   const failedStep = useMemo(() => {
     if (stepJob?.status === "failed" || stepJob?.status === "cancelled") {
       return flowStepFromJobCommand(stepJob.command);
@@ -303,13 +318,13 @@ export function RunMode(props: RunModeProps) {
   }, [cardId, onApplyDraft, onError, sourceImageJob, sourceJobHandledId]);
 
   const focusStep = useMemo(
-    () => pipelineFocusStep(flow, flowState, runningStep, failedStep),
-    [flow, flowState, runningStep, failedStep],
+    () => pipelineFocusStep(flow, flowState, activeRunningStep, failedStep),
+    [flow, flowState, activeRunningStep, failedStep],
   );
 
   useEffect(() => {
-    if (runningStep && stepToNodeMap[runningStep]) {
-      setActiveNode(stepToNodeMap[runningStep]!);
+    if (activeRunningStep && stepToNodeMap[activeRunningStep]) {
+      setActiveNode(stepToNodeMap[activeRunningStep]!);
       return;
     }
     if (failedStep && stepToNodeMap[failedStep]) {
@@ -321,20 +336,42 @@ export function RunMode(props: RunModeProps) {
     if (status === "review" || status === "ready") {
       setActiveNode(stepToNodeMap[focusStep]!);
     }
-  }, [runningStep, failedStep, focusStep, flowState, stepToNodeMap]);
+  }, [activeRunningStep, failedStep, focusStep, flowState, stepToNodeMap]);
+
+  useEffect(() => {
+    if (!staleRunningStep || !stepJob) return;
+    void (async () => {
+      try {
+        await api(`/api/jobs/${encodeURIComponent(stepJob.id)}/cancel`, { method: "POST" });
+        await onRefreshJobs();
+      } catch {
+        // Ignore — job may have finished between render and cancel.
+      }
+    })();
+  }, [staleRunningStep, stepJob?.id, onRefreshJobs]);
 
   const nodeStates = useMemo(
-    () => resolveFlowNodeStatuses(flow, flowState, Boolean(image), cardId.trim(), runningStep, failedStep),
-    [flow, flowState, image, cardId, runningStep, failedStep],
+    () =>
+      resolveFlowNodeStatuses(
+        flow,
+        flowState,
+        Boolean(image),
+        cardId.trim(),
+        activeRunningStep,
+        failedStep,
+      ),
+    [flow, flowState, image, cardId, activeRunningStep, failedStep],
   );
 
   const activeMeta = flow.nodes.find((node) => node.id === activeNode) ?? flow.nodes[0];
   const activeStep = nodeToStepMap[activeNode];
-  const jobBusy = stepJob?.status === "running" || stepJob?.status === "queued" || flowBusy;
+  const jobBusy =
+    ((stepJob?.status === "running" || stepJob?.status === "queued") && !staleRunningStep) ||
+    flowBusy;
 
   const actionStep: VideoFlowStepKey | null = activeStep ?? focusStep;
   const actionStatus =
-    actionStep && runningStep === actionStep
+    actionStep && activeRunningStep === actionStep
       ? "running"
       : actionStep && failedStep === actionStep
         ? "failed"
@@ -547,6 +584,15 @@ export function RunMode(props: RunModeProps) {
         </aside>
 
         <section className="video-flow-run-detail">
+          {staleRunningStep && stepJob ? (
+            <Callout.Root color="orange" mb="4">
+              <Callout.Text>
+                A background job for{" "}
+                <strong>{flowState?.steps[staleRunningStep]?.label ?? staleRunningStep}</strong> is
+                out of date — finish approving the earlier steps first. Cancelling it…
+              </Callout.Text>
+            </Callout.Root>
+          ) : null}
           {actionStatus === "review" && actionStep && reviewSteps.has(actionStep) ? (
             <Callout.Root color="amber" className="flow-review-panel" mb="4">
               <Callout.Text weight="bold">Approve this clip before the next step runs.</Callout.Text>

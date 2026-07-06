@@ -97,11 +97,19 @@
       "chroma_key": false
     },
     {
-      "id": "tie_girl",
-      "label": "Tie Girl",
-      "bottom": "/cards/tie_girl/background.mp4",
-      "foreground": "/cards/tie_girl/foreground.mp4",
-      "mesh": "tie_girl.json",
+      "id": "korean_2",
+      "label": "Korean 2",
+      "bottom": "/cards/korean_2/background.mp4",
+      "foreground": "/cards/korean_2/foreground.mp4",
+      "mesh": "korean_2.json",
+      "chroma_key": false
+    },
+    {
+      "id": "korean_tie",
+      "label": "Korean dream",
+      "bottom": "/cards/korean_tie/background.mp4",
+      "foreground": "/cards/korean_tie/foreground.mp4",
+      "mesh": "korean_tie.json",
       "chroma_key": false
     }
   ]
