@@ -30,7 +30,23 @@ from backend.cards import (
     write_cards_index,
 )
 from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
+from backend.services.mesh_symbols import (
+    SYMBOL_POINT_COUNT,
+    read_symbol_points,
+    write_symbol_points,
+)
 from backend.services.mesh_tracking import generate_mesh as run_generate_mesh
+from backend.services.video_flow import (
+    VideoFlowStep,
+    approve_flow_step,
+    flow_state,
+    list_flows,
+    read_flow_draft,
+    reject_flow_step,
+    run_video_flow_step,
+    save_flow_draft,
+    video_flow as run_video_flow,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,6 +162,41 @@ class ImageDressFlowRequest(BaseModel):
     image_field: str = "image"
     video_field: str = "video"
     endpoint: str = "/v1/videos/generations"
+
+
+class VideoFlowRequest(BaseModel):
+    image: str
+    background_motion_prompt: str = Field(min_length=1)
+    foreground_motion_prompt: str = ""
+    dress_prompt: str = Field(min_length=1)
+    card_id: str = Field(min_length=1, max_length=64)
+    card_label: str = Field(min_length=1, max_length=120)
+    resolution: str = "720p"
+    enhance_dress_prompt: bool = True
+    tracker: Literal["cotracker", "bootstapir", "blend"] = "bootstapir"
+    write_webm: bool = True
+    model: str = "grok-imagine-video-1.5"
+    image_field: str = "image"
+    video_field: str = "video"
+    endpoint: str = "/v1/videos/generations"
+
+
+class VideoFlowStepRequest(VideoFlowRequest):
+    step: VideoFlowStep
+    force: bool = False
+
+
+class VideoFlowStepAction(BaseModel):
+    step: VideoFlowStep
+
+
+class SymbolPointInput(BaseModel):
+    u: float = Field(ge=0, le=1)
+    v: float = Field(ge=0, le=1)
+
+
+class SymbolPointsRequest(BaseModel):
+    points: list[SymbolPointInput] = Field(min_length=SYMBOL_POINT_COUNT, max_length=SYMBOL_POINT_COUNT)
 
 
 class UploadedFileInfo(BaseModel):
@@ -518,6 +569,176 @@ def image_dress_flow(request: ImageDressFlowRequest) -> dict:
             image_field=request.image_field,
             video_field=request.video_field,
             endpoint=request.endpoint,
+        ),
+    )
+    return job.public()
+
+
+@app.get("/api/video-flow")
+def get_video_flows() -> dict:
+    return {"flows": list_flows()}
+
+
+@app.get("/api/video-flow/{card_id}/state")
+def get_video_flow_state(card_id: str) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    return flow_state(card_id)
+
+
+@app.post("/api/video-flow/{card_id}/draft")
+def save_video_flow_draft(card_id: str, request: VideoFlowRequest) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    if request.card_id != card_id:
+        raise HTTPException(status_code=400, detail="card_id in body must match URL")
+    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=False)
+    draft = save_flow_draft(
+        image=image,
+        background_motion_prompt=request.background_motion_prompt,
+        foreground_motion_prompt=request.foreground_motion_prompt,
+        dress_prompt=request.dress_prompt,
+        card_id=request.card_id,
+        card_label=request.card_label,
+        model=request.model,
+        resolution=request.resolution,
+        image_field=request.image_field,
+        endpoint=request.endpoint,
+        video_field=request.video_field,
+        enhance_dress_prompt=request.enhance_dress_prompt,
+        tracker=request.tracker,
+        write_webm=request.write_webm,
+    )
+    return {"draft": draft}
+
+
+@app.get("/api/video-flow/{card_id}/draft")
+def get_video_flow_draft(card_id: str) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    draft = read_flow_draft(card_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="No saved draft for this flow")
+    return {"draft": draft}
+
+
+@app.post("/api/video-flow/{card_id}/approve")
+def approve_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    try:
+        return approve_flow_step(card_id, request.step)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/video-flow/{card_id}/reject")
+def reject_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    return reject_flow_step(card_id, request.step)
+
+
+@app.get("/api/video-flow/{card_id}/symbol-points")
+def get_symbol_points(card_id: str) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    mesh_path = MESH_DIR / f"{card_id}.json"
+    if not mesh_path.exists():
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    points = read_symbol_points(mesh_path)
+    return {
+        "points": points,
+        "required": SYMBOL_POINT_COUNT,
+        "complete": len(points) == SYMBOL_POINT_COUNT,
+    }
+
+
+@app.post("/api/video-flow/{card_id}/symbol-points")
+def save_symbol_points(card_id: str, request: SymbolPointsRequest) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    mesh_path = MESH_DIR / f"{card_id}.json"
+    if not mesh_path.exists():
+        raise HTTPException(status_code=404, detail="Mesh not found — generate mesh first")
+    try:
+        write_symbol_points(
+            mesh_path,
+            [{"u": point.u, "v": point.v} for point in request.points],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return approve_flow_step(card_id, "symbols")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/jobs/video-flow/step")
+def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
+    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    save_flow_draft(
+        image=image,
+        background_motion_prompt=request.background_motion_prompt,
+        foreground_motion_prompt=request.foreground_motion_prompt,
+        dress_prompt=request.dress_prompt,
+        card_id=request.card_id,
+        card_label=request.card_label,
+        model=request.model,
+        resolution=request.resolution,
+        image_field=request.image_field,
+        endpoint=request.endpoint,
+        video_field=request.video_field,
+        enhance_dress_prompt=request.enhance_dress_prompt,
+        tracker=request.tracker,
+        write_webm=request.write_webm,
+    )
+    job = enqueue(
+        "video-flow-step",
+        ["video-flow-step", request.step, request.card_id],
+        lambda image=image, request=request: run_video_flow_step(
+            step=request.step,
+            image=image,
+            background_motion_prompt=request.background_motion_prompt,
+            foreground_motion_prompt=request.foreground_motion_prompt,
+            dress_prompt=request.dress_prompt,
+            card_id=request.card_id,
+            card_label=request.card_label,
+            model=request.model,
+            resolution=request.resolution,
+            image_field=request.image_field,
+            endpoint=request.endpoint,
+            video_field=request.video_field,
+            enhance_dress_prompt=request.enhance_dress_prompt,
+            tracker=request.tracker,
+            write_webm=request.write_webm,
+            force=request.force,
+        ),
+    )
+    return job.public()
+
+
+@app.post("/api/jobs/video-flow")
+def video_flow_job(request: VideoFlowRequest) -> dict:
+    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    job = enqueue(
+        "video-flow",
+        ["backend.services.video_flow.video_flow"],
+        lambda image=image, request=request: run_video_flow(
+            image=image,
+            background_motion_prompt=request.background_motion_prompt,
+            foreground_motion_prompt=request.foreground_motion_prompt,
+            dress_prompt=request.dress_prompt,
+            card_id=request.card_id,
+            card_label=request.card_label,
+            model=request.model,
+            resolution=request.resolution,
+            image_field=request.image_field,
+            endpoint=request.endpoint,
+            video_field=request.video_field,
+            enhance_dress_prompt=request.enhance_dress_prompt,
+            tracker=request.tracker,
+            write_webm=request.write_webm,
         ),
     )
     return job.public()

@@ -20,6 +20,10 @@ MAX_SHORT_SIDE = 720
 MAX_INLINE_MB = 18
 POLL_INTERVAL_S = 5
 POLL_TIMEOUT_S = 600
+API_TIMEOUT_S = 120
+API_MAX_RETRIES = 6
+API_RETRY_BASE_S = 2
+DOWNLOAD_MAX_RETRIES = 4
 
 ENHANCE_SYSTEM = (
     "You rewrite a short clothing-change instruction into a single precise prompt "
@@ -30,6 +34,18 @@ ENHANCE_SYSTEM = (
     "framing, background, lighting, shadows and colors. (3) Do NOT add scenery, "
     "style, mood, camera moves, effects or details that are not in the input. "
     "(4) Output ONLY the rewritten prompt, one paragraph, no preamble or quotes."
+)
+
+DRESS_ENHANCE_SYSTEM = (
+    "You rewrite a short instruction for a video EDIT model applied to an existing "
+    "motion clip. Rules: (1) Replace the entire bikini outfit with the dress/outfit "
+    "described — both top and bottom, not a skirt overlay on a bikini. Describe "
+    "fabric, color, cut, length, and fit vividly. (2) Keep the EXACT same "
+    "background, scenery, beach, sky, lighting, shadows, and environment as the "
+    "input video — do NOT replace the background with a green screen or any other "
+    "scene. (3) Keep the same person, face, identity, hair, skin, body, pose, "
+    "hands, motion, camera, framing, and timing frame-for-frame. (4) Output ONLY "
+    "the rewritten prompt, one paragraph, no preamble or quotes."
 )
 
 
@@ -46,6 +62,19 @@ def api_base() -> str:
 
 def chat_model() -> str:
     return os.environ.get("XAI_CHAT_MODEL", "grok-4")
+
+
+def video_generation_model() -> str:
+    return os.environ.get("XAI_VIDEO_MODEL", "grok-imagine-video-1.5")
+
+
+def video_edit_model(requested: str | None = None) -> str:
+    override = os.environ.get("XAI_VIDEO_EDIT_MODEL")
+    if override:
+        return override
+    if requested and requested not in ("grok-imagine-video-1.5",):
+        return requested
+    return "grok-imagine-video"
 
 
 def run_media_command(cmd: list[str]) -> bytes:
@@ -181,23 +210,64 @@ def api_get(path: str, key: str) -> dict:
     return send(req)
 
 
-def send(req: urllib.request.Request) -> dict:
+def request_id_sidecar(out: Path) -> Path:
+    return out.with_suffix(out.suffix + ".request-id")
+
+
+def output_video_ready(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        raise RuntimeError(f"API error {exc.code} on {req.full_url}:\n{body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Network error contacting {req.full_url}: {exc}") from exc
+        probe_video(path)
+    except RuntimeError:
+        return False
+    return True
 
 
-def enhance_prompt(prompt: str, key: str, model: str | None = None) -> str:
+def send(req: urllib.request.Request, *, retries: int = API_MAX_RETRIES) -> dict:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=API_TIMEOUT_S) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            if exc.code in (408, 429, 500, 502, 503, 504) and attempt < retries - 1:
+                wait = API_RETRY_BASE_S * (2**attempt)
+                print(
+                    f"  API {exc.code} on {req.full_url} "
+                    f"(attempt {attempt + 1}/{retries}); retry in {wait}s ..."
+                )
+                time.sleep(wait)
+                last_error = exc
+                continue
+            raise RuntimeError(f"API error {exc.code} on {req.full_url}:\n{body}") from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                wait = API_RETRY_BASE_S * (2**attempt)
+                print(
+                    f"  network error on {req.full_url} "
+                    f"(attempt {attempt + 1}/{retries}): {exc}; retry in {wait}s ..."
+                )
+                time.sleep(wait)
+                continue
+            break
+    raise RuntimeError(f"Network error contacting {req.full_url}: {last_error}") from last_error
+
+
+def enhance_prompt(
+    prompt: str,
+    key: str,
+    model: str | None = None,
+    *,
+    system: str = ENHANCE_SYSTEM,
+) -> str:
     model = model or chat_model()
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": ENHANCE_SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.4,
@@ -233,9 +303,68 @@ def poll_video(request_id: str, key: str, *, label: str = "video generation") ->
 def download_video(url: str, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading -> {out}")
-    urllib.request.urlretrieve(url, out)
-    meta = probe_video(out)
-    print(f"Saved {out} ({meta['width']}x{meta['height']} {meta['duration']:.2f}s)")
+    last_error: Exception | None = None
+    for attempt in range(DOWNLOAD_MAX_RETRIES):
+        try:
+            urllib.request.urlretrieve(url, out)
+            meta = probe_video(out)
+            print(f"Saved {out} ({meta['width']}x{meta['height']} {meta['duration']:.2f}s)")
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError, RuntimeError) as exc:
+            last_error = exc
+            if out.exists():
+                out.unlink(missing_ok=True)
+            if attempt < DOWNLOAD_MAX_RETRIES - 1:
+                wait = API_RETRY_BASE_S * (2**attempt)
+                print(
+                    f"  download failed (attempt {attempt + 1}/{DOWNLOAD_MAX_RETRIES}): "
+                    f"{exc}; retry in {wait}s ..."
+                )
+                time.sleep(wait)
+                continue
+            break
+    raise RuntimeError(f"Failed to download video to {out}: {last_error}") from last_error
+
+
+def submit_video_job(
+    *,
+    endpoint: str,
+    payload: dict,
+    key: str,
+    out: Path,
+    label: str,
+) -> str:
+    sidecar = request_id_sidecar(out)
+    if output_video_ready(out):
+        meta = probe_video(out)
+        print(
+            f"Using existing {label}: {out.name} "
+            f"({meta['width']}x{meta['height']} {meta['duration']:.2f}s)"
+        )
+        sidecar.unlink(missing_ok=True)
+        return ""
+
+    if sidecar.exists():
+        request_id = sidecar.read_text(encoding="utf-8").strip()
+        if request_id:
+            print(f"Resuming {label} for request id: {request_id}")
+            return request_id
+
+    print(f"Submitting {label} to {api_base()}{endpoint} (model={payload.get('model')}) ...")
+    submit = api_post(endpoint, payload, key)
+    request_id = submit.get("request_id") or submit.get("id")
+    if not request_id:
+        raise RuntimeError(f"No request_id in response:\n{json.dumps(submit, indent=2)}")
+    sidecar.write_text(request_id, encoding="utf-8")
+    return request_id
+
+
+def finish_video_job(request_id: str, key: str, out: Path, *, label: str) -> None:
+    if not request_id:
+        return
+    video_url = poll_video(request_id, key, label=label)
+    download_video(video_url, out)
+    request_id_sidecar(out).unlink(missing_ok=True)
 
 
 def edit_video(
@@ -248,6 +377,7 @@ def edit_video(
     video_field: str,
     enhance: bool,
     prepare_compatible: bool,
+    enhance_system: str = ENHANCE_SYSTEM,
 ) -> None:
     key = api_key()
     video_str = str(video)
@@ -267,19 +397,22 @@ def edit_video(
     final_prompt = prompt
     if enhance:
         print(f"Enhancing prompt via {chat_model()} ...")
-        final_prompt = enhance_prompt(prompt, key)
+        final_prompt = enhance_prompt(prompt, key, system=enhance_system)
         print(f"Enhanced prompt:\n  {final_prompt}\n")
 
-    payload = {"model": model, "prompt": final_prompt, video_field: video_value}
-    if resolution:
-        payload["resolution"] = resolution
-    print(f"Submitting edit to {api_base()}{EDITS_PATH} (model={model}, resolution={resolution or 'default'}) ...")
-    submit = api_post(EDITS_PATH, payload, key)
-    request_id = submit.get("request_id") or submit.get("id")
-    if not request_id:
-        raise RuntimeError(f"No request_id in response:\n{json.dumps(submit, indent=2)}")
-    video_url = poll_video(request_id, key, label="edit")
-    download_video(video_url, out)
+    edit_model = video_edit_model(model)
+    if edit_model != model:
+        print(f"Edit model: {edit_model} (replacing {model}, which does not support /v1/videos/edits)")
+
+    payload = {"model": edit_model, "prompt": final_prompt, video_field: video_value}
+    request_id = submit_video_job(
+        endpoint=EDITS_PATH,
+        payload=payload,
+        key=key,
+        out=out,
+        label="video edit",
+    )
+    finish_video_job(request_id, key, out, label="edit")
 
 
 def image_to_video(
@@ -301,13 +434,14 @@ def image_to_video(
     if resolution:
         payload["resolution"] = resolution
 
-    print(f"Submitting image-to-video to {api_base()}{endpoint} (model={model}) ...")
-    submit = api_post(endpoint, payload, key)
-    request_id = submit.get("request_id") or submit.get("id")
-    if not request_id:
-        raise RuntimeError(f"No request_id in response:\n{json.dumps(submit, indent=2)}")
-    video_url = poll_video(request_id, key, label="video generation")
-    download_video(video_url, out)
+    request_id = submit_video_job(
+        endpoint=endpoint,
+        payload=payload,
+        key=key,
+        out=out,
+        label="image-to-video",
+    )
+    finish_video_job(request_id, key, out, label="video generation")
 
 
 def image_dress_flow(

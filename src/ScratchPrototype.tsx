@@ -13,6 +13,18 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
+import {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  parseTrackedMesh,
+  sampleMeshUvToWorld,
+  sampleTrackedMesh,
+  SYMBOL_POINT_COUNT,
+  trackedWorldToUv,
+  type TrackedMesh,
+  type TrackedMeshSample,
+  type Vec2,
+} from "./meshGeometry";
 
 // On-screen diagnostics (FPS, layer drift, raw video state) shown only when the
 // page is opened with ?debug=1. Self-contained: it polls the DOM/video elements
@@ -138,11 +150,6 @@ function DebugHud() {
   );
 }
 
-type Vec2 = {
-  x: number;
-  y: number;
-};
-
 type ScratchMark = {
   u: number;
   v: number;
@@ -166,9 +173,6 @@ type FlyingCoin = {
 
 const COIN_FLIGHT_DURATION_MS = 620;
 const COIN_FLIGHT_STAGGER_MS = 80;
-
-const CANVAS_WIDTH = 390;
-const CANVAS_HEIGHT = 672;
 // A card pairs the reveal (bottom) video, the green-screen foreground video, and
 // the tracked mesh generated from that foreground. Switching cards swaps all
 // three together so the scratch holes line up with the right clip.
@@ -276,7 +280,7 @@ const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
 const SYMBOL_TYPE_COUNT = 8;
-const SYMBOL_SLOT_COUNT = 12;
+const SYMBOL_SLOT_COUNT = SYMBOL_POINT_COUNT;
 const SYMBOL_REVEAL_STEP_MANUAL = 0.056;
 const SYMBOL_REVEAL_STEP_AUTO = 0.083;
 const FULL_REVEAL_MANUAL_THRESHOLD = 0.7;
@@ -286,6 +290,8 @@ const GAME_OUTCOME_SILENT_DELAY_MS = 1500;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
 const SOUND_STORAGE_KEY = "sugar-scratchie:sound";
+const SHOW_SYMBOL_POINTS_STORAGE_KEY = "sugar-scratchie:show-symbol-points";
+const SYMBOL_REVEAL_UV_RADIUS = 0.045;
 
 type ScratchZoomSettings = {
   enabled: boolean;
@@ -561,6 +567,38 @@ function loadSoundEnabled(): boolean {
   }
 }
 
+function loadShowSymbolPoints(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = localStorage.getItem(SHOW_SYMBOL_POINTS_STORAGE_KEY);
+    if (!raw) return true;
+    const parsed = JSON.parse(raw) as { enabled?: boolean };
+    return parsed.enabled ?? true;
+  } catch {
+    return true;
+  }
+}
+
+function worldPointToStage(
+  worldPoint: Vec2,
+  canvas: HTMLCanvasElement,
+  stage: HTMLElement,
+  camera: { x: number; y: number },
+): Vec2 {
+  const canvasRect = canvas.getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  const refClipX = (worldPoint.x / CANVAS_WIDTH) * 2 - 1;
+  const refClipY = 1 - (worldPoint.y / CANVAS_HEIGHT) * 2;
+  const presentX = ((refClipX * PRESENT_ZOOM + camera.x + 1) / 2) * CANVAS_WIDTH;
+  const presentY =
+    ((1 - (refClipY * PRESENT_ZOOM + camera.y)) / 2) * CANVAS_HEIGHT;
+  const clientX =
+    canvasRect.left + (presentX / CANVAS_WIDTH) * canvasRect.width;
+  const clientY =
+    canvasRect.top + (presentY / CANVAS_HEIGHT) * canvasRect.height;
+  return { x: clientX - stageRect.left, y: clientY - stageRect.top };
+}
+
 function loadScratchZoomSettings(): ScratchZoomSettings {
   if (typeof window === "undefined") return SCRATCH_ZOOM_DEFAULTS;
   try {
@@ -666,30 +704,7 @@ const CHEST_SMOOTH = 0.08;
 
 // Bilinearly interpolate the deformed mesh at a fractional UV grid position to
 // get its current canvas-pixel location (the mesh UV grid is regular 0..1).
-function sampleMeshUvToWorld(
-  sample: TrackedMeshSample,
-  u: number,
-  v: number,
-): Vec2 {
-  const { cols, rows, verts } = sample;
-  const gx = clampValue(u * (cols - 1), 0, cols - 1);
-  const gy = clampValue(v * (rows - 1), 0, rows - 1);
-  const x0 = Math.floor(gx);
-  const y0 = Math.floor(gy);
-  const x1 = Math.min(cols - 1, x0 + 1);
-  const y1 = Math.min(rows - 1, y0 + 1);
-  const fx = gx - x0;
-  const fy = gy - y0;
-  const v00 = verts[y0 * cols + x0];
-  const v10 = verts[y0 * cols + x1];
-  const v01 = verts[y1 * cols + x0];
-  const v11 = verts[y1 * cols + x1];
-  const topX = v00.x + (v10.x - v00.x) * fx;
-  const topY = v00.y + (v10.y - v00.y) * fx;
-  const botX = v01.x + (v11.x - v01.x) * fx;
-  const botY = v01.y + (v11.y - v01.y) * fx;
-  return { x: topX + (botX - topX) * fy, y: topY + (botY - topY) * fy };
-}
+// sampleMeshUvToWorld lives in meshGeometry.ts
 
 // Drift past this (seconds) is a genuine discontinuity (loop wrap) and is the
 // only case we correct with a hard seek — seeks stall the decoder, and on
@@ -894,220 +909,6 @@ function buildAutoScratchPath(mesh: TrackedMesh | null): Vec2[] {
   return sparse;
 }
 
-type TrackedMeshFrame = {
-  t: number;
-  verts: Vec2[];
-  vis: number[];
-};
-
-type TrackedMesh = {
-  cols: number;
-  rows: number;
-  fps: number;
-  uv: Vec2[];
-  frames: TrackedMeshFrame[];
-  // Static per-vertex clothing mask (1 = garment), or null when the mesh has no
-  // garment data (then the whole screen is scratchable, legacy behavior).
-  garment: number[] | null;
-};
-
-// A live mesh sampled at the current video time: per-vertex canvas positions
-// plus visibility, sharing the static UV grid from the source TrackedMesh.
-type TrackedMeshSample = {
-  cols: number;
-  rows: number;
-  uv: Vec2[];
-  verts: Vec2[];
-  vis: number[];
-};
-
-function parseTrackedMesh(value: unknown): TrackedMesh | null {
-  if (!value || typeof value !== "object") return null;
-  const data = value as {
-    mesh?: { cols?: unknown; rows?: unknown };
-    fps?: unknown;
-    uv?: unknown;
-    frames?: unknown;
-    garment?: unknown;
-  };
-  const cols = Number(data.mesh?.cols);
-  const rows = Number(data.mesh?.rows);
-  if (
-    !Number.isInteger(cols) ||
-    !Number.isInteger(rows) ||
-    cols < 2 ||
-    rows < 2
-  )
-    return null;
-  if (
-    !Array.isArray(data.uv) ||
-    !Array.isArray(data.frames) ||
-    data.frames.length === 0
-  )
-    return null;
-
-  const expected = cols * rows;
-  const uv = data.uv as unknown[];
-  if (uv.length !== expected) return null;
-
-  // Optional static per-vertex garment mask (1 = clothing). When present we fold
-  // it into per-frame visibility so scratching, hole-punching, and the mesh
-  // overlay are all confined to clothes (the gate is `cellVisible`). Scratches
-  // live in UV space and the garment occupies a stable UV region, so a single
-  // static mask is correct and flicker-free.
-  const garmentSource = Array.isArray(data.garment)
-    ? (data.garment as unknown[])
-    : null;
-  const garment =
-    garmentSource && garmentSource.length === expected
-      ? garmentSource.map((flag) => (Number(flag) ? 1 : 0))
-      : null;
-  const parsedUv = uv.map((pair) => {
-    const point = pair as number[];
-    return { x: Number(point?.[0]), y: Number(point?.[1]) };
-  });
-  if (
-    parsedUv.some(
-      (point) => !Number.isFinite(point.x) || !Number.isFinite(point.y),
-    )
-  )
-    return null;
-
-  const frames: TrackedMeshFrame[] = [];
-  for (const rawFrame of data.frames as unknown[]) {
-    const frame = rawFrame as { t?: unknown; verts?: unknown; vis?: unknown };
-    if (
-      typeof frame.t !== "number" ||
-      !Array.isArray(frame.verts) ||
-      frame.verts.length !== expected
-    ) {
-      return null;
-    }
-    const verts = (frame.verts as unknown[]).map((pair) => {
-      const point = pair as number[];
-      return { x: Number(point?.[0]), y: Number(point?.[1]) };
-    });
-    if (
-      verts.some(
-        (point) => !Number.isFinite(point.x) || !Number.isFinite(point.y),
-      )
-    )
-      return null;
-    const visSource = Array.isArray(frame.vis) ? (frame.vis as unknown[]) : [];
-    const vis = verts.map((_, index) => {
-      if (garment && !garment[index]) return 0;
-      return Number(visSource[index]) ? 1 : 0;
-    });
-    frames.push({ t: frame.t, verts, vis });
-  }
-
-  return {
-    cols,
-    rows,
-    fps: Number(data.fps) || 10,
-    uv: parsedUv,
-    frames: frames.sort((a, b) => a.t - b.t),
-    garment,
-  };
-}
-
-// Interpolate vertex positions between the two source frames bracketing `time`.
-function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
-  const frames = mesh.frames;
-  const loopTime =
-    frames.length > 1 ? time % (frames[frames.length - 1].t || 1) : time;
-  let previous = frames[0];
-  let next = frames[frames.length - 1];
-  for (let index = 0; index < frames.length; index += 1) {
-    if (frames[index].t <= loopTime) previous = frames[index];
-    if (frames[index].t >= loopTime) {
-      next = frames[index];
-      break;
-    }
-  }
-
-  const span = next.t - previous.t;
-  const blend = span > 0 ? (loopTime - previous.t) / span : 0;
-  const verts = previous.verts.map((point, index) => {
-    const target = next.verts[index] ?? point;
-    return {
-      x: point.x + (target.x - point.x) * blend,
-      y: point.y + (target.y - point.y) * blend,
-    };
-  });
-  const vis = previous.vis.map((value, index) =>
-    value && next.vis[index] ? 1 : 0,
-  );
-
-  return { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis };
-}
-
-function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
-  return sample.verts[row * sample.cols + col];
-}
-
-// A cell is usable only if all four corners are visible this frame — this skips
-// off-body cells (never seeded) and occluded ones (e.g. an arm crossing).
-function cellVisible(sample: TrackedMeshSample, col: number, row: number) {
-  const { cols, vis } = sample;
-  return Boolean(
-    vis[row * cols + col] &&
-    vis[row * cols + col + 1] &&
-    vis[(row + 1) * cols + col] &&
-    vis[(row + 1) * cols + col + 1],
-  );
-}
-
-function barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) {
-  const v0x = b.x - a.x;
-  const v0y = b.y - a.y;
-  const v1x = c.x - a.x;
-  const v1y = c.y - a.y;
-  const v2x = point.x - a.x;
-  const v2y = point.y - a.y;
-  const denominator = v0x * v1y - v1x * v0y;
-  if (Math.abs(denominator) < 1e-6) return null;
-  const v = (v2x * v1y - v1x * v2y) / denominator;
-  const w = (v0x * v2y - v2x * v0y) / denominator;
-  const u = 1 - v - w;
-  if (u < -0.001 || v < -0.001 || w < -0.001) return null;
-  return { u, v, w };
-}
-
-// Map a canvas point to mesh-UV: find which deformed cell holds `point` and
-// return its UV via barycentric interpolation across the cell triangles.
-function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
-  for (let row = 0; row < sample.rows - 1; row += 1) {
-    for (let col = 0; col < sample.cols - 1; col += 1) {
-      if (!cellVisible(sample, col, row)) continue;
-      const topLeft = meshVertexAt(sample, col, row);
-      const topRight = meshVertexAt(sample, col + 1, row);
-      const bottomLeft = meshVertexAt(sample, col, row + 1);
-      const bottomRight = meshVertexAt(sample, col + 1, row + 1);
-      const uvTL = sample.uv[row * sample.cols + col];
-      const uvTR = sample.uv[row * sample.cols + col + 1];
-      const uvBL = sample.uv[(row + 1) * sample.cols + col];
-      const uvBR = sample.uv[(row + 1) * sample.cols + col + 1];
-
-      const first = barycentric(point, topLeft, topRight, bottomRight);
-      if (first) {
-        return {
-          x: uvTL.x * first.u + uvTR.x * first.v + uvBR.x * first.w,
-          y: uvTL.y * first.u + uvTR.y * first.v + uvBR.y * first.w,
-        };
-      }
-      const second = barycentric(point, topLeft, bottomRight, bottomLeft);
-      if (second) {
-        return {
-          x: uvTL.x * second.u + uvBR.x * second.v + uvBL.x * second.w,
-          y: uvTL.y * second.u + uvBR.y * second.v + uvBL.y * second.w,
-        };
-      }
-    }
-  }
-  return null;
-}
-
 export function ScratchPrototype() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -1155,6 +956,17 @@ export function ScratchPrototype() {
   );
   const showMeshRef = useRef(showMesh);
   showMeshRef.current = showMesh;
+  const [showSymbolPoints, setShowSymbolPoints] = useState(loadShowSymbolPoints);
+  const showSymbolPointsRef = useRef(showSymbolPoints);
+  showSymbolPointsRef.current = showSymbolPoints;
+  const bodyMarkerRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const useBodySymbolsRef = useRef(false);
+  const revealedPointsRef = useRef<boolean[]>(
+    Array.from({ length: SYMBOL_SLOT_COUNT }, () => false),
+  );
+  const useBodySymbols =
+    trackedMesh?.symbolPoints?.length === SYMBOL_SLOT_COUNT;
+  useBodySymbolsRef.current = useBodySymbols;
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
@@ -1410,6 +1222,38 @@ export function ScratchPrototype() {
         camera,
         hideForeground,
       );
+
+      const bodyPoints = trackedMeshNow?.symbolPoints;
+      const stage = stageRef.current;
+      const canvas = canvasRef.current;
+      if (
+        bodyPoints &&
+        bodyPoints.length === SYMBOL_SLOT_COUNT &&
+        trackedSample &&
+        stage &&
+        canvas
+      ) {
+        for (let index = 0; index < SYMBOL_SLOT_COUNT; index += 1) {
+          const marker = bodyMarkerRefs.current[index];
+          if (!marker) continue;
+          const revealed = revealedPointsRef.current[index];
+          const showGuide = showSymbolPointsRef.current && !revealed;
+          if (!revealed && !showGuide) {
+            marker.style.display = "none";
+            continue;
+          }
+          const world = sampleMeshUvToWorld(
+            trackedSample,
+            bodyPoints[index].u,
+            bodyPoints[index].v,
+          );
+          const stagePos = worldPointToStage(world, canvas, stage, camera);
+          marker.style.display = "flex";
+          marker.style.transform = `translate(${stagePos.x}px, ${stagePos.y}px)`;
+          marker.classList.toggle("is-revealed", revealed);
+        }
+      }
+
       animationId = requestAnimationFrame(render);
     };
 
@@ -1498,6 +1342,10 @@ export function ScratchPrototype() {
     claimedRef.current = false;
     resetGameOutcome();
     revealedSymbolsRef.current = 0;
+    revealedPointsRef.current = Array.from(
+      { length: SYMBOL_SLOT_COUNT },
+      () => false,
+    );
     setSessionSymbols(buildSessionSymbols());
     setProgress(0);
     setClaimed(false);
@@ -1668,6 +1516,10 @@ export function ScratchPrototype() {
     claimedRef.current = false;
     resetGameOutcome();
     revealedSymbolsRef.current = 0;
+    revealedPointsRef.current = Array.from(
+      { length: SYMBOL_SLOT_COUNT },
+      () => false,
+    );
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
     setSessionSymbols(buildSessionSymbols());
@@ -1772,19 +1624,7 @@ export function ScratchPrototype() {
     const canvas = canvasRef.current;
     const stage = stageRef.current;
     if (!canvas || !stage) return null;
-    const canvasRect = canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    const cam = cameraRef.current;
-    const refClipX = (worldPoint.x / CANVAS_WIDTH) * 2 - 1;
-    const refClipY = 1 - (worldPoint.y / CANVAS_HEIGHT) * 2;
-    const presentX = ((refClipX * PRESENT_ZOOM + cam.x + 1) / 2) * CANVAS_WIDTH;
-    const presentY =
-      ((1 - (refClipY * PRESENT_ZOOM + cam.y)) / 2) * CANVAS_HEIGHT;
-    const clientX =
-      canvasRect.left + (presentX / CANVAS_WIDTH) * canvasRect.width;
-    const clientY =
-      canvasRect.top + (presentY / CANVAS_HEIGHT) * canvasRect.height;
-    return { x: clientX - stageRect.left, y: clientY - stageRect.top };
+    return worldPointToStage(worldPoint, canvas, stage, cameraRef.current);
   }
 
   function spawnSymbolCoins(
@@ -1881,18 +1721,46 @@ export function ScratchPrototype() {
     progressRef.current = nextProgress;
     setProgress(nextProgress);
     const autoMode = autoScratchRef.current.enabled;
-    const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
-    if (nextSymbolCount !== revealedSymbolsRef.current) {
-      const prevCount = revealedSymbolsRef.current;
-      revealedSymbolsRef.current = nextSymbolCount;
-      setRevealedSymbols(nextSymbolCount);
-      playNewSymbolNotes(
-        symbolAudioRef.current,
-        prevCount,
-        nextSymbolCount,
-        soundEnabledRef.current,
-      );
-      spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
+    if (useBodySymbolsRef.current && trackedMeshRef.current?.symbolPoints) {
+      const bodyPoints = trackedMeshRef.current.symbolPoints;
+      let changed = false;
+      for (let index = 0; index < bodyPoints.length; index += 1) {
+        if (revealedPointsRef.current[index]) continue;
+        const distance = Math.hypot(
+          u - bodyPoints[index].u,
+          v - bodyPoints[index].v,
+        );
+        if (distance <= SYMBOL_REVEAL_UV_RADIUS) {
+          revealedPointsRef.current[index] = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        const nextSymbolCount = revealedPointsRef.current.filter(Boolean).length;
+        const prevCount = revealedSymbolsRef.current;
+        revealedSymbolsRef.current = nextSymbolCount;
+        setRevealedSymbols(nextSymbolCount);
+        playNewSymbolNotes(
+          symbolAudioRef.current,
+          prevCount,
+          nextSymbolCount,
+          soundEnabledRef.current,
+        );
+      }
+    } else {
+      const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
+      if (nextSymbolCount !== revealedSymbolsRef.current) {
+        const prevCount = revealedSymbolsRef.current;
+        revealedSymbolsRef.current = nextSymbolCount;
+        setRevealedSymbols(nextSymbolCount);
+        playNewSymbolNotes(
+          symbolAudioRef.current,
+          prevCount,
+          nextSymbolCount,
+          soundEnabledRef.current,
+        );
+        spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
+      }
     }
     if (
       isGarmentFullyRevealed(
@@ -2161,30 +2029,50 @@ export function ScratchPrototype() {
           new URLSearchParams(window.location.search).has("debug") ? (
             <DebugHud />
           ) : null}
-          <div
-            className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
-            aria-label="Game symbols"
-          >
-            {sessionSymbols.map((typeId, index) => (
-              <div
-                key={index}
-                ref={(el) => {
-                  symbolSlotRefs.current[index] = el;
-                }}
-                className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
-                title={
-                  index < revealedSymbols
-                    ? SYMBOL_TYPES[typeId]?.label
-                    : undefined
-                }
-              >
-                {index < revealedSymbols ? (
-                  <GameSymbolIcon typeId={typeId} />
-                ) : null}
-              </div>
-            ))}
-          </div>
-          {flyingCoins.map((coin) => (
+          {!useBodySymbols ? (
+            <div
+              className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
+              aria-label="Game symbols"
+            >
+              {sessionSymbols.map((typeId, index) => (
+                <div
+                  key={index}
+                  ref={(el) => {
+                    symbolSlotRefs.current[index] = el;
+                  }}
+                  className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
+                  title={
+                    index < revealedSymbols
+                      ? SYMBOL_TYPES[typeId]?.label
+                      : undefined
+                  }
+                >
+                  {index < revealedSymbols ? (
+                    <GameSymbolIcon typeId={typeId} />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {useBodySymbols
+            ? sessionSymbols.map((typeId, index) => (
+                <div
+                  key={`body-symbol-${index}`}
+                  ref={(el) => {
+                    bodyMarkerRefs.current[index] = el;
+                  }}
+                  className={`body-symbol-marker${index < revealedSymbols ? " is-revealed" : ""}`}
+                  style={{ display: "none" }}
+                >
+                  <span className="body-symbol-number">{index + 1}</span>
+                  <span className="body-symbol-icon">
+                    <GameSymbolIcon typeId={typeId} />
+                  </span>
+                </div>
+              ))
+            : null}
+          {!useBodySymbols
+            ? flyingCoins.map((coin) => (
             <div
               key={coin.id}
               className="flying-coin"
@@ -2205,7 +2093,8 @@ export function ScratchPrototype() {
             >
               <GameSymbolIcon typeId={coin.typeId} />
             </div>
-          ))}
+          ))
+            : null}
           <video
             ref={bottomVideoRef}
             className="source-video"
@@ -2525,6 +2414,28 @@ export function ScratchPrototype() {
             >
               {showMesh ? "Hide mesh" : "Show mesh"}
             </button>
+            {useBodySymbols ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setShowSymbolPoints((current) => {
+                    const next = !current;
+                    try {
+                      localStorage.setItem(
+                        SHOW_SYMBOL_POINTS_STORAGE_KEY,
+                        JSON.stringify({ enabled: next }),
+                      );
+                    } catch {
+                      /* ignore */
+                    }
+                    return next;
+                  });
+                }}
+              >
+                {showSymbolPoints ? "Hide points" : "Show points"}
+              </button>
+            ) : null}
             <button
               type="button"
               className="secondary-button"
