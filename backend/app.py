@@ -23,6 +23,7 @@ from backend.cards import (
     CardInfo,
     CreateCardRequest,
     UpdateCardRequest,
+    compress_card,
     create_card,
     delete_card,
     list_cards,
@@ -35,7 +36,8 @@ from backend.services.mesh_symbols import (
     read_symbol_points,
     write_symbol_points,
 )
-from backend.services.mesh_tracking import generate_mesh as run_generate_mesh
+from backend.services.mesh_tracking import default_mesh_device, generate_mesh as run_generate_mesh
+from backend.services.mesh_tune import MeshTuneOptions, build_mesh_tracking_env, mesh_tune_from_dict
 from backend.services.video_flow import (
     VideoFlowStep,
     STEP_ORDER,
@@ -45,6 +47,7 @@ from backend.services.video_flow import (
     read_flow_draft,
     reject_flow_step,
     run_generate_source_image,
+    run_mesh_candidate_generation,
     run_video_flow_step,
     save_flow_draft,
     validate_step_enqueue,
@@ -172,12 +175,14 @@ class VideoFlowRequest(BaseModel):
     background_motion_prompt: str = Field(min_length=1)
     foreground_motion_prompt: str = ""
     dress_prompt: str = Field(min_length=1)
+    dress_reference_image: str = ""
     card_id: str = Field(min_length=1, max_length=64)
     card_label: str = Field(min_length=1, max_length=120)
     resolution: str = "720p"
     enhance_dress_prompt: bool = True
-    tracker: Literal["cotracker", "bootstapir", "blend"] = "bootstapir"
+    tracker: Literal["cotracker", "bootstapir", "blend", "all"] = "all"
     write_webm: bool = True
+    mesh_tune: MeshTuneOptions = Field(default_factory=MeshTuneOptions)
     model: str = "grok-imagine-video-1.5"
     image_field: str = "image"
     video_field: str = "video"
@@ -204,6 +209,15 @@ class VideoFlowStepRequest(VideoFlowRequest):
 
 class VideoFlowStepAction(BaseModel):
     step: VideoFlowStep
+    mesh_tracker: Literal["bootstapir", "cotracker", "blend"] | None = None
+
+
+class MeshCandidateRequest(BaseModel):
+    card_id: str = Field(min_length=1, max_length=64)
+    card_label: str = Field(min_length=1, max_length=120)
+    tracker: Literal["bootstapir", "cotracker", "blend"]
+    mesh_tune: MeshTuneOptions = Field(default_factory=MeshTuneOptions)
+    force: bool = False
 
 
 class SymbolPointInput(BaseModel):
@@ -215,6 +229,10 @@ class SymbolPointsRequest(BaseModel):
     points: list[SymbolPointInput] = Field(min_length=SYMBOL_POINT_COUNT, max_length=SYMBOL_POINT_COUNT)
 
 
+class CompressCardRequest(BaseModel):
+    write_webm: bool = True
+
+
 class UploadedFileInfo(BaseModel):
     path: str
     size_bytes: int
@@ -223,6 +241,34 @@ class UploadedFileInfo(BaseModel):
 class SaveGarmentRequest(BaseModel):
     file: str
     garment: list[int]
+
+
+def resolve_mesh_json_path(file: str) -> Path:
+    """Resolve a mesh JSON for read/write — public/mesh, or work-dir compare candidates."""
+    name = Path(file).name
+    if not name.endswith(".json") or name == "index.json":
+        raise HTTPException(status_code=400, detail=f"Invalid mesh file: {file}")
+
+    if "/" in file.replace("\\", "/"):
+        target = workspace_path(file, must_exist=True)
+        if target.suffix != ".json":
+            raise HTTPException(status_code=400, detail=f"Not a mesh JSON: {file}")
+        return target
+
+    published = MESH_DIR / name
+    if published.exists():
+        return published
+
+    work_root = ROOT / ".tmp" / "video-flow"
+    if work_root.exists():
+        for work in work_root.iterdir():
+            if not work.is_dir():
+                continue
+            candidate = work / name
+            if candidate.exists():
+                return candidate
+
+    raise HTTPException(status_code=404, detail=f"Mesh not found: {name}")
 
 
 @dataclass
@@ -435,6 +481,20 @@ def remove_card(card_id: str) -> dict:
     return {"ok": True, "id": card_id}
 
 
+@app.post("/api/jobs/cards/{card_id}/compress")
+def compress_card_videos(card_id: str, request: CompressCardRequest) -> dict:
+    def action(card_id: str = card_id, write_webm: bool = request.write_webm) -> None:
+        compress_card(ROOT, CARDS_DIR, card_id, write_webm=write_webm)
+        write_cards_index(ROOT, CARDS_DIR, MESH_DIR)
+
+    job = enqueue(
+        "compress-card",
+        ["backend.cards.compress_card", card_id],
+        action,
+    )
+    return job.public()
+
+
 @app.post("/api/files/upload")
 async def upload_file(
     request: Request,
@@ -477,9 +537,7 @@ def save_garment_mask(request: SaveGarmentRequest) -> dict:
     name = Path(request.file).name
     if not name.endswith(".json") or name == "index.json":
         raise HTTPException(status_code=400, detail=f"Invalid mesh file: {request.file}")
-    path = MESH_DIR / name
-    if not path.exists():
-        raise HTTPException(status_code=404, detail=f"Mesh not found: {name}")
+    path = resolve_mesh_json_path(request.file)
 
     data = json.loads(path.read_text())
     mesh = data.get("mesh") or {}
@@ -518,10 +576,9 @@ def generate_mesh(request: GenerateMeshRequest) -> dict:
         # in-process job tries to reach huggingface.co and fails when offline.
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        # The job runs in-process; Apple MPS has crashed the Metal command buffer
-        # on this hardware (taking the API with it), so pin to CPU for stability.
-        # Override by exporting DEVICE before launching the backend.
-        "DEVICE": os.environ.get("DEVICE", "cpu"),
+        # Match CLI mesh defaults (MPS on Apple Silicon). Set DEVICE=cpu in .env
+        # if Metal crashes on your hardware.
+        "DEVICE": default_mesh_device(),
         "INPUT_VIDEO": relative(input_video),
         "OUTPUT_JSON": relative(output_json),
         "TRACKER": request.tracker,
@@ -616,6 +673,7 @@ def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> 
         "background_motion_prompt": request.background_motion_prompt,
         "foreground_motion_prompt": request.foreground_motion_prompt,
         "dress_prompt": request.dress_prompt,
+        "dress_reference_image": request.dress_reference_image,
         "card_id": request.card_id,
         "card_label": request.card_label,
         "model": request.model,
@@ -630,6 +688,7 @@ def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> 
         "source_prompt": request.source_prompt,
         "face_image": request.face_image,
         "base_image": request.base_image,
+        "mesh_tune": request.mesh_tune.model_dump(),
     }
 
 
@@ -711,7 +770,11 @@ def approve_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
     if not re.fullmatch(r"[a-z0-9_]+", card_id):
         raise HTTPException(status_code=400, detail="Invalid card id")
     try:
-        result = approve_flow_step(card_id, request.step)
+        result = approve_flow_step(
+            card_id,
+            request.step,
+            mesh_tracker=request.mesh_tracker,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     cancel_stale_video_flow_jobs(card_id)
@@ -769,11 +832,14 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    dress_reference = request.dress_reference_image.strip()
+    if dress_reference and not dress_reference.startswith(("http://", "https://")):
+        dress_reference = str(workspace_path(dress_reference, must_exist=True))
     save_flow_draft(**video_flow_draft_kwargs(request, image=image))
     job = enqueue(
         "video-flow-step",
         ["video-flow-step", request.step, request.card_id],
-        lambda image=image, request=request: run_video_flow_step(
+        lambda image=image, dress_reference=dress_reference, request=request: run_video_flow_step(
             step=request.step,
             image=image,
             background_motion_prompt=request.background_motion_prompt,
@@ -789,6 +855,26 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
             enhance_dress_prompt=request.enhance_dress_prompt,
             tracker=request.tracker,
             write_webm=request.write_webm,
+            dress_reference_image=dress_reference,
+            mesh_tune=request.mesh_tune.model_dump(),
+            force=request.force,
+        ),
+    )
+    return job.public()
+
+
+@app.post("/api/jobs/video-flow/mesh-candidate")
+def video_flow_mesh_candidate_job(request: MeshCandidateRequest) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", request.card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    job = enqueue(
+        "video-flow-mesh-candidate",
+        ["video-flow-mesh-candidate", request.tracker, request.card_id],
+        lambda request=request: run_mesh_candidate_generation(
+            card_id=request.card_id,
+            card_label=request.card_label,
+            tracker=request.tracker,
+            mesh_tune=request.mesh_tune.model_dump(),
             force=request.force,
         ),
     )

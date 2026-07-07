@@ -4,7 +4,22 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { uploadFile } from "../shared/api";
 
-export const TRACKERS = ["bootstapir", "cotracker", "blend"] as const;
+export const MESH_TRACKERS = ["bootstapir", "cotracker", "blend"] as const;
+export const MESH_TRACKER_MODES = ["all", ...MESH_TRACKERS] as const;
+export const TRACKERS = MESH_TRACKERS;
+
+export type MeshTracker = (typeof MESH_TRACKERS)[number];
+export type MeshTrackerMode = (typeof MESH_TRACKER_MODES)[number];
+
+export function meshTrackerFromArtifact(path: string): MeshTracker | null {
+  const match = path.match(/mesh-(bootstapir|cotracker|blend)\.json$/);
+  return match ? (match[1] as MeshTracker) : null;
+}
+
+export function meshTrackerModeLabel(mode: MeshTrackerMode): string {
+  if (mode === "all") return "All (compare & pick)";
+  return mode;
+}
 
 export const iconProps = {
   "aria-hidden": true,

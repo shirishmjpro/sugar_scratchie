@@ -27,8 +27,10 @@ import {
   type VideoFlowStepKey,
 } from "./schema";
 import { MaskEditor } from "./MaskEditor";
+import { MeshTunePanel } from "./MeshTunePanel";
+import { meshTuneToApi, type MeshTuneSettings } from "./meshTune";
 import { SymbolPointPicker } from "./SymbolPointPicker";
-import { Field, FilePathPicker, iconProps, MediaPreview, TRACKERS } from "./ui";
+import { Field, FilePathPicker, iconProps, MediaPreview, MESH_TRACKERS, MESH_TRACKER_MODES, meshTrackerFromArtifact, meshTrackerModeLabel, type MeshTracker, type MeshTrackerMode } from "./ui";
 import { isStockPortraitPrompt, storedDraftFromApi, type SourceImageMode, type StoredVideoFlowDraft } from "./storage";
 
 type JobInfo = {
@@ -50,6 +52,8 @@ type VideoFlowState = {
   approved: VideoFlowStepKey[];
   steps: Record<VideoFlowStepKey, VideoFlowStepState>;
   complete: boolean;
+  mesh_compare?: { path: string; tracker: string; active: boolean }[];
+  recovered_approvals?: boolean;
 };
 
 function flowStepFromJobCommand(command: string[]): VideoFlowStepKey | null {
@@ -142,6 +146,125 @@ function resolveFlowNodeStatuses(
   return next;
 }
 
+type MeshCompareEntry = { path: string; tracker: MeshTracker; active?: boolean };
+
+function MeshTrackerComparePanel({
+  artifacts,
+  cardId,
+  jobBusy,
+  meshApproved,
+  onApprove,
+  onReject,
+  onError,
+}: {
+  artifacts: MeshCompareEntry[];
+  cardId: string;
+  jobBusy: boolean;
+  meshApproved: boolean;
+  onApprove: (tracker: MeshTracker) => void;
+  onReject?: () => void;
+  onError: (message: string) => void;
+}) {
+  const activeTracker = artifacts.find((entry) => entry.active)?.tracker;
+  const readyToPick = meshApproved ? artifacts.length >= 2 : artifacts.length >= 3;
+  const foregroundVideo = `/cards/${encodeURIComponent(cardId)}/foreground.mp4`;
+
+  return (
+    <Callout.Root color="amber" className="flow-review-panel">
+      <Callout.Text weight="bold">
+        {meshApproved
+          ? readyToPick
+            ? "Compare scratch masks side by side — switch tracker with Use when you find a better fit."
+            : "Generate another tracker above to compare with your current mesh."
+          : readyToPick
+            ? "Three meshes are ready — preview scratch masks and pick the best tracker."
+            : `${artifacts.length}/3 mesh candidates ready — waiting for the rest…`}
+      </Callout.Text>
+      {artifacts.length ? (
+        <Tabs.Root defaultValue={artifacts[0]?.tracker ?? "bootstapir"} mt="3">
+          <Tabs.List>
+            {artifacts.map(({ tracker: meshTracker, active }) => (
+              <Tabs.Trigger key={meshTracker} value={meshTracker}>
+                {meshTracker}
+                {active ? (
+                  <Badge ml="2" size="1" color="green">
+                    active
+                  </Badge>
+                ) : null}
+              </Tabs.Trigger>
+            ))}
+          </Tabs.List>
+          {artifacts.map(({ path, tracker: meshTracker, active }) => (
+            <Tabs.Content key={meshTracker} value={meshTracker}>
+              <Flex direction="column" gap="3" mt="3">
+                <MaskEditor
+                  title={`${meshTracker} mesh`}
+                  meshFile={path.split("/").pop() ?? path}
+                  meshSavePath={path}
+                  meshUrl={`/api/files/preview?path=${encodeURIComponent(path)}`}
+                  videoSrc={foregroundVideo}
+                  onError={onError}
+                />
+                <Flex align="center" gap="2" wrap="wrap">
+                  <Button
+                    disabled={jobBusy || !readyToPick || active}
+                    type="button"
+                    onClick={() => onApprove(meshTracker)}
+                  >
+                    <Check {...iconProps} />
+                    Use {meshTracker}
+                  </Button>
+                  {onReject ? (
+                    <Button
+                      disabled={jobBusy}
+                      type="button"
+                      color="red"
+                      variant="soft"
+                      onClick={onReject}
+                    >
+                      Re-run step
+                    </Button>
+                  ) : null}
+                </Flex>
+                {meshApproved && active ? (
+                  <Text color="gray" size="2">
+                    This is the mesh currently published to <Code>public/mesh/</Code>. Switching
+                    invalidates symbol placement and compress — re-run those steps after you pick a
+                    different tracker.
+                  </Text>
+                ) : null}
+              </Flex>
+            </Tabs.Content>
+          ))}
+        </Tabs.Root>
+      ) : null}
+    </Callout.Root>
+  );
+}
+
+function MeshJobProgress({ logs }: { logs: string[] }) {
+  const tail = logs.slice(-14);
+  return (
+    <Callout.Root color="blue">
+      <Callout.Text weight="bold">Mesh generation running — this can take several minutes.</Callout.Text>
+      <Box
+        asChild
+        mt="3"
+        style={{
+          maxHeight: 220,
+          overflow: "auto",
+          fontFamily: "ui-monospace, monospace",
+          fontSize: 12,
+          lineHeight: 1.45,
+          whiteSpace: "pre-wrap",
+        }}
+      >
+        <pre>{tail.join("\n") || "Starting…"}</pre>
+      </Box>
+    </Callout.Root>
+  );
+}
+
 type RunModeProps = {
   flow: VideoFlowJson;
   jobs: JobInfo[];
@@ -150,11 +273,13 @@ type RunModeProps = {
   image: string;
   backgroundMotionPrompt: string;
   dressPrompt: string;
+  dressReferenceImage: string;
   cardId: string;
   cardLabel: string;
   writeWebm: boolean;
   resolution: string;
-  tracker: (typeof TRACKERS)[number];
+  tracker: MeshTrackerMode;
+  meshTune: MeshTuneSettings;
   sourceMode: SourceImageMode;
   sourcePrompt: string;
   faceImage: string;
@@ -162,10 +287,12 @@ type RunModeProps = {
   onImageChange: (value: string) => void;
   onBackgroundMotionPromptChange: (value: string) => void;
   onDressPromptChange: (value: string) => void;
+  onDressReferenceImageChange: (value: string) => void;
   onCardIdChange: (value: string) => void;
   onCardLabelChange: (value: string) => void;
   onWriteWebmChange: (value: boolean) => void;
-  onTrackerChange: (value: (typeof TRACKERS)[number]) => void;
+  onTrackerChange: (value: MeshTrackerMode) => void;
+  onMeshTuneChange: (value: MeshTuneSettings) => void;
   onResolutionChange: (value: string) => void;
   onSourceModeChange: (value: SourceImageMode) => void;
   onSourcePromptChange: (value: string) => void;
@@ -186,11 +313,13 @@ export function RunMode(props: RunModeProps) {
     image,
     backgroundMotionPrompt,
     dressPrompt,
+    dressReferenceImage,
     cardId,
     cardLabel,
     writeWebm,
     resolution,
     tracker,
+    meshTune,
     sourceMode,
     sourcePrompt,
     faceImage,
@@ -198,10 +327,12 @@ export function RunMode(props: RunModeProps) {
     onImageChange,
     onBackgroundMotionPromptChange,
     onDressPromptChange,
+    onDressReferenceImageChange,
     onCardIdChange,
     onCardLabelChange,
     onWriteWebmChange,
     onTrackerChange,
+    onMeshTuneChange,
     onResolutionChange,
     onSourceModeChange,
     onSourcePromptChange,
@@ -222,6 +353,7 @@ export function RunMode(props: RunModeProps) {
   const [flowBusy, setFlowBusy] = useState(false);
   const [showFaceSwapPrompt, setShowFaceSwapPrompt] = useState(false);
   const [sourceJobHandledId, setSourceJobHandledId] = useState("");
+  const [compareTracker, setCompareTracker] = useState<MeshTracker>("cotracker");
 
   const sourceImageJob = useMemo(() => {
     const scoped = jobs.filter(
@@ -248,6 +380,28 @@ export function RunMode(props: RunModeProps) {
     );
   }, [jobs, cardId]);
 
+  const meshCandidateJob = useMemo(() => {
+    const scoped = jobs.filter(
+      (job) => job.kind === "video-flow-mesh-candidate" && job.command[2] === cardId.trim(),
+    );
+    return (
+      scoped.find((job) => job.status === "running" || job.status === "queued") ??
+      scoped[0] ??
+      null
+    );
+  }, [jobs, cardId]);
+
+  const meshCandidateRunning =
+    meshCandidateJob?.status === "running" || meshCandidateJob?.status === "queued";
+
+  const meshCompareCount = flowState?.mesh_compare?.length ?? 0;
+  const meshStepApproved = flowState?.steps.mesh?.status === "approved";
+  const meshComparePin =
+    meshCandidateRunning || (meshStepApproved && meshCompareCount >= 2);
+
+  const [meshFocusOverride, setMeshFocusOverride] = useState(false);
+  const shouldPinMesh = meshComparePin && !meshFocusOverride;
+
   const runningStep = useMemo(() => {
     if (!stepJob || stepJob.status === "queued" || stepJob.status === "running") {
       return flowStepFromJobCommand(stepJob?.command ?? []);
@@ -261,6 +415,9 @@ export function RunMode(props: RunModeProps) {
   }, [runningStep, flowState]);
 
   const activeRunningStep = staleRunningStep ? null : runningStep;
+
+  const effectiveRunningStep: VideoFlowStepKey | null =
+    activeRunningStep ?? (meshCandidateRunning ? "mesh" : null);
 
   const failedStep = useMemo(() => {
     if (stepJob?.status === "failed" || stepJob?.status === "cancelled") {
@@ -292,11 +449,35 @@ export function RunMode(props: RunModeProps) {
     if (!stepJob) return;
     if (stepJob.status === "succeeded" || stepJob.status === "failed" || stepJob.status === "cancelled") {
       void refreshFlowState();
-      if (stepJob.status === "succeeded" && flowStepFromJobCommand(stepJob.command) === "card") {
+      const finishedStep = flowStepFromJobCommand(stepJob.command);
+      if (stepJob.status === "succeeded" && (finishedStep === "card" || finishedStep === "mesh")) {
         void onRefreshAssets();
       }
     }
   }, [stepJob?.id, stepJob?.status]);
+
+  useEffect(() => {
+    if (stepJob) return;
+    if (!meshCandidateJob) return;
+    if (
+      meshCandidateJob.status === "succeeded" ||
+      meshCandidateJob.status === "failed" ||
+      meshCandidateJob.status === "cancelled"
+    ) {
+      void refreshFlowState();
+      if (meshCandidateJob.status === "succeeded") {
+        void onRefreshAssets();
+      }
+    }
+  }, [meshCandidateJob?.id, meshCandidateJob?.status, stepJob?.id]);
+
+  useEffect(() => {
+    if (activeRunningStep !== "mesh" && !meshCandidateRunning) return;
+    const timer = window.setInterval(() => {
+      void refreshFlowState();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [activeRunningStep, meshCandidateRunning, cardId]);
 
   useEffect(() => {
     if (!sourceImageJob || sourceImageJob.status !== "succeeded") return;
@@ -317,18 +498,26 @@ export function RunMode(props: RunModeProps) {
     })();
   }, [cardId, onApplyDraft, onError, sourceImageJob, sourceJobHandledId]);
 
-  const focusStep = useMemo(
-    () => pipelineFocusStep(flow, flowState, activeRunningStep, failedStep),
-    [flow, flowState, activeRunningStep, failedStep],
-  );
+  useEffect(() => {
+    if (meshCandidateRunning) setMeshFocusOverride(false);
+  }, [meshCandidateRunning]);
+
+  const focusStep = useMemo(() => {
+    if (shouldPinMesh) return "mesh";
+    return pipelineFocusStep(flow, flowState, effectiveRunningStep, failedStep);
+  }, [flow, flowState, effectiveRunningStep, failedStep, shouldPinMesh]);
 
   useEffect(() => {
-    if (activeRunningStep && stepToNodeMap[activeRunningStep]) {
-      setActiveNode(stepToNodeMap[activeRunningStep]!);
+    if (effectiveRunningStep && stepToNodeMap[effectiveRunningStep]) {
+      setActiveNode(stepToNodeMap[effectiveRunningStep]!);
       return;
     }
     if (failedStep && stepToNodeMap[failedStep]) {
       setActiveNode(stepToNodeMap[failedStep]!);
+      return;
+    }
+    if (shouldPinMesh && stepToNodeMap.mesh) {
+      setActiveNode(stepToNodeMap.mesh);
       return;
     }
     if (!focusStep || !stepToNodeMap[focusStep]) return;
@@ -336,7 +525,7 @@ export function RunMode(props: RunModeProps) {
     if (status === "review" || status === "ready") {
       setActiveNode(stepToNodeMap[focusStep]!);
     }
-  }, [activeRunningStep, failedStep, focusStep, flowState, stepToNodeMap]);
+  }, [effectiveRunningStep, failedStep, focusStep, flowState, stepToNodeMap, shouldPinMesh]);
 
   useEffect(() => {
     if (!staleRunningStep || !stepJob) return;
@@ -357,21 +546,22 @@ export function RunMode(props: RunModeProps) {
         flowState,
         Boolean(image),
         cardId.trim(),
-        activeRunningStep,
+        effectiveRunningStep,
         failedStep,
       ),
-    [flow, flowState, image, cardId, activeRunningStep, failedStep],
+    [flow, flowState, image, cardId, effectiveRunningStep, failedStep],
   );
 
   const activeMeta = flow.nodes.find((node) => node.id === activeNode) ?? flow.nodes[0];
   const activeStep = nodeToStepMap[activeNode];
   const jobBusy =
     ((stepJob?.status === "running" || stepJob?.status === "queued") && !staleRunningStep) ||
+    meshCandidateRunning ||
     flowBusy;
 
   const actionStep: VideoFlowStepKey | null = activeStep ?? focusStep;
   const actionStatus =
-    actionStep && activeRunningStep === actionStep
+    actionStep && effectiveRunningStep === actionStep
       ? "running"
       : actionStep && failedStep === actionStep
         ? "failed"
@@ -383,17 +573,51 @@ export function RunMode(props: RunModeProps) {
   const actionNeedsGrok = actionStep === "background" || actionStep === "dress";
   const actionIsInteractive = actionStep === "symbols";
 
+  const meshCompareArtifacts = useMemo((): MeshCompareEntry[] => {
+    if (flowState?.mesh_compare?.length) {
+      return flowState.mesh_compare.flatMap((entry) => {
+        const meshTracker = entry.tracker as MeshTracker;
+        if (!MESH_TRACKERS.includes(meshTracker)) return [];
+        return [{ path: entry.path, tracker: meshTracker, active: entry.active }];
+      });
+    }
+    const artifacts = flowState?.steps.mesh?.artifacts ?? [];
+    return artifacts.flatMap((path) => {
+      const meshTracker = meshTrackerFromArtifact(path);
+      return meshTracker ? [{ path, tracker: meshTracker }] : [];
+    });
+  }, [flowState?.mesh_compare, flowState?.steps.mesh?.artifacts]);
+
+  const meshCompareReady = meshCompareArtifacts.length >= 1;
+  const existingCompareTrackers = useMemo(
+    () => new Set(meshCompareArtifacts.map((entry) => entry.tracker)),
+    [meshCompareArtifacts],
+  );
+  const compareTrackerExists = existingCompareTrackers.has(compareTracker);
+
+  useEffect(() => {
+    if (MESH_TRACKERS.includes(compareTracker)) return;
+    setCompareTracker(MESH_TRACKERS[0]!);
+  }, [compareTracker]);
+
+  const meshJobRunning =
+    (activeRunningStep === "mesh" &&
+      (stepJob?.status === "running" || stepJob?.status === "queued")) ||
+    meshCandidateRunning;
+
   const stepPayload = {
     image,
     background_motion_prompt: backgroundMotionPrompt,
     foreground_motion_prompt: backgroundMotionPrompt,
     dress_prompt: dressPrompt,
+    dress_reference_image: dressReferenceImage,
     card_id: cardId.trim(),
     card_label: cardLabel.trim(),
     resolution,
     enhance_dress_prompt: enhancePrompt,
     tracker,
     write_webm: writeWebm,
+    mesh_tune: meshTuneToApi(meshTune),
     source_mode: sourceMode,
     source_prompt: sourcePrompt,
     face_image: faceImage,
@@ -472,14 +696,47 @@ export function RunMode(props: RunModeProps) {
     }
   }
 
-  async function approveStep(step: VideoFlowStepKey) {
+  async function generateMeshCandidate() {
+    const id = cardId.trim();
+    if (!id) return;
+    setMeshFocusOverride(false);
+    const meshNode = stepToNodeMap.mesh;
+    if (meshNode) setActiveNode(meshNode);
+    setFlowBusy(true);
+    onError("");
+    try {
+      await api<JobInfo>("/api/jobs/video-flow/mesh-candidate", {
+        method: "POST",
+        body: JSON.stringify({
+          card_id: id,
+          card_label: cardLabel.trim(),
+          tracker: compareTracker,
+          mesh_tune: meshTuneToApi(meshTune),
+          force: true,
+        }),
+      });
+      await onRefreshJobs();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setFlowBusy(false);
+    }
+  }
+
+  async function approveStep(step: VideoFlowStepKey, meshTracker?: MeshTracker) {
     if (!cardId.trim()) return;
     setFlowBusy(true);
     onError("");
     try {
       const data = await api<VideoFlowState>(
         `/api/video-flow/${encodeURIComponent(cardId.trim())}/approve`,
-        { method: "POST", body: JSON.stringify({ step }) },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            step,
+            ...(meshTracker ? { mesh_tracker: meshTracker } : {}),
+          }),
+        },
       );
       setFlowState(data);
     } catch (caught) {
@@ -523,10 +780,13 @@ export function RunMode(props: RunModeProps) {
 
   function selectStep(step: VideoFlowStepKey | "source") {
     if (step === "source") {
+      setMeshFocusOverride(true);
       setActiveNode("source");
       return;
     }
     if (flowState?.steps[step]?.status === "locked") return;
+    if (step !== "mesh" && meshComparePin) setMeshFocusOverride(true);
+    else if (step === "mesh") setMeshFocusOverride(false);
     const nodeId = stepToNodeMap[step];
     if (nodeId) setActiveNode(nodeId);
   }
@@ -624,6 +884,15 @@ export function RunMode(props: RunModeProps) {
                   </Button>
                 </Flex>
               </Flex>
+            </Callout.Root>
+          ) : null}
+
+          {flowState?.recovered_approvals ? (
+            <Callout.Root color="green" mb="4">
+              <Callout.Text>
+                Your bikini clip, dress edit, and card were still on disk — pipeline approvals
+                were restored automatically. You only need to retry the step that failed.
+              </Callout.Text>
             </Callout.Root>
           ) : null}
 
@@ -875,6 +1144,18 @@ export function RunMode(props: RunModeProps) {
                 onChange={(event) => onDressPromptChange(event.currentTarget.value)}
               />
             </Field>
+            <Field label="Dress reference image (optional — guides the outfit shape/style)">
+              <FilePathPicker
+                accept="image/*"
+                placeholder="Pick a dress photo or paste a path/URL"
+                preview="image"
+                previewLabel="Dress reference"
+                previewSize="compact"
+                value={dressReferenceImage}
+                onChange={onDressReferenceImageChange}
+                onError={onError}
+              />
+            </Field>
             <Text color="gray" size="2">
               Grok edits the approved background clip in place — same beach, same frames; only
               the outfit changes. Prompt enhancement is{" "}
@@ -908,34 +1189,128 @@ export function RunMode(props: RunModeProps) {
         {activeNode === "mesh" ? (
           <Flex direction="column" gap="4">
             <Field label="Mesh tracker">
-              <Select.Root value={tracker} onValueChange={(value) => onTrackerChange(value as typeof tracker)}>
+              <Select.Root value={tracker} onValueChange={(value) => onTrackerChange(value as MeshTrackerMode)}>
                 <Select.Trigger />
                 <Select.Content>
-                  {TRACKERS.map((entry) => (
+                  {MESH_TRACKER_MODES.map((entry) => (
                     <Select.Item key={entry} value={entry}>
-                      {entry}
+                      {meshTrackerModeLabel(entry)}
                     </Select.Item>
                   ))}
                 </Select.Content>
               </Select.Root>
             </Field>
 
-            {flowState?.steps.mesh?.artifacts.length ? (
+            <Separator size="4" />
+            <MeshTunePanel value={meshTune} onChange={onMeshTuneChange} />
+
+            <Callout.Root color="blue">
+              <Callout.Text size="2">
+                <strong>Two things you can change:</strong> (1) Tuning sliders → then{" "}
+                <strong>Remake step</strong> or <strong>Regenerate</strong> below. (2) Scratch mask →{" "}
+                <strong>Erase</strong> brush on bad zones, then <strong>Save mask</strong>. You cannot drag
+                mesh points — folded triangles are tracking limits on this clip.
+              </Callout.Text>
+            </Callout.Root>
+
+            {meshJobRunning ? (
+              <MeshJobProgress logs={(meshCandidateRunning ? meshCandidateJob : stepJob)?.logs ?? []} />
+            ) : null}
+
+            {meshCompareReady && flowState?.steps.mesh?.status === "review" ? (
+              <MeshTrackerComparePanel
+                artifacts={meshCompareArtifacts}
+                cardId={cardId.trim()}
+                jobBusy={jobBusy}
+                meshApproved={false}
+                onApprove={(meshTracker) => void approveStep("mesh", meshTracker)}
+                onReject={() => void rejectStep("mesh")}
+                onError={onError}
+              />
+            ) : null}
+
+            {meshStepApproved ? (
               <>
+                {meshCompareArtifacts.length < 2 ? (
+                  <>
+                    <Separator size="4" />
+                    <MaskEditor
+                      title="Scratch mask"
+                      meshFile={`${cardId.trim()}.json`}
+                      meshUrl={`/mesh/${encodeURIComponent(cardId.trim())}.json`}
+                      videoSrc={`/cards/${encodeURIComponent(cardId.trim())}/foreground.mp4`}
+                      onError={onError}
+                    />
+                  </>
+                ) : null}
+
                 <Separator size="4" />
-                <MaskEditor
-                  title="Scratch mask"
-                  meshFile={`${cardId.trim()}.json`}
-                  meshUrl={`/mesh/${encodeURIComponent(cardId.trim())}.json`}
-                  videoSrc={`/cards/${encodeURIComponent(cardId.trim())}/foreground.mp4`}
-                  onError={onError}
-                />
+                <Field label="Regenerate a tracker (uses tuning above)">
+                  <Flex align="center" gap="3" wrap="wrap">
+                    <Select.Root
+                      value={compareTracker}
+                      onValueChange={(value) => setCompareTracker(value as MeshTracker)}
+                      disabled={meshCandidateRunning}
+                    >
+                      <Select.Trigger />
+                      <Select.Content>
+                        {MESH_TRACKERS.map((entry) => (
+                          <Select.Item key={entry} value={entry}>
+                            {entry}
+                            {existingCompareTrackers.has(entry) ? " (exists)" : ""}
+                          </Select.Item>
+                        ))}
+                      </Select.Content>
+                    </Select.Root>
+                    <Button
+                      disabled={jobBusy || meshCandidateRunning}
+                      type="button"
+                      onClick={() => void generateMeshCandidate()}
+                    >
+                      <Play {...iconProps} />
+                      {compareTrackerExists ? "Regenerate" : "Generate compare"}
+                    </Button>
+                  </Flex>
+                </Field>
+                <Text color="gray" size="2">
+                  Pick a tracker and run — overwrites that candidate with your current tuning. Use the
+                  compare tabs below to preview, <strong>Erase</strong> bad scratch zones, save, then{" "}
+                  <strong>Use …</strong> to publish.
+                </Text>
+
+                {meshCompareArtifacts.length >= 2 ? (
+                  <MeshTrackerComparePanel
+                    artifacts={meshCompareArtifacts}
+                    cardId={cardId.trim()}
+                    jobBusy={jobBusy}
+                    meshApproved
+                    onApprove={(meshTracker) => void approveStep("mesh", meshTracker)}
+                    onError={onError}
+                  />
+                ) : null}
               </>
-            ) : (
-              <Text color="gray" size="2">
-                Run this step to generate the mesh, then paint which cells are scratchable below.
-              </Text>
-            )}
+            ) : null}
+
+            {!meshJobRunning &&
+            !meshCompareReady &&
+            flowState?.steps.mesh?.status !== "approved" ? (
+              <Callout.Root color="blue">
+                <Callout.Text>
+                  Choose <strong>All (compare &amp; pick)</strong>, then generate the mesh — it
+                  usually takes several minutes and logs will appear here.
+                </Callout.Text>
+                <Flex mt="3">
+                  <Button
+                    disabled={!canRunActionStep}
+                    type="button"
+                    onClick={() => void runStep("mesh", false)}
+                  >
+                    <Play {...iconProps} />
+                    Generate mesh
+                  </Button>
+                </Flex>
+              </Callout.Root>
+            ) : null}
           </Flex>
         ) : null}
 
@@ -976,7 +1351,9 @@ export function RunMode(props: RunModeProps) {
               {flowState.steps[actionStep].label}
               {actionStatus === "review" && reviewSteps.has(actionStep)
                 ? " — watch the clip, then continue"
-                : actionStatus === "ready"
+                : actionStatus === "review" && actionStep === "mesh"
+                  ? " — compare trackers and pick one"
+                  : actionStatus === "ready"
                   ? actionIsInteractive
                     ? " — place points on the mesh, then save"
                     : " — ready to run"

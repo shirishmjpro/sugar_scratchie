@@ -49,6 +49,8 @@ function coverFit(videoWidth: number, videoHeight: number, width: number, height
 
 export type MaskEditorProps = {
   meshFile: string;
+  /** Relative repo path for save API (defaults to meshFile in public/mesh/). */
+  meshSavePath?: string;
   videoSrc: string;
   meshUrl?: string;
   onError: (message: string) => void;
@@ -58,6 +60,7 @@ export type MaskEditorProps = {
 
 export function MaskEditor({
   meshFile,
+  meshSavePath,
   videoSrc,
   meshUrl,
   onError,
@@ -307,20 +310,23 @@ export function MaskEditor({
 
   async function save() {
     const garment = garmentRef.current;
-    if (!garment || !meshFile) return;
+    const savePath = meshSavePath ?? meshFile;
+    if (!garment || !savePath) return;
     setSaving(true);
     setSaveMsg("");
     onError("");
     try {
       const result = await api<{ ok: boolean; sum: number; total: number }>("/api/mesh/garment", {
         method: "POST",
-        body: JSON.stringify({ file: meshFile, garment: Array.from(garment) }),
+        body: JSON.stringify({ file: savePath, garment: Array.from(garment) }),
       });
       setDirty(false);
-      setSaveMsg(`Saved ${result.sum}/${result.total} cells. Reload the mesh in the prototype to see it.`);
+      setSaveMsg(`Saved ${result.sum}/${result.total} scratchable cells.`);
       onSaved?.();
     } catch (caught) {
-      onError(caught instanceof Error ? caught.message : String(caught));
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setSaveMsg("");
+      onError(message);
     } finally {
       setSaving(false);
     }
@@ -359,9 +365,9 @@ export function MaskEditor({
           <Badge color={dirty ? "orange" : "gray"}>{dirty ? "Unsaved" : "Saved"}</Badge>
         </Flex>
         <Text color="gray" size="2">
-          Paint the cells that should be scratchable. Scrub to a frame (e.g. the arm raised, or to expose the neck),
-          then drag on the figure to add or erase. Save writes the mask back into the mesh; hit "Reload mesh" in the
-          prototype to pick it up.
+          You cannot move mesh dots — only choose which cells are scratchable. Select <strong>Erase</strong>,
+          scrub to a bad frame (e.g. folded waist), drag over the green zone to turn it off, then{" "}
+          <strong>Save mask</strong>. Tuning sliders only apply after you regenerate the mesh.
         </Text>
 
         <Field label="Brush">

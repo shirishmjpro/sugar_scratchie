@@ -29,6 +29,7 @@ from backend.services.mesh_symbols import (
     symbol_points_complete,
 )
 from backend.services.mesh_tracking import generate_mesh
+from backend.services.mesh_tune import build_mesh_tracking_env, mesh_tune_from_dict
 from backend.services.video_prep import (
     align_clip_to_reference,
     backup_video,
@@ -42,6 +43,14 @@ MESH_DIR = ROOT / "public" / "mesh"
 WORK_DIR = ROOT / ".tmp" / "video-flow"
 
 VideoFlowStep = Literal["background", "dress", "card", "mesh", "symbols", "compress"]
+MeshTracker = Literal["bootstapir", "cotracker", "blend"]
+MeshTrackerChoice = Literal["bootstapir", "cotracker", "blend", "all"]
+
+MESH_TRACKERS: tuple[MeshTracker, MeshTracker, MeshTracker] = (
+    "bootstapir",
+    "cotracker",
+    "blend",
+)
 
 # Bikini background first (master motion), dress edit from it, then publish + track, compress last.
 STEP_ORDER: list[VideoFlowStep] = [
@@ -78,6 +87,84 @@ def work_dir(card_id: str) -> Path:
     work = WORK_DIR / card_id
     work.mkdir(parents=True, exist_ok=True)
     return work
+
+
+def mesh_candidate_path(work: Path, tracker: MeshTracker) -> Path:
+    return work / f"mesh-{tracker}.json"
+
+
+def read_mesh_tracker(mesh_path: Path) -> MeshTracker | None:
+    if not mesh_path.exists():
+        return None
+    try:
+        data = json.loads(mesh_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    tracker = data.get("tracker")
+    if tracker in MESH_TRACKERS:
+        return tracker
+    return None
+
+
+def ensure_active_mesh_snapshotted(work: Path, card_id: str) -> MeshTracker | None:
+    """Copy the published mesh into work/mesh-<tracker>.json so it can be compared."""
+    canonical = MESH_DIR / f"{card_id}.json"
+    if not canonical.exists():
+        return None
+    tracker = read_mesh_tracker(canonical)
+    if tracker not in MESH_TRACKERS:
+        return None
+    dest = mesh_candidate_path(work, tracker)
+    if not dest.exists():
+        shutil.copy2(canonical, dest)
+    return tracker
+
+
+def mesh_candidates_ready(work: Path) -> bool:
+    return all(mesh_candidate_path(work, tracker).exists() for tracker in MESH_TRACKERS)
+
+
+def publish_mesh_choice(work: Path, card_id: str, tracker: MeshTracker) -> Path:
+    src = mesh_candidate_path(work, tracker)
+    if not src.exists():
+        raise RuntimeError(f"Mesh candidate '{tracker}' not found — regenerate the mesh step.")
+    dst = MESH_DIR / f"{card_id}.json"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    print(f"Published mesh: {tracker} -> {dst.name}")
+    return dst
+
+
+def mesh_artifact_paths(work: Path, card_id: str) -> list[str]:
+    candidates = [
+        str(mesh_candidate_path(work, tracker).relative_to(ROOT))
+        for tracker in MESH_TRACKERS
+        if mesh_candidate_path(work, tracker).exists()
+    ]
+    if candidates:
+        return candidates
+    mesh_out = MESH_DIR / f"{card_id}.json"
+    if mesh_out.exists():
+        return [str(mesh_out.relative_to(ROOT))]
+    return []
+
+
+def mesh_compare_entries(work: Path, card_id: str) -> list[dict[str, str | bool]]:
+    ensure_active_mesh_snapshotted(work, card_id)
+    active = read_mesh_tracker(MESH_DIR / f"{card_id}.json")
+    entries: list[dict[str, str | bool]] = []
+    for tracker in MESH_TRACKERS:
+        candidate = mesh_candidate_path(work, tracker)
+        if not candidate.exists():
+            continue
+        entries.append(
+            {
+                "path": str(candidate.relative_to(ROOT)),
+                "tracker": tracker,
+                "active": tracker == active,
+            }
+        )
+    return entries
 
 
 def state_path(work: Path) -> Path:
@@ -140,7 +227,7 @@ def artifact_paths(work: Path, card_id: str, state: dict | None = None) -> dict[
             str(card_bg.relative_to(ROOT)) if output_video_ready(card_bg) else "",
             str(card_fg.relative_to(ROOT)) if output_video_ready(card_fg) else "",
         ],
-        "mesh": [str(mesh_out.relative_to(ROOT)) if mesh_out.exists() else ""],
+        "mesh": mesh_artifact_paths(work, card_id),
         "symbols": [
             str(mesh_out.relative_to(ROOT))
             if mesh_out.exists() and symbol_points_complete(mesh_out)
@@ -159,6 +246,11 @@ def preview_paths(work: Path, card_id: str, state: dict | None = None) -> dict[V
 
 
 def step_artifact_ready(work: Path, card_id: str, step: VideoFlowStep, state: dict | None = None) -> bool:
+    if step == "mesh":
+        if mesh_candidates_ready(work):
+            return True
+        mesh_out = MESH_DIR / f"{card_id}.json"
+        return mesh_out.exists()
     if step == "symbols":
         mesh_out = MESH_DIR / f"{card_id}.json"
         return mesh_out.exists() and symbol_points_complete(mesh_out)
@@ -199,6 +291,13 @@ def validate_step_enqueue(card_id: str, step: VideoFlowStep, *, force: bool = Fa
         raise RuntimeError(
             "Result already exists — approve or reject it in the dashboard before re-running."
         )
+    if (
+        step == "mesh"
+        and mesh_candidates_ready(work)
+        and not force
+        and step not in state["approved"]
+    ):
+        raise RuntimeError("Pick a mesh tracker in the dashboard before re-running this step.")
 
 
 def previous_step(step: VideoFlowStep) -> VideoFlowStep | None:
@@ -246,6 +345,8 @@ def clear_step_outputs(work: Path, card_id: str, step: VideoFlowStep) -> None:
             card_dir.rmdir()
 
     if step == "mesh":
+        for tracker in MESH_TRACKERS:
+            mesh_candidate_path(work, tracker).unlink(missing_ok=True)
         mesh_out = MESH_DIR / f"{card_id}.json"
         mesh_out.unlink(missing_ok=True)
 
@@ -259,15 +360,52 @@ def clear_step_outputs(work: Path, card_id: str, step: VideoFlowStep) -> None:
                 sidecar.unlink(missing_ok=True)
 
 
-def approve_flow_step(card_id: str, step: VideoFlowStep) -> dict:
+def _invalidate_after_mesh_switch(state: dict) -> None:
+    for step in ("symbols", "compress"):
+        if step in state["approved"]:
+            state["approved"].remove(step)
+
+
+def approve_flow_step(
+    card_id: str,
+    step: VideoFlowStep,
+    *,
+    mesh_tracker: MeshTracker | None = None,
+) -> dict:
     work = work_dir(card_id)
     state = read_state(work)
+    if step == "mesh" and mesh_tracker:
+        if mesh_tracker not in MESH_TRACKERS:
+            raise RuntimeError(
+                "Pick bootstapir, cotracker, or blend before approving the mesh step."
+            )
+        if not mesh_candidate_path(work, mesh_tracker).exists():
+            raise RuntimeError(
+                f"Mesh candidate '{mesh_tracker}' not found — generate it for comparison first."
+            )
+        switching = step in state["approved"]
+        publish_mesh_choice(work, card_id, mesh_tracker)
+        if switching:
+            mesh_out = MESH_DIR / f"{card_id}.json"
+            if mesh_out.exists():
+                clear_symbol_points(mesh_out)
+            _invalidate_after_mesh_switch(state)
+        if step not in state["approved"]:
+            state["approved"].append(step)
+        write_state(work, state)
+        return flow_state(card_id)
     if not step_artifact_ready(work, card_id, step, state):
         raise RuntimeError(f"Step '{step}' has no result to approve yet.")
     prev = STEP_DEPS[step]
     if prev and not step_unlocked(state, step):
         missing = next(dep for dep in prev if dep not in state["approved"])
         raise RuntimeError(f"Approve '{STEP_LABELS[missing]}' before '{STEP_LABELS[step]}'.")
+    if step == "mesh" and mesh_candidates_ready(work):
+        if mesh_tracker not in MESH_TRACKERS:
+            raise RuntimeError(
+                "Pick bootstapir, cotracker, or blend before approving the mesh step."
+            )
+        publish_mesh_choice(work, card_id, mesh_tracker)
     if step not in state["approved"]:
         state["approved"].append(step)
         if step == "background" and "dress" not in state["approved"]:
@@ -296,6 +434,8 @@ def step_status(work: Path, card_id: str, step: VideoFlowStep, state: dict) -> s
         if not step_artifact_ready(work, card_id, step, state):
             return "ready"
         return "approved"
+    if step == "mesh" and mesh_candidates_ready(work):
+        return "review"
     if step in REVIEW_STEPS and step_artifact_ready(work, card_id, step, state):
         return "review"
     return "ready"
@@ -393,9 +533,39 @@ def _ensure_card_published(
     return card_dir
 
 
+def recover_stale_approvals(work: Path, card_id: str, state: dict) -> bool:
+    """Restore approvals when Grok clips and card still exist but state.json was cleared."""
+    if state["approved"]:
+        return False
+    paths = _paths(work)
+    card_dir = CARDS_DIR / card_id
+    card_bg = card_dir / "background.mp4"
+    card_fg = card_dir / "foreground.mp4"
+    if not (
+        output_video_ready(paths["background_raw"])
+        and output_video_ready(paths["foreground_dressed"])
+        and card_dir.exists()
+        and output_video_ready(card_bg)
+        and output_video_ready(card_fg)
+    ):
+        return False
+    restored: list[VideoFlowStep] = ["background", "dress", "card"]
+    mesh_out = MESH_DIR / f"{card_id}.json"
+    if mesh_out.exists():
+        restored.append("mesh")
+    if mesh_out.exists() and symbol_points_complete(mesh_out):
+        restored.append("symbols")
+    state["approved"] = restored
+    print(f"Recovered pipeline approvals from existing artifacts: {', '.join(restored)}")
+    return True
+
+
 def flow_state(card_id: str) -> dict:
     work = work_dir(card_id)
     state = read_state(work)
+    recovered = recover_stale_approvals(work, card_id, state)
+    if "mesh" in state["approved"]:
+        ensure_active_mesh_snapshotted(work, card_id)
     write_state(work, state)
     previews = preview_paths(work, card_id, state)
     steps = {
@@ -411,6 +581,8 @@ def flow_state(card_id: str) -> dict:
         "approved": list(state["approved"]),
         "steps": steps,
         "complete": step_status(work, card_id, "compress", state) == "approved",
+        "mesh_compare": mesh_compare_entries(work, card_id),
+        "recovered_approvals": recovered,
     }
 
 
@@ -438,10 +610,12 @@ def save_flow_draft(
     enhance_dress_prompt: bool,
     tracker: str,
     write_webm: bool,
+    dress_reference_image: str = "",
     source_mode: str = "upload",
     source_prompt: str = "",
     face_image: str = "",
     base_image: str = "",
+    mesh_tune: dict | None = None,
 ) -> dict:
     work = work_dir(card_id)
     draft = {
@@ -449,6 +623,7 @@ def save_flow_draft(
         "background_motion_prompt": background_motion_prompt,
         "foreground_motion_prompt": foreground_motion_prompt,
         "dress_prompt": dress_prompt,
+        "dress_reference_image": dress_reference_image,
         "card_id": card_id,
         "card_label": card_label,
         "model": model,
@@ -463,6 +638,7 @@ def save_flow_draft(
         "source_prompt": source_prompt,
         "face_image": face_image,
         "base_image": base_image,
+        "mesh_tune": mesh_tune_from_dict(mesh_tune).model_dump(),
         "updated_at": time.time(),
     }
     draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
@@ -611,6 +787,43 @@ def _paths(work: Path) -> dict[str, Path]:
     }
 
 
+def run_mesh_candidate_generation(
+    *,
+    card_id: str,
+    card_label: str,
+    tracker: MeshTracker,
+    mesh_tune: dict | None = None,
+    force: bool = False,
+) -> None:
+    """Generate one mesh candidate for side-by-side comparison (does not change approvals)."""
+    if tracker not in MESH_TRACKERS:
+        raise RuntimeError(f"Unknown mesh tracker: {tracker}")
+    tune = mesh_tune_from_dict(mesh_tune)
+    work = work_dir(card_id)
+    ensure_active_mesh_snapshotted(work, card_id)
+    candidate = mesh_candidate_path(work, tracker)
+    if candidate.exists():
+        if not force:
+            print(f"Mesh candidate already exists: {candidate.name} — use force to regenerate.")
+            return
+        candidate.unlink()
+        print(f"Replacing existing candidate: {candidate.name}")
+    paths = _paths(work)
+    _ensure_card_published(work=work, card_id=card_id, card_label=card_label, paths=paths)
+    card_dir = CARDS_DIR / card_id
+    foreground = str((card_dir / "foreground.mp4").relative_to(ROOT))
+    print(f"=== Mesh compare candidate: {tracker} ===")
+    generate_mesh(
+        build_mesh_tracking_env(
+            input_video=foreground,
+            output_json=str(candidate.relative_to(ROOT)),
+            tracker=tracker,
+            tune=tune,
+        )
+    )
+    print(f"Candidate written: {candidate.name}")
+
+
 def run_video_flow_step(
     *,
     step: VideoFlowStep,
@@ -628,9 +841,12 @@ def run_video_flow_step(
     enhance_dress_prompt: bool = True,
     tracker: str = "bootstapir",
     write_webm: bool = True,
+    dress_reference_image: str = "",
+    mesh_tune: dict | None = None,
     force: bool = False,
 ) -> None:
     del foreground_motion_prompt  # kept in draft/API for backward compatibility
+    tune = mesh_tune_from_dict(mesh_tune)
     work = work_dir(card_id)
     state = read_state(work)
     paths = _paths(work)
@@ -652,6 +868,8 @@ def run_video_flow_step(
         enhance_dress_prompt=enhance_dress_prompt,
         tracker=tracker,
         write_webm=write_webm,
+        dress_reference_image=dress_reference_image,
+        mesh_tune=tune.model_dump(),
     )
 
     # Re-read state in case approvals changed while the job was queued.
@@ -667,6 +885,15 @@ def run_video_flow_step(
 
     if step_artifact_ready(work, card_id, step, state) and not force and step in REVIEW_STEPS:
         print(f"Result already exists — open the dashboard to approve or reject it.")
+        return
+
+    if (
+        step == "mesh"
+        and mesh_candidates_ready(work)
+        and not force
+        and step not in state["approved"]
+    ):
+        print("Mesh candidates ready — pick one in the dashboard.")
         return
 
     if force:
@@ -687,6 +914,9 @@ def run_video_flow_step(
         if not output_video_ready(paths["background_raw"]):
             raise RuntimeError("Background clip missing — run the bikini step first.")
         print("Dress edit uses the approved background clip as input (same motion and scenery).")
+        reference = (dress_reference_image or "").strip()
+        if reference:
+            print(f"Using dress reference image: {reference}")
         edit_video(
             video=paths["background_raw"],
             prompt=dress_prompt,
@@ -697,6 +927,7 @@ def run_video_flow_step(
             enhance=enhance_dress_prompt,
             prepare_compatible=True,
             enhance_system=DRESS_ENHANCE_SYSTEM,
+            reference_image=reference or None,
         )
         _sync_foreground_to_background(work, paths)
     elif step == "card":
@@ -715,19 +946,35 @@ def run_video_flow_step(
             background=str((card_dir / "background.mp4").relative_to(ROOT)),
             foreground=str((card_dir / "foreground.mp4").relative_to(ROOT)),
         )
-        mesh_out = MESH_DIR / f"{card.id}.json"
-        env = {
-            "PYTORCH_ENABLE_MPS_FALLBACK": "1",
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            "DEVICE": os.environ.get("DEVICE", "cpu"),
-            "INPUT_VIDEO": card.foreground,
-            "OUTPUT_JSON": str(mesh_out.relative_to(ROOT)),
-            "TRACKER": tracker,
-            "SILHOUETTE_SOURCE": "person",
-        }
-        generate_mesh(env)
-        print(f"Mesh written: {mesh_out.name}")
+        base_env = build_mesh_tracking_env(
+            input_video=card.foreground,
+            output_json="",
+            tracker=tracker if tracker != "all" else "blend",
+            tune=tune,
+        )
+        if tracker == "all":
+            for mesh_tracker in MESH_TRACKERS:
+                candidate = mesh_candidate_path(work, mesh_tracker)
+                print(f"--- Mesh candidate: {mesh_tracker} ---")
+                generate_mesh(
+                    {
+                        **base_env,
+                        "OUTPUT_JSON": str(candidate.relative_to(ROOT)),
+                        "TRACKER": mesh_tracker,
+                    }
+                )
+                print(f"Candidate written: {candidate.name}")
+            print("All mesh candidates ready — pick bootstapir, cotracker, or blend in the dashboard.")
+        else:
+            mesh_out = MESH_DIR / f"{card.id}.json"
+            generate_mesh(
+                {
+                    **base_env,
+                    "OUTPUT_JSON": str(mesh_out.relative_to(ROOT)),
+                    "TRACKER": tracker,
+                }
+            )
+            print(f"Mesh written: {mesh_out.name}")
     elif step == "symbols":
         mesh_out = MESH_DIR / f"{card_id}.json"
         if not mesh_out.exists():
@@ -773,6 +1020,8 @@ def run_video_flow_step(
 
     if step in REVIEW_STEPS:
         print(f"Step complete: {step} — preview the clip in the dashboard, then continue.")
+    elif step == "mesh" and tracker == "all":
+        print(f"Step complete: {step} — pick a mesh tracker in the dashboard.")
     else:
         approve_flow_step(card_id, step)
         print(f"Step complete: {step} — ready for next step.")

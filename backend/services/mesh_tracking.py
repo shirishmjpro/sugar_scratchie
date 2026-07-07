@@ -11,6 +11,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "generate-mesh-tracking.py"
 
 
+def default_mesh_device() -> str:
+    """Match CLI mesh defaults: explicit DEVICE env, else Apple MPS, else CPU."""
+    explicit = os.environ.get("DEVICE")
+    if explicit:
+        return explicit
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
+
+
 def generate_mesh(env: dict[str, str]) -> None:
     """Run the existing mesh tracker in-process under backend job control."""
 

@@ -50,8 +50,9 @@ export type VideoFlowJson = {
   defaults: {
     background_motion_prompt: string;
     dress_prompt: string;
+    dress_reference_image: string;
     resolution: string;
-    tracker: "bootstapir" | "cotracker" | "blend";
+    tracker: "bootstapir" | "cotracker" | "blend" | "all";
     write_webm: boolean;
     enhance_dress_prompt: boolean;
   };
@@ -191,8 +192,9 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
       "Animate this portrait into a seamless looping boomerang video. She wears a bikini, gentle swaying body motion, steady camera, perfect loop, warm beach lighting.",
     dress_prompt:
       "Replace her entire bikini with a fitted emerald satin dress (top and bottom). Keep the exact same beach background, scenery, lighting, camera, and motion frame-for-frame — only change the outfit.",
+    dress_reference_image: "",
     resolution: "720p",
-    tracker: "bootstapir",
+    tracker: "blend",
     write_webm: true,
     enhance_dress_prompt: true,
   },

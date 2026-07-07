@@ -17,7 +17,8 @@ import {
   type SourceImageMode,
   type StoredVideoFlowDraft,
 } from "./storage";
-import { TRACKERS } from "./ui";
+import { DEFAULT_MESH_TUNE, meshTuneToApi } from "./meshTune";
+import { MESH_TRACKER_MODES, type MeshTrackerMode } from "./ui";
 
 type JobInfo = {
   id: string;
@@ -44,11 +45,13 @@ function draftPayload(
     foreground_motion_prompt:
       draft.foregroundMotionPrompt || draft.backgroundMotionPrompt || flow.defaults.background_motion_prompt,
     dress_prompt: draft.dressPrompt || flow.defaults.dress_prompt,
+    dress_reference_image: draft.dressReferenceImage || flow.defaults.dress_reference_image,
     card_id: draft.cardId,
     card_label: draft.cardLabel || labelFromProjectId(draft.cardId),
     resolution: draft.resolution || flow.defaults.resolution,
     enhance_dress_prompt: enhancePrompt,
     tracker: draft.tracker || flow.defaults.tracker,
+    mesh_tune: meshTuneToApi(draft.meshTune),
     write_webm: draft.writeWebm,
     source_mode: draft.sourceMode,
     source_prompt: draft.sourcePrompt,
@@ -82,13 +85,17 @@ export function useVideoFlowState() {
     storedDraft?.backgroundMotionPrompt ?? flow.defaults.background_motion_prompt,
   );
   const [dressPrompt, setDressPrompt] = useState(storedDraft?.dressPrompt ?? flow.defaults.dress_prompt);
+  const [dressReferenceImage, setDressReferenceImage] = useState(
+    storedDraft?.dressReferenceImage ?? flow.defaults.dress_reference_image,
+  );
   const [cardId, setCardId] = useState(storedDraft?.cardId ?? readActiveProjectId());
   const [cardLabel, setCardLabel] = useState(storedDraft?.cardLabel ?? "");
   const [writeWebm, setWriteWebm] = useState(storedDraft?.writeWebm ?? flow.defaults.write_webm);
   const [resolution, setResolution] = useState(storedDraft?.resolution ?? flow.defaults.resolution);
-  const [tracker, setTracker] = useState<(typeof TRACKERS)[number]>(
+  const [tracker, setTracker] = useState<MeshTrackerMode>(
     storedDraft?.tracker ?? flow.defaults.tracker,
   );
+  const [meshTune, setMeshTune] = useState(storedDraft?.meshTune ?? DEFAULT_MESH_TUNE);
   const [sourceMode, setSourceMode] = useState<SourceImageMode>(storedDraft?.sourceMode ?? "upload");
   const [sourcePrompt, setSourcePrompt] = useState(() => {
     const saved = storedDraft?.sourcePrompt || DEFAULT_PORTRAIT_PROMPT;
@@ -125,11 +132,13 @@ export function useVideoFlowState() {
     setImage(draft.image);
     setBackgroundMotionPrompt(draft.backgroundMotionPrompt || draft.foregroundMotionPrompt);
     setDressPrompt(draft.dressPrompt);
+    setDressReferenceImage(draft.dressReferenceImage);
     setCardId(draft.cardId);
     setCardLabel(draft.cardLabel);
     setWriteWebm(draft.writeWebm);
     setResolution(draft.resolution);
     setTracker(draft.tracker);
+    setMeshTune(draft.meshTune ?? DEFAULT_MESH_TUNE);
     setSourceMode(draft.sourceMode);
     setSourcePrompt(
       isStockPortraitPrompt(draft.sourcePrompt) ? DEFAULT_PORTRAIT_PROMPT : draft.sourcePrompt || DEFAULT_PORTRAIT_PROMPT,
@@ -150,6 +159,9 @@ export function useVideoFlowState() {
       if (listed?.draft) {
         const parsed = storedDraftFromApi(listed.draft);
         if (parsed) {
+          if (listed.steps.mesh.status !== "approved") {
+            parsed.tracker = flow.defaults.tracker;
+          }
           applyVideoFlowDraft(parsed);
           return;
         }
@@ -161,6 +173,16 @@ export function useVideoFlowState() {
         );
         const parsed = storedDraftFromApi(data.draft);
         if (parsed) {
+          try {
+            const stateData = await api<{ steps: VideoFlowProject["steps"] }>(
+              `/api/video-flow/${encodeURIComponent(id)}/state`,
+            );
+            if (stateData.steps.mesh.status !== "approved") {
+              parsed.tracker = flow.defaults.tracker;
+            }
+          } catch {
+            parsed.tracker = flow.defaults.tracker;
+          }
           applyVideoFlowDraft(parsed);
           return;
         }
@@ -173,11 +195,13 @@ export function useVideoFlowState() {
         backgroundMotionPrompt: flow.defaults.background_motion_prompt,
         foregroundMotionPrompt: flow.defaults.background_motion_prompt,
         dressPrompt: flow.defaults.dress_prompt,
+        dressReferenceImage: flow.defaults.dress_reference_image,
         cardId: id,
         cardLabel: listed?.draft?.card_label?.trim() || labelFromProjectId(id),
         writeWebm: flow.defaults.write_webm,
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
+        meshTune: DEFAULT_MESH_TUNE,
         sourceMode: "upload",
         sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
         faceImage: "",
@@ -195,11 +219,13 @@ export function useVideoFlowState() {
         backgroundMotionPrompt: flow.defaults.background_motion_prompt,
         foregroundMotionPrompt: flow.defaults.background_motion_prompt,
         dressPrompt: flow.defaults.dress_prompt,
+        dressReferenceImage: flow.defaults.dress_reference_image,
         cardId: id,
         cardLabel: label.trim() || labelFromProjectId(id),
         writeWebm: flow.defaults.write_webm,
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
+        meshTune: DEFAULT_MESH_TUNE,
         sourceMode: "upload",
         sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
         faceImage: "",
@@ -247,11 +273,13 @@ export function useVideoFlowState() {
       backgroundMotionPrompt,
       foregroundMotionPrompt: backgroundMotionPrompt,
       dressPrompt,
+      dressReferenceImage,
       cardId,
       cardLabel,
       writeWebm,
       resolution,
       tracker,
+      meshTune,
       sourceMode,
       sourcePrompt,
       faceImage,
@@ -262,11 +290,13 @@ export function useVideoFlowState() {
     image,
     backgroundMotionPrompt,
     dressPrompt,
+    dressReferenceImage,
     cardId,
     cardLabel,
     writeWebm,
     resolution,
     tracker,
+    meshTune,
     sourceMode,
     sourcePrompt,
     faceImage,
@@ -280,6 +310,7 @@ export function useVideoFlowState() {
     setEnhancePrompt(next.defaults.enhance_dress_prompt);
     setBackgroundMotionPrompt(next.defaults.background_motion_prompt);
     setDressPrompt(next.defaults.dress_prompt);
+    setDressReferenceImage(next.defaults.dress_reference_image);
     setResolution(next.defaults.resolution);
     setTracker(next.defaults.tracker);
     setWriteWebm(next.defaults.write_webm);
@@ -306,6 +337,8 @@ export function useVideoFlowState() {
     setBackgroundMotionPrompt,
     dressPrompt,
     setDressPrompt,
+    dressReferenceImage,
+    setDressReferenceImage,
     cardId,
     setCardId,
     cardLabel,
@@ -316,6 +349,8 @@ export function useVideoFlowState() {
     setResolution,
     tracker,
     setTracker,
+    meshTune,
+    setMeshTune,
     sourceMode,
     setSourceMode,
     sourcePrompt,

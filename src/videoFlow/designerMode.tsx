@@ -24,7 +24,7 @@ import {
   type VideoFlowJson,
   type VideoFlowStepKey,
 } from "./schema";
-import { Field, iconProps, TRACKERS } from "./ui";
+import { Field, FilePathPicker, iconProps, MESH_TRACKER_MODES, meshTrackerModeLabel, type MeshTrackerMode } from "./ui";
 
 type DesignerModeProps = {
   flow: VideoFlowJson;
@@ -283,6 +283,23 @@ export function DesignerMode({
                   }
                 />
               </Field>
+              <Field label="Dress reference image (optional — guides the outfit shape/style)">
+                <FilePathPicker
+                  accept="image/*"
+                  placeholder="Pick a dress photo or paste a path/URL"
+                  preview="image"
+                  previewLabel="Dress reference"
+                  previewSize="compact"
+                  value={draft.defaults.dress_reference_image}
+                  onChange={(value) =>
+                    patchDraft({
+                      ...draft,
+                      defaults: { ...draft.defaults, dress_reference_image: value },
+                    })
+                  }
+                  onError={onError}
+                />
+              </Field>
               <label className="checkbox-label">
                 <Checkbox
                   checked={draft.defaults.enhance_dress_prompt}
@@ -317,16 +334,16 @@ export function DesignerMode({
                     ...draft,
                     defaults: {
                       ...draft.defaults,
-                      tracker: value as (typeof TRACKERS)[number],
+                      tracker: value as MeshTrackerMode,
                     },
                   })
                 }
               >
                 <Select.Trigger />
                 <Select.Content>
-                  {TRACKERS.map((entry) => (
+                  {MESH_TRACKER_MODES.map((entry) => (
                     <Select.Item key={entry} value={entry}>
-                      {entry}
+                      {meshTrackerModeLabel(entry)}
                     </Select.Item>
                   ))}
                 </Select.Content>

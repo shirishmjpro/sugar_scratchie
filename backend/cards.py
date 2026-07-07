@@ -249,3 +249,33 @@ def delete_card(root: Path, cards_dir: Path, mesh_dir: Path, card_id: str) -> No
         raise HTTPException(status_code=404, detail=f"Card not found: {card_id}")
     shutil.rmtree(card_dir)
     write_cards_index(root, cards_dir, mesh_dir)
+
+
+def compress_card(
+    root: Path,
+    cards_dir: Path,
+    card_id: str,
+    *,
+    write_webm: bool = True,
+) -> None:
+    """Re-encode a card's background/foreground in place using the same settings
+    as the Video Flow compress step (540px H.264, optional VP9 WebM sidecars).
+    Originals are backed up under .video-backups/ before being overwritten."""
+    from backend.services.video_prep import (
+        backup_video,
+        compress_video,
+        compress_video_webm,
+    )
+
+    background, foreground = card_paths(root, cards_dir, card_id)
+    if not background.is_file() or not foreground.is_file():
+        raise HTTPException(status_code=404, detail=f"Card videos not found: {card_id}")
+
+    backup_dir = root / ".video-backups"
+    for src in (background, foreground):
+        backup_video(src, backup_dir)
+        tmp = src.with_name(f"{src.stem}-compress-tmp{src.suffix}")
+        compress_video(src, tmp)
+        shutil.move(str(tmp), str(src))
+        if write_webm:
+            compress_video_webm(src, src.with_suffix(".webm"))

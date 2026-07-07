@@ -582,6 +582,8 @@ def edit_video(
     enhance: bool,
     prepare_compatible: bool,
     enhance_system: str = ENHANCE_SYSTEM,
+    reference_image: str | Path | None = None,
+    reference_field: str = "image",
 ) -> None:
     key = api_key()
     video_str = str(video)
@@ -609,6 +611,10 @@ def edit_video(
         print(f"Edit model: {edit_model} (replacing {model}, which does not support /v1/videos/edits)")
 
     payload = {"model": edit_model, "prompt": final_prompt, video_field: video_value}
+    reference_str = str(reference_image).strip() if reference_image is not None else ""
+    if reference_str:
+        payload[reference_field] = media_value(reference_str, "image/png")
+        print(f"Attached dress reference image via '{reference_field}' field: {reference_str}")
     request_id = submit_video_job(
         endpoint=EDITS_PATH,
         payload=payload,

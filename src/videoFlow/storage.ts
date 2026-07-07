@@ -1,4 +1,5 @@
 import { DEFAULT_VIDEO_FLOW_JSON, stringifyVideoFlowJson, type VideoFlowJson } from "./schema";
+import { DEFAULT_MESH_TUNE, meshTuneFromApi, type MeshTuneSettings } from "./meshTune";
 
 export type SourceImageMode = "upload" | "prompt" | "face_swap";
 
@@ -18,11 +19,13 @@ export type StoredVideoFlowDraft = {
   backgroundMotionPrompt: string;
   foregroundMotionPrompt: string;
   dressPrompt: string;
+  dressReferenceImage: string;
   cardId: string;
   cardLabel: string;
   writeWebm: boolean;
   resolution: string;
-  tracker: "bootstapir" | "cotracker" | "blend";
+  tracker: "bootstapir" | "cotracker" | "blend" | "all";
+  meshTune: MeshTuneSettings;
   sourceMode: SourceImageMode;
   sourcePrompt: string;
   faceImage: string;
@@ -44,11 +47,13 @@ export function readStoredVideoFlowDraft(): StoredVideoFlowDraft | null {
       backgroundMotionPrompt: parsed.backgroundMotionPrompt ?? "",
       foregroundMotionPrompt: parsed.foregroundMotionPrompt ?? "",
       dressPrompt: parsed.dressPrompt ?? "",
+      dressReferenceImage: parsed.dressReferenceImage ?? "",
       cardId: parsed.cardId ?? "",
       cardLabel: parsed.cardLabel ?? "",
       writeWebm: parsed.writeWebm ?? true,
       resolution: parsed.resolution ?? "720p",
-      tracker: parsed.tracker ?? "bootstapir",
+      tracker: parsed.tracker ?? "all",
+      meshTune: meshTuneFromApi(parsed.meshTune),
       sourceMode: parsed.sourceMode ?? "upload",
       sourcePrompt: isStockPortraitPrompt(parsed.sourcePrompt ?? "")
         ? DEFAULT_PORTRAIT_PROMPT
@@ -101,6 +106,7 @@ export function storedDraftFromApi(draft?: {
   background_motion_prompt?: string;
   foreground_motion_prompt?: string;
   dress_prompt?: string;
+  dress_reference_image?: string;
   card_id?: string;
   card_label?: string;
   write_webm?: boolean;
@@ -110,6 +116,7 @@ export function storedDraftFromApi(draft?: {
   source_prompt?: string;
   face_image?: string;
   base_image?: string;
+  mesh_tune?: unknown;
 }): StoredVideoFlowDraft | null {
   if (!draft?.card_id) return null;
   const sourceMode = draft.source_mode;
@@ -118,11 +125,13 @@ export function storedDraftFromApi(draft?: {
     backgroundMotionPrompt: draft.background_motion_prompt ?? "",
     foregroundMotionPrompt: draft.foreground_motion_prompt ?? "",
     dressPrompt: draft.dress_prompt ?? "",
+    dressReferenceImage: draft.dress_reference_image ?? "",
     cardId: draft.card_id,
     cardLabel: draft.card_label ?? "",
     writeWebm: draft.write_webm ?? true,
     resolution: draft.resolution ?? "720p",
-    tracker: (draft.tracker as StoredVideoFlowDraft["tracker"]) ?? "bootstapir",
+    tracker: (draft.tracker as StoredVideoFlowDraft["tracker"]) ?? "all",
+    meshTune: meshTuneFromApi(draft.mesh_tune),
     sourceMode:
       sourceMode === "prompt" || sourceMode === "face_swap" || sourceMode === "upload"
         ? sourceMode

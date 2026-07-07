@@ -3,6 +3,7 @@ import {
   Check,
   Clapperboard,
   ExternalLink,
+  FileArchive,
   FileUp,
   Image,
   LoaderCircle,
@@ -628,12 +629,14 @@ function VideoManagerPanel({
   editingCardId,
   onEditingCardChange,
   onRefresh,
+  onRefreshJobs,
   onError,
 }: {
   cards: CardInfo[];
   editingCardId: string;
   onEditingCardChange: (value: string) => void;
   onRefresh: () => Promise<void>;
+  onRefreshJobs: () => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [newCardId, setNewCardId] = useState("");
@@ -646,6 +649,8 @@ function VideoManagerPanel({
   const [isSaving, setIsSaving] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [compressWebm, setCompressWebm] = useState(true);
 
   const editingCard = useMemo(
     () => cards.find((card) => card.id === editingCardId) ?? cards[0],
@@ -721,6 +726,30 @@ function VideoManagerPanel({
     }
   }
 
+  async function compressCard() {
+    if (!editingCard) return;
+    if (
+      !window.confirm(
+        `Compress "${editingCard.label}" to 540px H.264? Originals are backed up to .video-backups/ before being overwritten.`,
+      )
+    ) {
+      return;
+    }
+    setIsCompressing(true);
+    onError("");
+    try {
+      await api<JobInfo>(`/api/jobs/cards/${editingCard.id}/compress`, {
+        method: "POST",
+        body: JSON.stringify({ write_webm: compressWebm }),
+      });
+      await onRefreshJobs();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsCompressing(false);
+    }
+  }
+
   const canCreate = Boolean(newCardId.trim() && newCardLabel.trim() && newBackground && newForeground);
 
   return (
@@ -789,6 +818,34 @@ function VideoManagerPanel({
           size="1"
         >
           Upload replacements or pick a workspace path, then save. The original card can be updated but not deleted.
+        </Text>
+
+        <Separator size="4" />
+        <Heading size="3">Compress videos</Heading>
+        <label className="checkbox-label">
+          <Checkbox
+            checked={compressWebm}
+            onCheckedChange={(checked) => setCompressWebm(checked === true)}
+          />
+          Also write VP9 WebM sidecars
+        </label>
+        <Flex gap="2">
+          <Button
+            color="gray"
+            disabled={!editingCard || isCompressing}
+            variant="soft"
+            onClick={compressCard}
+          >
+            {isCompressing ? <LoaderCircle {...iconProps} /> : <FileArchive {...iconProps} />}
+            {isCompressing ? "Starting" : "Compress videos"}
+          </Button>
+        </Flex>
+        <Text
+          color="gray"
+          size="1"
+        >
+          Re-encodes both clips to 540px H.264 in place (same as the Video Flow compress step). Originals are
+          backed up to .video-backups/. Watch progress in the Jobs tab.
         </Text>
       </Flex>
 
@@ -1525,6 +1582,7 @@ export function Dashboard() {
                       onEditingCardChange={setVideoManagerCardId}
                       onError={setError}
                       onRefresh={refreshAssets}
+                      onRefreshJobs={refreshJobs}
                     />
                   </Flex>
                 </Card>

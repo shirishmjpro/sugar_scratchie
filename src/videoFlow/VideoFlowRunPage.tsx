@@ -18,6 +18,8 @@ export function VideoFlowRunPage() {
     setBackgroundMotionPrompt,
     dressPrompt,
     setDressPrompt,
+    dressReferenceImage,
+    setDressReferenceImage,
     cardId,
     setCardId,
     cardLabel,
@@ -28,6 +30,8 @@ export function VideoFlowRunPage() {
     setResolution,
     tracker,
     setTracker,
+    meshTune,
+    setMeshTune,
     sourceMode,
     setSourceMode,
     sourcePrompt,
@@ -89,11 +93,13 @@ export function VideoFlowRunPage() {
           image={image}
           backgroundMotionPrompt={backgroundMotionPrompt}
           dressPrompt={dressPrompt}
+          dressReferenceImage={dressReferenceImage}
           cardId={cardId}
           cardLabel={cardLabel}
           writeWebm={writeWebm}
           resolution={resolution}
           tracker={tracker}
+          meshTune={meshTune}
           sourceMode={sourceMode}
           sourcePrompt={sourcePrompt}
           faceImage={faceImage}
@@ -101,10 +107,12 @@ export function VideoFlowRunPage() {
           onImageChange={setImage}
           onBackgroundMotionPromptChange={setBackgroundMotionPrompt}
           onDressPromptChange={setDressPrompt}
+          onDressReferenceImageChange={setDressReferenceImage}
           onCardIdChange={setCardId}
           onCardLabelChange={setCardLabel}
           onWriteWebmChange={setWriteWebm}
           onTrackerChange={setTracker}
+          onMeshTuneChange={setMeshTune}
           onResolutionChange={setResolution}
           onSourceModeChange={setSourceMode}
           onSourcePromptChange={setSourcePrompt}
