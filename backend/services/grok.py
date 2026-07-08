@@ -58,12 +58,27 @@ ENHANCE_SYSTEM = (
     "(4) Output ONLY the rewritten prompt, one paragraph, no preamble or quotes."
 )
 
+DRESS_CAPTION_SYSTEM = (
+    "You describe clothing for a video EDIT prompt. Look ONLY at the outfit worn "
+    "by the person. Describe: (1) garment type (bodysuit, dress, top+bottom), cut, "
+    "neckline, sleeves, length, fit; (2) the DOMINANT APPARENT COLOR as seen in the "
+    "photo — if the fabric self-illuminates or glows, say what color the outfit "
+    "READS AS overall (e.g. 'bright electric cyan-blue' not 'black with blue "
+    "accents'); (3) emissive details: neon lines, luminous panels, LED shine, "
+    "glow intensity (subtle trim vs whole garment blazing), bloom, and how much "
+    "of the surface glows vs stays dark. Ignore face, body, hair, pose, background. "
+    "Output 2-3 sentences about ONLY the outfit and its self-illumination — no "
+    "preamble, no quotes."
+)
+
 DRESS_ENHANCE_SYSTEM = (
     "You rewrite a short instruction for a video EDIT model applied to an existing "
-    "motion clip. Rules: (1) Replace the entire bikini outfit with the dress/outfit "
+    "motion clip. Rules: (1) Replace the entire bikini/outfit with the dress/outfit "
     "described — both top and bottom, not a skirt overlay on a bikini. Describe "
-    "fabric, color, cut, length, and fit vividly. (2) Keep the EXACT same "
-    "background, scenery, beach, sky, lighting, shadows, and environment as the "
+    "fabric, apparent color, cut, length, fit, AND any emissive glow/neon/luminous "
+    "shine on the garment vividly — garment glow is part of the outfit, not a scene "
+    "effect; preserve glow intensity from the reference description. (2) Keep the "
+    "EXACT same background, scenery, lighting, shadows, and environment as the "
     "input video — do NOT replace the background with a green screen or any other "
     "scene. (3) Keep the same person, face, identity, hair, skin, body, pose, "
     "hands, motion, camera, framing, and timing frame-for-frame. (4) Output ONLY "
@@ -84,6 +99,10 @@ def api_base() -> str:
 
 def chat_model() -> str:
     return os.environ.get("XAI_CHAT_MODEL", "grok-4")
+
+
+def vision_model() -> str:
+    return os.environ.get("XAI_VISION_MODEL", chat_model())
 
 
 def video_generation_model() -> str:
@@ -327,6 +346,45 @@ def enhance_prompt(
         print("Enhance: unexpected chat response, using original prompt.")
         return prompt
     return text or prompt
+
+
+def describe_outfit(image: str | Path, key: str, *, model: str | None = None) -> str:
+    """Caption the outfit in a reference image so a video-edit prompt can apply it.
+
+    The Grok /v1/videos/edits endpoint only conditions on the input video + text
+    prompt (any reference-image field is ignored), so we turn the reference into
+    words the edit model actually reads. Returns "" if captioning fails.
+    """
+    model = model or vision_model()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": DRESS_CAPTION_SYSTEM},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Describe only the outfit in this reference image. "
+                            "Lead with the dominant apparent color (especially if "
+                            "the garment glows or self-illuminates). Include glow "
+                            "intensity and how much of the fabric is luminous."
+                        ),
+                    },
+                    {"type": "image_url", "image_url": media_value(image, "image/png")},
+                ],
+            },
+        ],
+        "temperature": 0.2,
+    }
+    try:
+        result = api_post(CHAT_PATH, payload, key)
+        text = result["choices"][0]["message"]["content"].strip()
+    except (RuntimeError, KeyError, IndexError, TypeError) as exc:
+        print(f"Outfit caption failed ({exc}); continuing without reference caption.")
+        return ""
+    return text
 
 
 def poll_video(request_id: str, key: str, *, label: str = "video generation") -> str:
@@ -601,9 +659,23 @@ def edit_video(
         print("Encoded video inline (base64 data URI).")
 
     final_prompt = prompt
+    reference_str = str(reference_image).strip() if reference_image is not None else ""
+    if reference_str:
+        print(f"Captioning dress reference image via {vision_model()} ...")
+        caption = describe_outfit(reference_str, key)
+        if caption:
+            print(f"Reference outfit caption:\n  {caption}\n")
+            final_prompt = (
+                f"{final_prompt.rstrip()}\n\n"
+                f"Outfit from the reference image — match shape, color, and emissive "
+                f"glow/shine intensity exactly: {caption}"
+            )
+        else:
+            print("Warning: reference image provided but outfit caption was empty.")
+
     if enhance:
         print(f"Enhancing prompt via {chat_model()} ...")
-        final_prompt = enhance_prompt(prompt, key, system=enhance_system)
+        final_prompt = enhance_prompt(final_prompt, key, system=enhance_system)
         print(f"Enhanced prompt:\n  {final_prompt}\n")
 
     edit_model = video_edit_model(model)
@@ -611,8 +683,9 @@ def edit_video(
         print(f"Edit model: {edit_model} (replacing {model}, which does not support /v1/videos/edits)")
 
     payload = {"model": edit_model, "prompt": final_prompt, video_field: video_value}
-    reference_str = str(reference_image).strip() if reference_image is not None else ""
     if reference_str:
+        # Kept in case the endpoint later honors a reference field; today it is
+        # ignored server-side, which is why we also fold the caption into the prompt.
         payload[reference_field] = media_value(reference_str, "image/png")
         print(f"Attached dress reference image via '{reference_field}' field: {reference_str}")
     request_id = submit_video_job(
