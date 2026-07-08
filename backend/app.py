@@ -576,8 +576,8 @@ def generate_mesh(request: GenerateMeshRequest) -> dict:
         # in-process job tries to reach huggingface.co and fails when offline.
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        # Match CLI mesh defaults (MPS on Apple Silicon). Set DEVICE=cpu in .env
-        # if Metal crashes on your hardware.
+        # Match CLI mesh defaults (MPS on Apple Silicon). Set MESH_DEVICE=cpu in
+        # .env if Metal crashes on your hardware (generic DEVICE is ignored).
         "DEVICE": default_mesh_device(),
         "INPUT_VIDEO": relative(input_video),
         "OUTPUT_JSON": relative(output_json),

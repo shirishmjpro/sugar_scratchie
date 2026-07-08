@@ -556,7 +556,9 @@ def recover_stale_approvals(work: Path, card_id: str, state: dict) -> bool:
     if mesh_out.exists() and symbol_points_complete(mesh_out):
         restored.append("symbols")
     state["approved"] = restored
-    print(f"Recovered pipeline approvals from existing artifacts: {', '.join(restored)}")
+    if not state.get("recovery_notified"):
+        print(f"Recovered pipeline approvals from existing artifacts: {', '.join(restored)}")
+        state["recovery_notified"] = True
     return True
 
 
