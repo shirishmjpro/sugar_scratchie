@@ -27,6 +27,7 @@ import {
 } from "./storage";
 import { DEFAULT_MESH_TUNE, meshTuneToApi } from "./meshTune";
 import { MESH_TRACKER_MODES, type MeshTrackerMode } from "./ui";
+import { parseCompressPreset, type CompressPreset } from "./schema";
 
 type JobInfo = {
   id: string;
@@ -62,6 +63,7 @@ function draftPayload(
     tracker: draft.tracker || flow.defaults.tracker,
     mesh_tune: meshTuneToApi(draft.meshTune),
     write_webm: draft.writeWebm,
+    compress_preset: draft.compressPreset,
     source_mode: draft.sourceMode,
     source_prompt: draft.sourcePrompt,
     face_image: draft.faceImage,
@@ -104,6 +106,9 @@ export function useVideoFlowState() {
   const [cardId, setCardId] = useState(storedDraft?.cardId ?? readActiveProjectId());
   const [cardLabel, setCardLabel] = useState(storedDraft?.cardLabel ?? "");
   const [writeWebm, setWriteWebm] = useState(storedDraft?.writeWebm ?? flow.defaults.write_webm);
+  const [compressPreset, setCompressPreset] = useState<CompressPreset>(
+    storedDraft?.compressPreset ?? parseCompressPreset(flow.defaults.compress_preset),
+  );
   const [resolution, setResolution] = useState(storedDraft?.resolution ?? flow.defaults.resolution);
   const [tracker, setTracker] = useState<MeshTrackerMode>(
     storedDraft?.tracker ?? flow.defaults.tracker,
@@ -163,6 +168,7 @@ export function useVideoFlowState() {
     setCardId(draft.cardId);
     setCardLabel(draft.cardLabel);
     setWriteWebm(draft.writeWebm);
+    setCompressPreset(draft.compressPreset ?? "mobile");
     setResolution(draft.resolution);
     setTracker(draft.tracker);
     setMeshTune(draft.meshTune ?? DEFAULT_MESH_TUNE);
@@ -230,6 +236,7 @@ export function useVideoFlowState() {
         cardId: id,
         cardLabel: listed?.draft?.card_label?.trim() || labelFromProjectId(id),
         writeWebm: flow.defaults.write_webm,
+        compressPreset: parseCompressPreset(flow.defaults.compress_preset),
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
         meshTune: DEFAULT_MESH_TUNE,
@@ -258,6 +265,7 @@ export function useVideoFlowState() {
         cardId: id,
         cardLabel: label.trim() || labelFromProjectId(id),
         writeWebm: flow.defaults.write_webm,
+        compressPreset: parseCompressPreset(flow.defaults.compress_preset),
         resolution: flow.defaults.resolution,
         tracker: flow.defaults.tracker,
         meshTune: DEFAULT_MESH_TUNE,
@@ -316,6 +324,7 @@ export function useVideoFlowState() {
       cardId,
       cardLabel,
       writeWebm,
+      compressPreset,
       resolution,
       tracker,
       meshTune,
@@ -337,6 +346,7 @@ export function useVideoFlowState() {
     cardId,
     cardLabel,
     writeWebm,
+    compressPreset,
     resolution,
     tracker,
     meshTune,
@@ -361,6 +371,7 @@ export function useVideoFlowState() {
     setResolution(next.defaults.resolution);
     setTracker(next.defaults.tracker);
     setWriteWebm(next.defaults.write_webm);
+    setCompressPreset(parseCompressPreset(next.defaults.compress_preset));
   }
 
   function applyJsonFromDesigner() {
@@ -393,6 +404,8 @@ export function useVideoFlowState() {
     setCardLabel,
     writeWebm,
     setWriteWebm,
+    compressPreset,
+    setCompressPreset,
     resolution,
     setResolution,
     tracker,

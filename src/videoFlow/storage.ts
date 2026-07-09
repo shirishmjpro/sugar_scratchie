@@ -1,4 +1,13 @@
-import { DEFAULT_VIDEO_FLOW_JSON, stringifyVideoFlowJson, type VideoFlowJson } from "./schema";
+import {
+  DEFAULT_BACKGROUND_MOTION_PROMPT,
+  DEFAULT_VIDEO_FLOW_JSON,
+  LEGACY_BACKGROUND_MOTION_PROMPT,
+  LEGACY_LOCKED_CAMERA_MOTION_PROMPT,
+  parseCompressPreset,
+  stringifyVideoFlowJson,
+  type CompressPreset,
+  type VideoFlowJson,
+} from "./schema";
 import { DEFAULT_MESH_TUNE, meshTuneFromApi, type MeshTuneSettings } from "./meshTune";
 
 export type SourceImageMode = "upload" | "prompt" | "face_swap";
@@ -43,6 +52,9 @@ export function parseSourceImageModel(value: unknown, legacyProvider?: unknown):
 }
 
 export const DEFAULT_PORTRAIT_PROMPT =
+  "Medium full-body portrait of a woman in casual fitted resort wear, plain white studio background, facing camera, fashion editorial photo. Frame from head to mid-thigh so she fills most of the vertical frame — same camera distance as a standard fashion lookbook shot. Do not crop as a close-up face shot and do not pull back to a distant full-body wide shot with empty space.";
+
+export const LEGACY_PORTRAIT_PROMPT =
   "Full-body portrait of a woman in casual fitted resort wear, plain white studio background, facing camera, fashion editorial photo.";
 
 export const LEGACY_BIKINI_PORTRAIT_PROMPT =
@@ -50,7 +62,25 @@ export const LEGACY_BIKINI_PORTRAIT_PROMPT =
 
 export function isStockPortraitPrompt(prompt: string): boolean {
   const stripped = prompt.trim();
-  return !stripped || stripped === DEFAULT_PORTRAIT_PROMPT || stripped === LEGACY_BIKINI_PORTRAIT_PROMPT;
+  return (
+    !stripped ||
+    stripped === DEFAULT_PORTRAIT_PROMPT ||
+    stripped === LEGACY_PORTRAIT_PROMPT ||
+    stripped === LEGACY_BIKINI_PORTRAIT_PROMPT
+  );
+}
+
+function normalizeStoredMotionPrompt(prompt: string | undefined): string {
+  const stripped = (prompt ?? "").trim();
+  if (
+    !stripped ||
+    stripped === LEGACY_BACKGROUND_MOTION_PROMPT ||
+    stripped === LEGACY_LOCKED_CAMERA_MOTION_PROMPT ||
+    stripped === DEFAULT_BACKGROUND_MOTION_PROMPT
+  ) {
+    return DEFAULT_BACKGROUND_MOTION_PROMPT;
+  }
+  return stripped;
 }
 
 export type StoredVideoFlowDraft = {
@@ -62,6 +92,7 @@ export type StoredVideoFlowDraft = {
   cardId: string;
   cardLabel: string;
   writeWebm: boolean;
+  compressPreset: CompressPreset;
   resolution: string;
   tracker: "bootstapir" | "cotracker" | "blend" | "all";
   meshTune: MeshTuneSettings;
@@ -87,13 +118,16 @@ export function readStoredVideoFlowDraft(): StoredVideoFlowDraft | null {
     if (!parsed.cardId && !parsed.image) return null;
     return {
       image: parsed.image ?? "",
-      backgroundMotionPrompt: parsed.backgroundMotionPrompt ?? "",
-      foregroundMotionPrompt: parsed.foregroundMotionPrompt ?? "",
+      backgroundMotionPrompt: normalizeStoredMotionPrompt(parsed.backgroundMotionPrompt),
+      foregroundMotionPrompt: normalizeStoredMotionPrompt(
+        parsed.foregroundMotionPrompt || parsed.backgroundMotionPrompt,
+      ),
       dressPrompt: parsed.dressPrompt ?? "",
       dressReferenceImage: parsed.dressReferenceImage ?? "",
       cardId: parsed.cardId ?? "",
       cardLabel: parsed.cardLabel ?? "",
       writeWebm: parsed.writeWebm ?? true,
+      compressPreset: parseCompressPreset(parsed.compressPreset),
       resolution: parsed.resolution ?? "720p",
       tracker: parsed.tracker ?? "all",
       meshTune: meshTuneFromApi(parsed.meshTune),
@@ -166,6 +200,7 @@ export function storedDraftFromApi(draft?: {
   card_id?: string;
   card_label?: string;
   write_webm?: boolean;
+  compress_preset?: string;
   resolution?: string;
   tracker?: string;
   source_mode?: string;
@@ -189,6 +224,7 @@ export function storedDraftFromApi(draft?: {
     cardId: draft.card_id,
     cardLabel: draft.card_label ?? "",
     writeWebm: draft.write_webm ?? true,
+    compressPreset: parseCompressPreset(draft.compress_preset),
     resolution: draft.resolution ?? "720p",
     tracker: (draft.tracker as StoredVideoFlowDraft["tracker"]) ?? "all",
     meshTune: meshTuneFromApi(draft.mesh_tune),

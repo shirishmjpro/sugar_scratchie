@@ -54,12 +54,53 @@ export type VideoFlowJson = {
     resolution: string;
     tracker: "bootstapir" | "cotracker" | "blend" | "all";
     write_webm: boolean;
+    compress_preset: "mobile" | "hd" | "master";
     enhance_dress_prompt: boolean;
   };
 };
 
 export const FLOW_NODE_WIDTH = 176;
 export const FLOW_NODE_HEIGHT = 88;
+
+export const DEFAULT_BACKGROUND_MOTION_PROMPT =
+  "Animate this portrait into a seamless looping boomerang video. She wears a bikini, gentle swaying body motion only. She stays on the same spot. Locked camera: no zoom in, no zoom out, no dolly, no push-in, no pull-back, no walking toward or away from camera. Keep the exact same framing and subject size as the input image in every frame. Keep her face, identity, hair, and skin tone identical in every frame — same undertone, same lightness, no tan/pale flicker, no color grading shifts on skin. Perfect loop, warm beach lighting.";
+
+export const LEGACY_BACKGROUND_MOTION_PROMPT =
+  "Animate this portrait into a seamless looping boomerang video. She wears a bikini, gentle swaying body motion, steady camera, perfect loop, warm beach lighting.";
+
+export const LEGACY_LOCKED_CAMERA_MOTION_PROMPT =
+  "Animate this portrait into a seamless looping boomerang video. She wears a bikini, gentle swaying body motion only. She stays on the same spot. Locked camera: no zoom in, no zoom out, no dolly, no push-in, no pull-back, no walking toward or away from camera. Keep the exact same framing and subject size as the input image in every frame. Perfect loop, warm beach lighting.";
+
+export const DEFAULT_DRESS_PROMPT =
+  "Replace her entire bikini with a fitted emerald satin dress (top and bottom). Keep the exact same beach background, scenery, lighting, camera, framing, subject scale, and motion frame-for-frame — only change the outfit. Keep her face, identity, hair, and skin tone identical in every frame (same undertone and lightness — no tan/pale flicker). No zoom or camera move.";
+
+export type CompressPreset = "mobile" | "hd" | "master";
+
+export const COMPRESS_PRESETS: {
+  id: CompressPreset;
+  label: string;
+  detail: string;
+}[] = [
+  {
+    id: "mobile",
+    label: "Mobile delivery",
+    detail: "390×672 cover-crop · CRF 23 — exact prototype canvas",
+  },
+  {
+    id: "hd",
+    label: "HD delivery",
+    detail: "540×930 cover-crop · CRF 20 — same 390∶672 frame, sharper",
+  },
+  {
+    id: "master",
+    label: "Master archive",
+    detail: "720×1240 cover-crop · CRF 18 — same frame, keep quality",
+  },
+];
+
+export function parseCompressPreset(value: unknown): CompressPreset {
+  return value === "hd" || value === "master" ? value : "mobile";
+}
 
 export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
   id: "image-to-card",
@@ -150,9 +191,9 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
     {
       id: "compress",
       kind: "process",
-      title: "Compress",
-      subtitle: "540px H.264",
-      description: "Compress front and back videos for delivery",
+      title: "Finalize",
+      subtitle: "390∶672 delivery",
+      description: "Cover-crop both clips to the prototype canvas, encode delivery MP4s, optional WebM",
       x: 1120,
       y: 56,
       step: "compress",
@@ -188,14 +229,13 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
     { from: "mesh", to: "output" },
   ],
   defaults: {
-    background_motion_prompt:
-      "Animate this portrait into a seamless looping boomerang video. She wears a bikini, gentle swaying body motion, steady camera, perfect loop, warm beach lighting.",
-    dress_prompt:
-      "Replace her entire bikini with a fitted emerald satin dress (top and bottom). Keep the exact same beach background, scenery, lighting, camera, and motion frame-for-frame — only change the outfit.",
+    background_motion_prompt: DEFAULT_BACKGROUND_MOTION_PROMPT,
+    dress_prompt: DEFAULT_DRESS_PROMPT,
     dress_reference_image: "",
     resolution: "720p",
     tracker: "blend",
     write_webm: true,
+    compress_preset: "mobile",
     enhance_dress_prompt: true,
   },
 };
@@ -227,7 +267,7 @@ export function stringifyVideoFlowJson(flow: VideoFlowJson): string {
 function migrateVideoFlow(flow: Partial<VideoFlowJson>): Partial<VideoFlowJson> {
   const pipeline = Array.isArray(flow.pipeline) ? [...flow.pipeline] : [];
   if (pipeline.includes("symbols") || !pipeline.includes("mesh")) {
-    return flow;
+    return migrateLockedCameraDefaults(flow);
   }
   const meshIndex = pipeline.indexOf("mesh");
   pipeline.splice(meshIndex + 1, 0, "symbols");
@@ -236,12 +276,42 @@ function migrateVideoFlow(flow: Partial<VideoFlowJson>): Partial<VideoFlowJson> 
     const symbolsNode = DEFAULT_VIDEO_FLOW_JSON.nodes.find((node) => node.id === "symbols");
     if (symbolsNode) nodes.push(symbolsNode);
   }
-  return {
+  return migrateLockedCameraDefaults({
     ...flow,
     pipeline,
     nodes,
     wires: DEFAULT_VIDEO_FLOW_JSON.wires,
     description: DEFAULT_VIDEO_FLOW_JSON.description,
+  });
+}
+
+/** Upgrade empty/legacy motion prompts to the locked-camera + skin-stable default. */
+function migrateLockedCameraDefaults(flow: Partial<VideoFlowJson>): Partial<VideoFlowJson> {
+  const defaults = flow.defaults;
+  if (!defaults || typeof defaults !== "object") return flow;
+  const motion = defaults.background_motion_prompt?.trim() ?? "";
+  const dress = defaults.dress_prompt?.trim() ?? "";
+  const nextDefaults = { ...defaults };
+  let changed = false;
+  if (
+    !motion ||
+    motion === LEGACY_BACKGROUND_MOTION_PROMPT ||
+    motion === LEGACY_LOCKED_CAMERA_MOTION_PROMPT ||
+    motion === DEFAULT_BACKGROUND_MOTION_PROMPT
+  ) {
+    nextDefaults.background_motion_prompt = DEFAULT_BACKGROUND_MOTION_PROMPT;
+    changed = true;
+  }
+  const legacyDress =
+    "Replace her entire bikini with a fitted emerald satin dress (top and bottom). Keep the exact same beach background, scenery, lighting, camera, framing, subject scale, and motion frame-for-frame — only change the outfit. No zoom or camera move.";
+  if (!dress || dress === legacyDress || dress === DEFAULT_DRESS_PROMPT) {
+    nextDefaults.dress_prompt = DEFAULT_DRESS_PROMPT;
+    changed = true;
+  }
+  if (!changed) return flow;
+  return {
+    ...flow,
+    defaults: nextDefaults,
   };
 }
 
@@ -313,6 +383,9 @@ export function parseVideoFlowJson(raw: string): VideoFlowJson {
     defaults: {
       ...DEFAULT_VIDEO_FLOW_JSON.defaults,
       ...flow.defaults,
+      compress_preset: parseCompressPreset(
+        (flow.defaults as VideoFlowJson["defaults"] | undefined)?.compress_preset,
+      ),
     },
   };
 }

@@ -183,6 +183,7 @@ class VideoFlowRequest(BaseModel):
     enhance_dress_prompt: bool = True
     tracker: Literal["cotracker", "bootstapir", "blend", "all"] = "all"
     write_webm: bool = True
+    compress_preset: Literal["mobile", "hd", "master"] = "mobile"
     mesh_tune: MeshTuneOptions = Field(default_factory=MeshTuneOptions)
     model: str = "grok-imagine-video-1.5"
     image_field: str = "image"
@@ -238,6 +239,7 @@ class SymbolPointsRequest(BaseModel):
 
 class CompressCardRequest(BaseModel):
     write_webm: bool = True
+    compress_preset: Literal["mobile", "hd", "master"] = "mobile"
 
 
 class UploadedFileInfo(BaseModel):
@@ -491,13 +493,23 @@ def remove_card(card_id: str) -> dict:
 
 @app.post("/api/jobs/cards/{card_id}/compress")
 def compress_card_videos(card_id: str, request: CompressCardRequest) -> dict:
-    def action(card_id: str = card_id, write_webm: bool = request.write_webm) -> None:
-        compress_card(ROOT, CARDS_DIR, card_id, write_webm=write_webm)
+    def action(
+        card_id: str = card_id,
+        write_webm: bool = request.write_webm,
+        compress_preset: str = request.compress_preset,
+    ) -> None:
+        compress_card(
+            ROOT,
+            CARDS_DIR,
+            card_id,
+            write_webm=write_webm,
+            compress_preset=compress_preset,
+        )
         write_cards_index(ROOT, CARDS_DIR, MESH_DIR)
 
     job = enqueue(
         "compress-card",
-        ["backend.cards.compress_card", card_id],
+        ["backend.cards.compress_card", card_id, request.compress_preset],
         action,
     )
     return job.public()
@@ -692,6 +704,7 @@ def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> 
         "enhance_dress_prompt": request.enhance_dress_prompt,
         "tracker": request.tracker,
         "write_webm": request.write_webm,
+        "compress_preset": request.compress_preset,
         "source_mode": request.source_mode,
         "source_prompt": request.source_prompt,
         "face_image": request.face_image,
@@ -875,6 +888,7 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
             provider=request.provider,
             background_video_model=request.background_video_model,
             dress_video_model=request.dress_video_model,
+            compress_preset=request.compress_preset,
         ),
     )
     return job.public()

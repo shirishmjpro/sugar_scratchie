@@ -20,9 +20,44 @@ export type VideoFlowProject = {
     card_id?: string;
     card_label?: string;
     write_webm?: boolean;
+    compress_preset?: string;
     resolution?: string;
     tracker?: string;
   };
+  compress_report?: CompressReport | null;
+};
+
+export type CompressReportClip = {
+  role?: string;
+  path?: string;
+  exists?: boolean;
+  width?: number;
+  height?: number;
+  duration?: number;
+  codec?: string;
+  bytes?: number;
+  size?: string;
+};
+
+export type CompressReport = {
+  preset?: string;
+  preset_label?: string;
+  write_webm?: boolean;
+  target_width?: number;
+  target_height?: number;
+  aspect?: string;
+  fit?: string;
+  crf?: number;
+  duration_delta_before?: number;
+  aspect_ok?: boolean;
+  before?: Record<string, CompressReportClip>;
+  after?: Record<string, CompressReportClip>;
+  before_bytes?: number;
+  after_bytes?: number;
+  size_ratio?: number;
+  saved_bytes?: number;
+  saved?: string;
+  webm_paths?: string[];
 };
 
 export const PROJECT_ID_PATTERN = /^[a-z0-9_]+$/;

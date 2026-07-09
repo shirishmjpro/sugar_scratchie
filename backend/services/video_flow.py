@@ -25,6 +25,7 @@ from backend.services.grok import (
     DRESS_ENHANCE_SYSTEM,
     DEFAULT_PORTRAIT_PROMPT,
     is_stock_portrait_prompt,
+    normalize_background_motion_prompt,
     output_video_ready,
     probe_video,
     request_id_sidecar,
@@ -38,9 +39,8 @@ from backend.services.mesh_tracking import generate_mesh
 from backend.services.mesh_tune import build_mesh_tracking_env, mesh_tune_from_dict
 from backend.services.video_prep import (
     align_clip_to_reference,
-    backup_video,
-    compress_video,
-    compress_video_webm,
+    finalize_card_videos,
+    normalize_compress_preset,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -85,7 +85,7 @@ STEP_LABELS: dict[VideoFlowStep, str] = {
     "card": "Create card",
     "mesh": "Generate mesh",
     "symbols": "Place symbol points",
-    "compress": "Compress front and back videos",
+    "compress": "Finalize delivery videos",
 }
 
 
@@ -220,6 +220,7 @@ def artifact_paths(work: Path, card_id: str, state: dict | None = None) -> dict[
     approved = state["approved"] if state else []
     background_raw = work / "background-raw.mp4"
     foreground_dressed = work / "foreground-dressed.mp4"
+    compress_report = work / "compress-report.json"
     return {
         "background": [
             str(background_raw.relative_to(ROOT)) if output_video_ready(background_raw) else ""
@@ -242,6 +243,7 @@ def artifact_paths(work: Path, card_id: str, state: dict | None = None) -> dict[
         "compress": [
             str(card_bg.relative_to(ROOT)) if output_video_ready(card_bg) else "",
             str(card_fg.relative_to(ROOT)) if output_video_ready(card_fg) else "",
+            str(compress_report.relative_to(ROOT)) if compress_report.exists() else "",
         ],
     }
 
@@ -260,12 +262,22 @@ def step_artifact_ready(work: Path, card_id: str, step: VideoFlowStep, state: di
     if step == "symbols":
         mesh_out = MESH_DIR / f"{card_id}.json"
         return mesh_out.exists() and symbol_points_complete(mesh_out)
+    if step == "compress":
+        # Delivery videos must be playable; the JSON report is metadata only.
+        card_bg = CARDS_DIR / card_id / "background.mp4"
+        card_fg = CARDS_DIR / card_id / "foreground.mp4"
+        report = work / "compress-report.json"
+        return (
+            output_video_ready(card_bg)
+            and output_video_ready(card_fg)
+            and report.exists()
+        )
     paths = preview_paths(work, card_id, state)[step]
     if not paths:
         return False
     for rel in paths:
         path = ROOT / rel
-        if step in ("background", "dress", "compress", "card"):
+        if step in ("background", "dress", "card"):
             if not output_video_ready(path):
                 return False
         elif not path.exists():
@@ -346,6 +358,7 @@ def clear_step_outputs(work: Path, card_id: str, step: VideoFlowStep) -> None:
             work / "foreground-aligned-for-compress.mp4",
             work / "compress-bg-tmp.mp4",
             work / "compress-fg-tmp.mp4",
+            work / "compress-report.json",
         ],
         "card": [],
         "mesh": [],
@@ -580,6 +593,17 @@ def recover_stale_approvals(work: Path, card_id: str, state: dict) -> bool:
     return True
 
 
+def read_compress_report(card_id: str) -> dict | None:
+    path = work_dir(card_id) / "compress-report.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def flow_state(card_id: str) -> dict:
     work = work_dir(card_id)
     state = read_state(work)
@@ -602,6 +626,7 @@ def flow_state(card_id: str) -> dict:
         "steps": steps,
         "complete": step_status(work, card_id, "compress", state) == "approved",
         "mesh_compare": mesh_compare_entries(work, card_id),
+        "compress_report": read_compress_report(card_id),
         "recovered_approvals": recovered,
     }
 
@@ -640,6 +665,7 @@ def save_flow_draft(
     source_image_model: str = "grok-imagine",
     background_video_model: str = "grok-imagine",
     dress_video_model: str = "wan-2.2-video-edit",
+    compress_preset: str = "mobile",
 ) -> dict:
     work = work_dir(card_id)
     draft = {
@@ -658,6 +684,7 @@ def save_flow_draft(
         "enhance_dress_prompt": enhance_dress_prompt,
         "tracker": tracker,
         "write_webm": write_webm,
+        "compress_preset": normalize_compress_preset(compress_preset),
         "source_mode": source_mode,
         "source_prompt": source_prompt,
         "face_image": face_image,
@@ -931,12 +958,14 @@ def run_video_flow_step(
     provider: str = "xai",
     background_video_model: str = "grok-imagine",
     dress_video_model: str = "wan-2.2-video-edit",
+    compress_preset: str = "mobile",
 ) -> None:
     del foreground_motion_prompt, provider
     tune = mesh_tune_from_dict(mesh_tune)
     ai_provider = "xai"
     bg_video_model = normalize_background_video_model(background_video_model)
     dress_model = normalize_dress_video_model(dress_video_model)
+    delivery_preset = normalize_compress_preset(compress_preset)
     work = work_dir(card_id)
     state = read_state(work)
     paths = _paths(work)
@@ -963,6 +992,7 @@ def run_video_flow_step(
         ai_provider=ai_provider,
         background_video_model=bg_video_model,
         dress_video_model=dress_model,
+        compress_preset=delivery_preset,
     )
 
     # Re-read state in case approvals changed while the job was queued.
@@ -1000,20 +1030,23 @@ def run_video_flow_step(
     if step == "background":
         if _source_image_newer_than_background(work, paths, image):
             _clear_background_clip(paths)
+        motion_prompt = normalize_background_motion_prompt(background_motion_prompt)
         if bg_video_model == "wan-2.2-spicy":
             print("Background video: WaveSpeed WAN 2.2 Spicy (image-to-video)")
         else:
             print("Background video: x.ai Grok Imagine")
+        print("Motion prompt uses locked-camera framing (enhance when XAI_API_KEY is set).")
         image_to_video(
             provider=ai_provider,
             image=image,
-            prompt=background_motion_prompt,
+            prompt=motion_prompt,
             out=paths["background_raw"],
             model=model,
             resolution=resolution,
             image_field=image_field,
             endpoint=endpoint,
             background_video_model=bg_video_model,
+            enhance_motion_prompt=True,
         )
     elif step == "dress":
         if not output_video_ready(paths["background_raw"]):
@@ -1107,31 +1140,22 @@ def run_video_flow_step(
         bg_dst, fg_dst = card_paths(ROOT, CARDS_DIR, card_id)
         if not output_video_ready(bg_dst) or not output_video_ready(fg_dst):
             raise RuntimeError("Card videos missing — run create card first.")
-        bg_meta = probe_video(paths["background_raw"])
-        fg_meta = probe_video(paths["foreground_dressed"])
-        card_bg_meta = probe_video(bg_dst)
-        card_fg_meta = probe_video(fg_dst)
-        print(
-            "Sync check: "
-            f"background={bg_meta['duration']:.2f}s "
-            f"foreground={fg_meta['duration']:.2f}s "
-            f"card_bg={card_bg_meta['duration']:.2f}s "
-            f"card_fg={card_fg_meta['duration']:.2f}s"
+        report = finalize_card_videos(
+            background_src=paths["background_raw"],
+            foreground_src=paths["foreground_dressed"],
+            background_dst=bg_dst,
+            foreground_dst=fg_dst,
+            motion_reference=paths["background_raw"],
+            work_dir=work,
+            backup_dir=ROOT / ".video-backups",
+            preset=delivery_preset,
+            write_webm=write_webm,
+            report_path=work / "compress-report.json",
         )
-        aligned_fg = work / "foreground-aligned-for-compress.mp4"
-        align_clip_to_reference(paths["background_raw"], fg_dst, aligned_fg)
-        bg_tmp = work / "compress-bg-tmp.mp4"
-        fg_tmp = work / "compress-fg-tmp.mp4"
-        compress_video(bg_dst, bg_tmp)
-        compress_video(aligned_fg, fg_tmp)
-        backup_video(bg_dst)
-        backup_video(fg_dst)
-        shutil.move(str(bg_tmp), str(bg_dst))
-        shutil.move(str(fg_tmp), str(fg_dst))
-        if write_webm:
-            compress_video_webm(bg_dst, bg_dst.with_suffix(".webm"))
-            compress_video_webm(fg_dst, fg_dst.with_suffix(".webm"))
-        print(f"Compressed card videos under {card_dir}")
+        print(
+            f"Delivery ready under {card_dir} "
+            f"({report['preset_label']}, saved {report['saved']})"
+        )
     else:  # pragma: no cover
         raise RuntimeError(f"Unknown step: {step}")
 

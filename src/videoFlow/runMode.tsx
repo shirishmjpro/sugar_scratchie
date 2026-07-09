@@ -20,12 +20,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../shared/api";
 import { flowStepBadge, type FlowNodeRuntime } from "./flowCanvas";
 import {
+  COMPRESS_PRESETS,
   nodeToStep,
   stepToNode,
+  type CompressPreset,
   type FlowNodeId,
   type VideoFlowJson,
   type VideoFlowStepKey,
 } from "./schema";
+import type { CompressReport } from "./projects";
 import { MaskEditor } from "./MaskEditor";
 import { MeshTunePanel } from "./MeshTunePanel";
 import { meshTuneToApi, type MeshTuneSettings } from "./meshTune";
@@ -53,8 +56,70 @@ type VideoFlowState = {
   steps: Record<VideoFlowStepKey, VideoFlowStepState>;
   complete: boolean;
   mesh_compare?: { path: string; tracker: string; active: boolean }[];
+  compress_report?: CompressReport | null;
   recovered_approvals?: boolean;
 };
+
+function CompressReportPanel({ report }: { report: CompressReport }) {
+  const beforeBg = report.before?.background;
+  const beforeFg = report.before?.foreground;
+  const afterBg = report.after?.background;
+  const afterFg = report.after?.foreground;
+  const ratioPct =
+    typeof report.size_ratio === "number" ? Math.round(report.size_ratio * 100) : null;
+  const targetLabel =
+    report.target_width && report.target_height
+      ? `${report.target_width}×${report.target_height}`
+      : report.target_width
+        ? `${report.target_width}px`
+        : "?";
+
+  return (
+    <Callout.Root color={report.aspect_ok === false ? "orange" : "green"}>
+      <Callout.Text size="2">
+        <strong>Last finalize:</strong> {report.preset_label ?? report.preset ?? "delivery"} ·{" "}
+        {targetLabel}
+        {report.aspect ? ` (${report.aspect})` : ""} · {report.fit ?? "cover-crop"} · CRF{" "}
+        {report.crf ?? "?"}
+        {report.write_webm ? " · WebM on" : " · WebM off"}
+      </Callout.Text>
+      <Box mt="2">
+        <Grid columns="2" gap="3">
+          <Box>
+            <Text size="1" color="gray" weight="medium">
+              Before
+            </Text>
+            <Text as="div" size="2">
+              BG {beforeBg?.width ?? "?"}×{beforeBg?.height ?? "?"} · {beforeBg?.size ?? "—"}
+            </Text>
+            <Text as="div" size="2">
+              FG {beforeFg?.width ?? "?"}×{beforeFg?.height ?? "?"} · {beforeFg?.size ?? "—"}
+            </Text>
+          </Box>
+          <Box>
+            <Text size="1" color="gray" weight="medium">
+              After
+            </Text>
+            <Text as="div" size="2">
+              BG {afterBg?.width ?? "?"}×{afterBg?.height ?? "?"} · {afterBg?.size ?? "—"}
+            </Text>
+            <Text as="div" size="2">
+              FG {afterFg?.width ?? "?"}×{afterFg?.height ?? "?"} · {afterFg?.size ?? "—"}
+            </Text>
+          </Box>
+        </Grid>
+        <Text as="div" size="2" mt="2">
+          Saved {report.saved ?? "—"}
+          {ratioPct != null ? ` · now ${ratioPct}% of original` : ""}
+          {typeof report.duration_delta_before === "number" && report.duration_delta_before > 0.05
+            ? ` · synced ${report.duration_delta_before.toFixed(2)}s timing drift`
+            : ""}
+          {report.aspect_ok === false ? " · warning: output size mismatch" : ""}
+        </Text>
+      </Box>
+    </Callout.Root>
+  );
+}
 
 function flowStepFromJobCommand(command: string[]): VideoFlowStepKey | null {
   if (command[0] !== "video-flow-step") return null;
@@ -369,6 +434,7 @@ type RunModeProps = {
   cardId: string;
   cardLabel: string;
   writeWebm: boolean;
+  compressPreset: CompressPreset;
   resolution: string;
   tracker: MeshTrackerMode;
   meshTune: MeshTuneSettings;
@@ -383,6 +449,7 @@ type RunModeProps = {
   onCardIdChange: (value: string) => void;
   onCardLabelChange: (value: string) => void;
   onWriteWebmChange: (value: boolean) => void;
+  onCompressPresetChange: (value: CompressPreset) => void;
   onTrackerChange: (value: MeshTrackerMode) => void;
   onMeshTuneChange: (value: MeshTuneSettings) => void;
   onResolutionChange: (value: string) => void;
@@ -420,6 +487,7 @@ export function RunMode(props: RunModeProps) {
     cardId,
     cardLabel,
     writeWebm,
+    compressPreset,
     resolution,
     tracker,
     meshTune,
@@ -434,6 +502,7 @@ export function RunMode(props: RunModeProps) {
     onCardIdChange,
     onCardLabelChange,
     onWriteWebmChange,
+    onCompressPresetChange,
     onTrackerChange,
     onMeshTuneChange,
     onResolutionChange,
@@ -778,6 +847,7 @@ export function RunMode(props: RunModeProps) {
     enhance_dress_prompt: enhancePrompt,
     tracker,
     write_webm: writeWebm,
+    compress_preset: compressPreset,
     mesh_tune: meshTuneToApi(meshTune),
     source_mode: sourceMode,
     source_prompt: sourcePrompt,
@@ -1378,6 +1448,12 @@ export function RunMode(props: RunModeProps) {
                 onChange={(event) => onBackgroundMotionPromptChange(event.currentTarget.value)}
               />
             </Field>
+            <Text color="gray" size="2">
+              Locked camera + stable skin: the backend upgrades legacy prompts and enhances the
+              motion text (when XAI_API_KEY is set) so framing, subject size, and skin tone stay
+              consistent with the source still — match the blue reference crop in your upload for
+              best results.
+            </Text>
           </Flex>
         ) : null}
 
@@ -1433,33 +1509,65 @@ export function RunMode(props: RunModeProps) {
             <label className="checkbox-label">
               <Checkbox
                 checked={enhancePrompt}
-                disabled={dressVideoModel === "wan-2.2-video-edit"}
+                disabled={dressVideoModel === "wan-2.2-video-edit" && !canUseGrok}
                 onCheckedChange={(checked) => onEnhancePromptChange(checked === true)}
               />
               Enhance dress prompt with Grok chat before video edit
             </label>
             <Text color="gray" size="2">
-              Edits the approved background clip frame-for-frame — same scenery and motion; only
-              the outfit changes.
-              {dressVideoModel === "grok-imagine"
-                ? ` Prompt enhancement is ${enhancePrompt ? "on" : "off"}.`
-                : " WAN edit uses your prompt as written (no enhancement, no reference image upload)."}
+              Edits the approved background clip frame-for-frame — same scenery, motion, and
+              subject scale; only the outfit changes.
+              {dressVideoModel === "wan-2.2-video-edit"
+                ? enhancePrompt && canUseGrok
+                  ? " WAN edit uses a Grok-enhanced prompt (locked framing) when XAI_API_KEY is set."
+                  : " WAN edit uses your prompt as written unless Grok enhancement is on with XAI_API_KEY."
+                : ` Prompt enhancement is ${enhancePrompt ? "on" : "off"}.`}
             </Text>
           </Flex>
         ) : null}
 
         {activeNode === "compress" ? (
-          <Flex direction="column" gap="3">
-            <Text size="2">
-              Both card videos are re-encoded to <Code>540px</Code> wide H.264 after mesh tracking.
+          <Flex direction="column" gap="4">
+            <Callout.Root color="blue">
+              <Callout.Text size="2">
+                Finalize aligns foreground timing to the bikini motion clip, backs up the raw card
+                videos, then <strong>cover-crops both clips to a fixed 390∶672 canvas</strong> (same
+                aspect as the scratch prototype). Every card gets the same frame size — no more
+                540×822 vs 540×706 mismatches.
+              </Callout.Text>
+            </Callout.Root>
+            <Field label="Delivery preset">
+              <Select.Root
+                value={compressPreset}
+                onValueChange={(value) => onCompressPresetChange(value as CompressPreset)}
+              >
+                <Select.Trigger />
+                <Select.Content>
+                  {COMPRESS_PRESETS.map((entry) => (
+                    <Select.Item key={entry.id} value={entry.id}>
+                      {entry.label}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select.Root>
+            </Field>
+            <Text color="gray" size="2">
+              {COMPRESS_PRESETS.find((entry) => entry.id === compressPreset)?.detail}
             </Text>
             <label className="checkbox-label">
               <Checkbox
                 checked={writeWebm}
                 onCheckedChange={(checked) => onWriteWebmChange(checked === true)}
               />
-              Also write VP9 WebM sidecars
+              Also write VP9 WebM sidecars (better browser fallback)
             </label>
+            <Text color="gray" size="2">
+              Originals are copied to <Code>.video-backups/</Code> before overwrite. A size report is
+              saved under the project work folder after each run.
+            </Text>
+            {flowState?.compress_report ? (
+              <CompressReportPanel report={flowState.compress_report} />
+            ) : null}
           </Flex>
         ) : null}
 
@@ -1627,7 +1735,11 @@ export function RunMode(props: RunModeProps) {
         {activeStep && activeStep !== "symbols" && flowState?.steps[activeStep]?.artifacts.length ? (
           <Flex direction="column" gap="3">
             {flowState.steps[activeStep].artifacts.map((artifact) =>
-              artifact.endsWith(".json") ? (
+              artifact.endsWith("compress-report.json") ? (
+                <Text key={artifact} size="2">
+                  Delivery report: <Code className="dashboard-code">{artifact}</Code>
+                </Text>
+              ) : artifact.endsWith(".json") ? (
                 <Text key={artifact} size="2">
                   Mesh written to <Code className="dashboard-code">{artifact}</Code>
                 </Text>
@@ -1695,6 +1807,15 @@ export function RunMode(props: RunModeProps) {
             </>
           ) : null}
 
+          {actionStatus === "ready" &&
+          actionStep === "compress" &&
+          flowState?.compress_report ? (
+            <Button disabled={jobBusy} type="button" onClick={() => void approveFocusClip()}>
+              <Check {...iconProps} />
+              Mark complete
+            </Button>
+          ) : null}
+
           {actionStatus === "ready" ? (
             <Button
               disabled={!canRunActionStep}
@@ -1702,7 +1823,7 @@ export function RunMode(props: RunModeProps) {
               onClick={() => actionStep && void runStep(actionStep, false)}
             >
               <Play {...iconProps} />
-              Run step
+              {actionStep === "compress" && flowState?.compress_report ? "Re-run finalize" : "Run step"}
             </Button>
           ) : null}
 

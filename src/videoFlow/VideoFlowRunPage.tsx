@@ -29,6 +29,8 @@ export function VideoFlowRunPage() {
     setCardLabel,
     writeWebm,
     setWriteWebm,
+    compressPreset,
+    setCompressPreset,
     resolution,
     setResolution,
     tracker,
@@ -116,6 +118,7 @@ export function VideoFlowRunPage() {
           cardId={cardId}
           cardLabel={cardLabel}
           writeWebm={writeWebm}
+          compressPreset={compressPreset}
           resolution={resolution}
           tracker={tracker}
           meshTune={meshTune}
@@ -130,6 +133,7 @@ export function VideoFlowRunPage() {
           onCardIdChange={setCardId}
           onCardLabelChange={setCardLabel}
           onWriteWebmChange={setWriteWebm}
+          onCompressPresetChange={setCompressPreset}
           onTrackerChange={setTracker}
           onMeshTuneChange={setMeshTune}
           onResolutionChange={setResolution}

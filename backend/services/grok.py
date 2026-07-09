@@ -19,12 +19,40 @@ IMAGE_GENERATIONS_PATH = "/v1/images/generations"
 IMAGE_EDITS_PATH = "/v1/images/edits"
 
 DEFAULT_PORTRAIT_PROMPT = (
-    "Full-body portrait of a woman in casual fitted resort wear, plain white studio background, "
-    "facing camera, fashion editorial photo."
+    "Medium full-body portrait of a woman in casual fitted resort wear, plain white studio "
+    "background, facing camera, fashion editorial photo. Frame from head to mid-thigh so she "
+    "fills most of the vertical frame — same camera distance as a standard fashion lookbook "
+    "shot. Do not crop as a close-up face shot and do not pull back to a distant full-body "
+    "wide shot with empty space."
 )
 LEGACY_BIKINI_PORTRAIT_PROMPT = (
     "Full-body portrait of a woman in a black bikini, plain white studio background, "
     "facing camera, fashion photo."
+)
+LEGACY_PORTRAIT_PROMPT = (
+    "Full-body portrait of a woman in casual fitted resort wear, plain white studio background, "
+    "facing camera, fashion editorial photo."
+)
+
+DEFAULT_BACKGROUND_MOTION_PROMPT = (
+    "Animate this portrait into a seamless looping boomerang video. She wears a bikini, "
+    "gentle swaying body motion only. She stays on the same spot. Locked camera: no zoom in, "
+    "no zoom out, no dolly, no push-in, no pull-back, no walking toward or away from camera. "
+    "Keep the exact same framing and subject size as the input image in every frame. "
+    "Keep her face, identity, hair, and skin tone identical in every frame — same undertone, "
+    "same lightness, no tan/pale flicker, no color grading shifts on skin. "
+    "Perfect loop, warm beach lighting."
+)
+LEGACY_BACKGROUND_MOTION_PROMPT = (
+    "Animate this portrait into a seamless looping boomerang video. She wears a bikini, "
+    "gentle swaying body motion, steady camera, perfect loop, warm beach lighting."
+)
+LEGACY_LOCKED_CAMERA_MOTION_PROMPT = (
+    "Animate this portrait into a seamless looping boomerang video. She wears a bikini, "
+    "gentle swaying body motion only. She stays on the same spot. Locked camera: no zoom in, "
+    "no zoom out, no dolly, no push-in, no pull-back, no walking toward or away from camera. "
+    "Keep the exact same framing and subject size as the input image in every frame. "
+    "Perfect loop, warm beach lighting."
 )
 FACE_SWAP_PROMPT = (
     "Replace the face in <IMAGE_0> with the face from <IMAGE_1>. "
@@ -34,8 +62,10 @@ PROMPT_WITH_FACE_PREFIX = (
     "Full-body portrait photo of the person from <IMAGE_0>, matching their face and identity. "
 )
 FACE_GUIDED_PORTRAIT_PROMPT = (
-    "Full-body portrait photo of the person from <IMAGE_0>, matching their face and identity. "
-    "Casual fitted resort wear, plain white studio background, facing camera, fashion editorial."
+    "Medium full-body portrait photo of the person from <IMAGE_0>, matching their face and identity. "
+    "Casual fitted resort wear, plain white studio background, facing camera, fashion editorial. "
+    "Frame from head to mid-thigh so she fills most of the vertical frame — not a face close-up "
+    "and not a distant wide shot."
 )
 
 MAX_DURATION_S = 8.7
@@ -53,10 +83,26 @@ ENHANCE_SYSTEM = (
     "for a video EDIT model. Rules: (1) The ONLY change allowed is the dress/outfit "
     "described. Describe it vividly (fabric, color, cut, length, fit). (2) Then "
     "explicitly command the model to keep EVERYTHING else identical: the same "
-    "person, face, identity, hair, skin, body, pose, hands, motion, camera, "
-    "framing, background, lighting, shadows and colors. (3) Do NOT add scenery, "
-    "style, mood, camera moves, effects or details that are not in the input. "
+    "person, face, identity, hair, skin tone (same undertone and lightness in every "
+    "frame — no tan/pale flicker), body, pose, hands, motion, camera, "
+    "framing, subject scale / camera distance, background, lighting, shadows and "
+    "colors. (3) Do NOT add scenery, style, mood, camera moves, zoom, dolly, "
+    "effects or details that are not in the input. "
     "(4) Output ONLY the rewritten prompt, one paragraph, no preamble or quotes."
+)
+
+MOTION_ENHANCE_SYSTEM = (
+    "You rewrite a short image-to-video motion instruction into a single precise prompt. "
+    "Rules: (1) Keep the user's intended motion (sway, loop, boomerang, outfit notes) "
+    "but make camera and framing ironclad. (2) Explicitly forbid zoom in/out, dolly, "
+    "push-in, pull-back, orbit, and any walking toward or away from camera. (3) She "
+    "must stay on the same spot; subject size and framing must match the input image "
+    "in every frame. (4) Lock identity continuity: same face, hair, and skin tone in "
+    "every frame — same undertone and lightness, no skin color flicker, no sudden "
+    "tanning/paling, no beauty-filter shifts. (5) Prefer a seamless looping boomerang "
+    "unless the user asked otherwise. (6) Do NOT invent new scenery, wardrobe changes, "
+    "or camera moves. (7) Output ONLY the rewritten prompt, one paragraph, no preamble "
+    "or quotes."
 )
 
 DRESS_CAPTION_SYSTEM = (
@@ -81,8 +127,11 @@ DRESS_ENHANCE_SYSTEM = (
     "effect; preserve glow intensity from the reference description. (2) Keep the "
     "EXACT same background, scenery, lighting, shadows, and environment as the "
     "input video — do NOT replace the background with a green screen or any other "
-    "scene. (3) Keep the same person, face, identity, hair, skin, body, pose, "
-    "hands, motion, camera, framing, and timing frame-for-frame. (4) Output ONLY "
+    "scene. (3) Keep the same person, face, identity, hair, and skin tone "
+    "frame-for-frame — same undertone and lightness as the input clip in every "
+    "frame; no tan/pale flicker, no recoloring exposed skin. Keep body, pose, "
+    "hands, motion, camera, framing, subject scale / camera distance, and timing "
+    "identical — no zoom, dolly, or reframing. (4) Output ONLY "
     "the rewritten prompt, one paragraph, no preamble or quotes."
 )
 
@@ -564,7 +613,27 @@ def generate_portrait_image(
 
 def is_stock_portrait_prompt(prompt: str) -> bool:
     stripped = prompt.strip()
-    return not stripped or stripped in (DEFAULT_PORTRAIT_PROMPT, LEGACY_BIKINI_PORTRAIT_PROMPT)
+    return not stripped or stripped in (
+        DEFAULT_PORTRAIT_PROMPT,
+        LEGACY_PORTRAIT_PROMPT,
+        LEGACY_BIKINI_PORTRAIT_PROMPT,
+    )
+
+
+def is_stock_background_motion_prompt(prompt: str) -> bool:
+    stripped = prompt.strip()
+    return not stripped or stripped in (
+        DEFAULT_BACKGROUND_MOTION_PROMPT,
+        LEGACY_BACKGROUND_MOTION_PROMPT,
+        LEGACY_LOCKED_CAMERA_MOTION_PROMPT,
+    )
+
+
+def normalize_background_motion_prompt(prompt: str) -> str:
+    """Upgrade legacy/empty motion prompts to the locked-camera default."""
+    if is_stock_background_motion_prompt(prompt):
+        return DEFAULT_BACKGROUND_MOTION_PROMPT
+    return prompt.strip()
 
 
 def swap_face_on_image(
@@ -710,11 +779,17 @@ def image_to_video(
     resolution: str,
     image_field: str,
     endpoint: str,
+    enhance: bool = True,
 ) -> None:
     key = api_key()
+    final_prompt = normalize_background_motion_prompt(prompt)
+    if enhance:
+        print(f"Enhancing motion prompt via {chat_model()} ...")
+        final_prompt = enhance_prompt(final_prompt, key, system=MOTION_ENHANCE_SYSTEM)
+        print(f"Enhanced motion prompt:\n  {final_prompt}\n")
     payload = {
         "model": model,
-        "prompt": prompt,
+        "prompt": final_prompt,
         image_field: media_value(image, "image/png"),
     }
     if resolution:
@@ -752,6 +827,7 @@ def image_dress_flow(
         resolution=resolution,
         image_field=image_field,
         endpoint=endpoint,
+        enhance=True,
     )
     print("Starting dress edit on generated video ...")
     edit_video(
