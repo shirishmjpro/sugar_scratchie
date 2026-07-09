@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
   Square,
   Trash2,
+  UserRound,
   Video,
   WandSparkles,
   Workflow,
@@ -1084,6 +1085,12 @@ export function Dashboard() {
               >
                 <LoaderCircle {...iconProps} />
                 Refresh
+              </Button>
+              <Button asChild variant="soft">
+                <a href="/dashboard/models">
+                  <UserRound {...iconProps} />
+                  Models
+                </a>
               </Button>
               <Button asChild variant="soft">
                 <a href="/dashboard/video-flow">

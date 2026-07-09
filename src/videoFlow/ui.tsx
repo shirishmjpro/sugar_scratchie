@@ -80,7 +80,7 @@ export function MediaPreview({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [zoomOpen]);
 
-  if (!src || hasError) return null;
+  if (!src) return null;
 
   const showZoom = zoomable && type === "image";
 
@@ -92,7 +92,7 @@ export function MediaPreview({
             {label}
           </Text>
           <Flex align="center" gap="1">
-            {showZoom ? (
+            {showZoom && !hasError ? (
               <Button
                 aria-label={`Zoom ${label}`}
                 size="1"
@@ -115,12 +115,21 @@ export function MediaPreview({
                 <Trash2 {...iconProps} />
               </Button>
             ) : null}
-            <Badge color="gray" variant="soft">
-              {type}
+            <Badge color={hasError ? "red" : "gray"} variant="soft">
+              {hasError ? "failed" : type}
             </Badge>
           </Flex>
         </Flex>
-        {type === "image" ? (
+        {hasError ? (
+          <Box className="dashboard-preview-empty">
+            <Text color="red" size="2">
+              Couldn’t load {type}: {label}
+            </Text>
+            <Text as="div" color="gray" size="1" mt="1">
+              {value}
+            </Text>
+          </Box>
+        ) : type === "image" ? (
           <button
             className={`dashboard-preview-media-button${size === "compact" ? " dashboard-preview-media-button--compact" : ""}`}
             disabled={!showZoom}

@@ -91,6 +91,7 @@ export type StoredVideoFlowDraft = {
   dressReferenceImage: string;
   cardId: string;
   cardLabel: string;
+  modelId: string;
   writeWebm: boolean;
   compressPreset: CompressPreset;
   resolution: string;
@@ -126,6 +127,7 @@ export function readStoredVideoFlowDraft(): StoredVideoFlowDraft | null {
       dressReferenceImage: parsed.dressReferenceImage ?? "",
       cardId: parsed.cardId ?? "",
       cardLabel: parsed.cardLabel ?? "",
+      modelId: parsed.modelId ?? "",
       writeWebm: parsed.writeWebm ?? true,
       compressPreset: parseCompressPreset(parsed.compressPreset),
       resolution: parsed.resolution ?? "720p",
@@ -199,6 +201,7 @@ export function storedDraftFromApi(draft?: {
   dress_reference_image?: string;
   card_id?: string;
   card_label?: string;
+  model_id?: string;
   write_webm?: boolean;
   compress_preset?: string;
   resolution?: string;
@@ -223,6 +226,7 @@ export function storedDraftFromApi(draft?: {
     dressReferenceImage: draft.dress_reference_image ?? "",
     cardId: draft.card_id,
     cardLabel: draft.card_label ?? "",
+    modelId: draft.model_id ?? "",
     writeWebm: draft.write_webm ?? true,
     compressPreset: parseCompressPreset(draft.compress_preset),
     resolution: draft.resolution ?? "720p",

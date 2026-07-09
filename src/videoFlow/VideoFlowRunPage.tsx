@@ -1,5 +1,4 @@
 import { Callout, Card, Flex } from "@radix-ui/themes";
-import { ProjectBar } from "./ProjectBar";
 import { RunMode } from "./runMode";
 import { VideoFlowShell } from "./VideoFlowShell";
 import { useVideoFlowState } from "./useVideoFlowState";
@@ -27,6 +26,7 @@ export function VideoFlowRunPage() {
     setCardId,
     cardLabel,
     setCardLabel,
+    modelId,
     writeWebm,
     setWriteWebm,
     compressPreset,
@@ -58,10 +58,7 @@ export function VideoFlowRunPage() {
     refreshHealth,
     refreshJobs,
     refreshProjects,
-    projects,
     activeProjectId,
-    selectProject,
-    createProject,
     applyVideoFlowDraft,
   } = state;
 
@@ -69,7 +66,11 @@ export function VideoFlowRunPage() {
     <VideoFlowShell
       active="run"
       error={error}
-      subtitle={`Running “${flow.label}” for project ${activeProjectId || "—"}.`}
+      subtitle={
+        activeProjectId
+          ? `Running “${flow.label}” for ${activeProjectId}. Switch cards from Models → Edit.`
+          : `No card open — create or edit one from Models.`
+      }
       title="Run flow"
       onRefresh={() => {
         refreshHealth().catch((caught) => setError(String(caught)));
@@ -84,74 +85,69 @@ export function VideoFlowRunPage() {
           </Callout.Text>
         </Callout.Root>
       ) : null}
+      {!activeProjectId ? (
+        <Callout.Root color="blue" mb="4">
+          <Callout.Text>
+            Open a motion card from <a href="/dashboard/models">Models</a> (Edit) to run the
+            pipeline. New cards are created there too.
+          </Callout.Text>
+        </Callout.Root>
+      ) : null}
       <Flex direction="column" gap="4">
-        <ProjectBar
-        activeProjectId={activeProjectId}
-        pipelineLength={flow.pipeline.length}
-        projects={projects}
-        onCreateProject={async (projectId, label) => {
-          await createProject(projectId, label);
-          await refreshProjects();
-        }}
-        onError={setError}
-        onSelectProject={async (projectId) => {
-          await selectProject(projectId);
-          await refreshProjects();
-        }}
-      />
-      <Card size="4">
-        <RunMode
-          flow={flow}
-          jobs={jobs}
-          canUseGrok={canUseGrok}
-          canUseSourceAi={canUseSourceAi}
-          canUseWavespeed={canUseWavespeed}
-          aiProvider={aiProvider}
-          sourceImageModel={sourceImageModel}
-          backgroundVideoModel={backgroundVideoModel}
-          dressVideoModel={dressVideoModel}
-          enhancePrompt={enhancePrompt}
-          image={image}
-          backgroundMotionPrompt={backgroundMotionPrompt}
-          dressPrompt={dressPrompt}
-          dressReferenceImage={dressReferenceImage}
-          cardId={cardId}
-          cardLabel={cardLabel}
-          writeWebm={writeWebm}
-          compressPreset={compressPreset}
-          resolution={resolution}
-          tracker={tracker}
-          meshTune={meshTune}
-          sourceMode={sourceMode}
-          sourcePrompt={sourcePrompt}
-          faceImage={faceImage}
-          baseImage={baseImage}
-          onImageChange={setImage}
-          onBackgroundMotionPromptChange={setBackgroundMotionPrompt}
-          onDressPromptChange={setDressPrompt}
-          onDressReferenceImageChange={setDressReferenceImage}
-          onCardIdChange={setCardId}
-          onCardLabelChange={setCardLabel}
-          onWriteWebmChange={setWriteWebm}
-          onCompressPresetChange={setCompressPreset}
-          onTrackerChange={setTracker}
-          onMeshTuneChange={setMeshTune}
-          onResolutionChange={setResolution}
-          onSourceModeChange={setSourceMode}
-          onSourcePromptChange={setSourcePrompt}
-          onFaceImageChange={setFaceImage}
-          onBaseImageChange={setBaseImage}
-          onAiProviderChange={setAiProvider}
-          onSourceImageModelChange={setSourceImageModel}
-          onBackgroundVideoModelChange={setBackgroundVideoModel}
-          onDressVideoModelChange={setDressVideoModel}
-          onEnhancePromptChange={setEnhancePrompt}
-          onApplyDraft={applyVideoFlowDraft}
-          onRefreshJobs={refreshJobs}
-          onRefreshAssets={async () => undefined}
-          onError={setError}
-        />
-      </Card>
+        <Card size="4">
+          <RunMode
+            flow={flow}
+            jobs={jobs}
+            canUseGrok={canUseGrok}
+            canUseSourceAi={canUseSourceAi}
+            canUseWavespeed={canUseWavespeed}
+            aiProvider={aiProvider}
+            sourceImageModel={sourceImageModel}
+            backgroundVideoModel={backgroundVideoModel}
+            dressVideoModel={dressVideoModel}
+            enhancePrompt={enhancePrompt}
+            image={image}
+            backgroundMotionPrompt={backgroundMotionPrompt}
+            dressPrompt={dressPrompt}
+            dressReferenceImage={dressReferenceImage}
+            cardId={cardId}
+            cardLabel={cardLabel}
+            modelId={modelId}
+            writeWebm={writeWebm}
+            compressPreset={compressPreset}
+            resolution={resolution}
+            tracker={tracker}
+            meshTune={meshTune}
+            sourceMode={sourceMode}
+            sourcePrompt={sourcePrompt}
+            faceImage={faceImage}
+            baseImage={baseImage}
+            onImageChange={setImage}
+            onBackgroundMotionPromptChange={setBackgroundMotionPrompt}
+            onDressPromptChange={setDressPrompt}
+            onDressReferenceImageChange={setDressReferenceImage}
+            onCardIdChange={setCardId}
+            onCardLabelChange={setCardLabel}
+            onWriteWebmChange={setWriteWebm}
+            onCompressPresetChange={setCompressPreset}
+            onTrackerChange={setTracker}
+            onMeshTuneChange={setMeshTune}
+            onResolutionChange={setResolution}
+            onSourceModeChange={setSourceMode}
+            onSourcePromptChange={setSourcePrompt}
+            onFaceImageChange={setFaceImage}
+            onBaseImageChange={setBaseImage}
+            onAiProviderChange={setAiProvider}
+            onSourceImageModelChange={setSourceImageModel}
+            onBackgroundVideoModelChange={setBackgroundVideoModel}
+            onDressVideoModelChange={setDressVideoModel}
+            onEnhancePromptChange={setEnhancePrompt}
+            onApplyDraft={applyVideoFlowDraft}
+            onRefreshJobs={refreshJobs}
+            onRefreshAssets={async () => undefined}
+            onError={setError}
+          />
+        </Card>
       </Flex>
     </VideoFlowShell>
   );

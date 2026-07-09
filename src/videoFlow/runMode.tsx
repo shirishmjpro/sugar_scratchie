@@ -1,9 +1,10 @@
-import { Check, ChevronDown, Loader2, Play, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, ImagePlus, Loader2, Play, RotateCcw, Trash2 } from "lucide-react";
 import {
   Badge,
   Box,
   Button,
   Callout,
+  Card,
   Checkbox,
   Code,
   Flex,
@@ -18,6 +19,7 @@ import {
 } from "@radix-ui/themes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../shared/api";
+import { deleteCardPhoto, uploadCardPhoto, type PhotoInfo } from "../shared/models";
 import { flowStepBadge, type FlowNodeRuntime } from "./flowCanvas";
 import {
   COMPRESS_PRESETS,
@@ -270,7 +272,11 @@ function resolveFlowNodeStatuses(
     return next;
   }
 
-  if (!flowState) {
+  // Ignore leftover state from the previous card while the new one loads.
+  const stateForCard =
+    flowState && flowState.card_id === cardId.trim() ? flowState : null;
+
+  if (!stateForCard) {
     const firstStep = flow.pipeline[0];
     const firstNode = firstStep ? stepToNodeMap[firstStep] : undefined;
     if (firstNode) next[firstNode] = image ? "ready" : "locked";
@@ -278,7 +284,7 @@ function resolveFlowNodeStatuses(
   }
 
   for (const [step, nodeId] of Object.entries(stepToNodeMap) as [VideoFlowStepKey, FlowNodeId][]) {
-    const stepState = flowState.steps[step];
+    const stepState = stateForCard.steps[step];
     if (
       runningStep === step &&
       stepState?.status !== "locked"
@@ -293,7 +299,7 @@ function resolveFlowNodeStatuses(
     if (stepState) next[nodeId] = stepState.status;
   }
 
-  next.output = flowState.complete ? "approved" : "idle";
+  next.output = stateForCard.complete ? "approved" : "idle";
   return next;
 }
 
@@ -433,6 +439,7 @@ type RunModeProps = {
   dressReferenceImage: string;
   cardId: string;
   cardLabel: string;
+  modelId: string;
   writeWebm: boolean;
   compressPreset: CompressPreset;
   resolution: string;
@@ -468,6 +475,134 @@ type RunModeProps = {
   onError: (message: string) => void;
 };
 
+type CardApiEntry = {
+  id: string;
+  label: string;
+  photos?: PhotoInfo[];
+};
+
+function CardPhotosPanel({
+  cardId,
+  onError,
+}: {
+  cardId: string;
+  onError: (message: string) => void;
+}) {
+  const [photos, setPhotos] = useState<PhotoInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const refreshPhotos = async () => {
+    if (!cardId.trim()) {
+      setPhotos([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await api<{ cards: CardApiEntry[] }>("/api/cards");
+      const card = data.cards.find((entry) => entry.id === cardId.trim());
+      setPhotos(card?.photos ?? []);
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+      setPhotos([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshPhotos();
+  }, [cardId]);
+
+  async function handleUpload(file: File) {
+    if (!cardId.trim()) return;
+    setUploading(true);
+    onError("");
+    try {
+      await uploadCardPhoto(cardId.trim(), file);
+      await refreshPhotos();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleDelete(photoId: string) {
+    if (!cardId.trim()) return;
+    onError("");
+    try {
+      await deleteCardPhoto(cardId.trim(), photoId);
+      await refreshPhotos();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  return (
+    <Card size="3">
+      <Flex align="center" justify="between" mb="3">
+        <Box>
+          <Heading size="3">PhotoScratch photos</Heading>
+          <Text color="gray" size="2">
+            Optional still images attached to this motion card. Scratch mechanics come later.
+          </Text>
+        </Box>
+        <Button
+          disabled={!cardId.trim() || uploading}
+          type="button"
+          variant="soft"
+          onClick={() => inputRef.current?.click()}
+        >
+          <ImagePlus {...iconProps} />
+          Upload photo
+        </Button>
+        <input
+          ref={inputRef}
+          accept="image/jpeg,image/png,image/webp"
+          hidden
+          type="file"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (file) void handleUpload(file);
+          }}
+        />
+      </Flex>
+
+      {loading ? (
+        <Text color="gray" size="2">
+          Loading photos…
+        </Text>
+      ) : photos.length === 0 ? (
+        <Text color="gray" size="2">
+          No photos yet. Upload images to build the PhotoScratch gallery for this card.
+        </Text>
+      ) : (
+        <Grid columns={{ initial: "2", sm: "3", md: "4" }} gap="3">
+          {photos.map((photo) => (
+            <Box key={photo.id} className="video-flow-photo-thumb">
+              <img alt="" src={photo.src} style={{ width: "100%", borderRadius: 8, display: "block" }} />
+              <Button
+                color="red"
+                mt="2"
+                size="1"
+                type="button"
+                variant="soft"
+                onClick={() => void handleDelete(photo.id)}
+              >
+                <Trash2 {...iconProps} />
+                Remove
+              </Button>
+            </Box>
+          ))}
+        </Grid>
+      )}
+    </Card>
+  );
+}
+
 export function RunMode(props: RunModeProps) {
   const {
     flow,
@@ -486,6 +621,7 @@ export function RunMode(props: RunModeProps) {
     dressReferenceImage,
     cardId,
     cardLabel,
+    modelId,
     writeWebm,
     compressPreset,
     resolution,
@@ -583,7 +719,8 @@ export function RunMode(props: RunModeProps) {
 
   const handledStepJobId = useRef("");
   const handledMeshJobId = useRef("");
-  const previousImageRef = useRef(image);
+  // Tracks which card async flow-state fetches belong to.
+  const desiredFlowCardIdRef = useRef(cardId.trim());
 
   const runningStep = useMemo(() => {
     if (!stepJob || stepJob.status === "queued" || stepJob.status === "running") {
@@ -617,14 +754,21 @@ export function RunMode(props: RunModeProps) {
     }
     try {
       const data = await api<VideoFlowState>(`/api/video-flow/${encodeURIComponent(id)}/state`);
+      // Ignore late responses from a previous card.
+      if (desiredFlowCardIdRef.current !== id) return;
       setFlowState(data);
     } catch (caught) {
+      if (desiredFlowCardIdRef.current !== id) return;
       setFlowState(null);
       onError(caught instanceof Error ? caught.message : String(caught));
     }
   };
 
   useEffect(() => {
+    const id = cardId.trim();
+    desiredFlowCardIdRef.current = id;
+    // Don't null flowState here — that flashes every step as Locked while the
+    // new card's state loads. Stale responses are ignored via desiredFlowCardIdRef.
     void refreshFlowState();
   }, [cardId]);
 
@@ -700,34 +844,22 @@ export function RunMode(props: RunModeProps) {
         const data = await api<{ draft: NonNullable<Parameters<typeof storedDraftFromApi>[0]> }>(
           `/api/video-flow/${encodeURIComponent(id)}/draft`,
         );
+        if (desiredFlowCardIdRef.current !== id) return;
         const parsed = storedDraftFromApi(data.draft);
-        if (parsed) onApplyDraft(parsed);
+        if (parsed && parsed.cardId === id) onApplyDraft(parsed);
+        if (desiredFlowCardIdRef.current !== id) return;
         const stateData = await api<VideoFlowState>(`/api/video-flow/${encodeURIComponent(id)}/state`);
+        if (desiredFlowCardIdRef.current !== id) return;
         setFlowState(stateData);
       } catch (caught) {
+        if (desiredFlowCardIdRef.current !== id) return;
         onError(caught instanceof Error ? caught.message : String(caught));
       }
     })();
   }, [cardId, onApplyDraft, onError, sourceImageJob, sourceJobHandledId]);
 
-  useEffect(() => {
-    const prev = previousImageRef.current;
-    if (image === prev) return;
-    previousImageRef.current = image;
-    const id = cardId.trim();
-    if (!id || !image.trim()) return;
-    void (async () => {
-      try {
-        const data = await api<VideoFlowState>(
-          `/api/video-flow/${encodeURIComponent(id)}/reject`,
-          { method: "POST", body: JSON.stringify({ step: "background" }) },
-        );
-        setFlowState(data);
-      } catch {
-        // New projects may not have pipeline state yet.
-      }
-    })();
-  }, [image, cardId]);
+  // Intentionally no auto-reject on image change. Draft loads / card switches
+  // used to look like edits and wipe published cards. Use Remake step instead.
 
   useEffect(() => {
     if (failedStep && stepToNodeMap[failedStep]) {
@@ -843,6 +975,7 @@ export function RunMode(props: RunModeProps) {
     dress_reference_image: dressReferenceImage,
     card_id: cardId.trim(),
     card_label: cardLabel.trim(),
+    model_id: modelId.trim(),
     resolution,
     enhance_dress_prompt: enhancePrompt,
     tracker,
@@ -1732,28 +1865,54 @@ export function RunMode(props: RunModeProps) {
           />
         ) : null}
 
-        {activeStep && activeStep !== "symbols" && flowState?.steps[activeStep]?.artifacts.length ? (
-          <Flex direction="column" gap="3">
-            {flowState.steps[activeStep].artifacts.map((artifact) =>
-              artifact.endsWith("compress-report.json") ? (
-                <Text key={artifact} size="2">
-                  Delivery report: <Code className="dashboard-code">{artifact}</Code>
-                </Text>
-              ) : artifact.endsWith(".json") ? (
-                <Text key={artifact} size="2">
-                  Mesh written to <Code className="dashboard-code">{artifact}</Code>
-                </Text>
-              ) : (
-                <MediaPreview
-                  key={artifact}
-                  label={artifact.split("/").pop() ?? "Result"}
-                  type="video"
-                  value={artifact}
-                />
-              ),
-            )}
-          </Flex>
-        ) : null}
+        {(() => {
+          if (!activeStep || activeStep === "symbols" || activeStep === "mesh") return null;
+          const stepStatus = flowState?.steps[activeStep]?.status;
+          const fromState = (flowState?.steps[activeStep]?.artifacts ?? []).filter(Boolean);
+          const id = cardId.trim();
+          // Only fall back to published card videos after a step has produced
+          // something (approved/review). "Ready" means not run yet — don't show
+          // a missing public/cards/... path as a failed player.
+          const fallback =
+            fromState.length === 0 &&
+            id &&
+            (stepStatus === "approved" || stepStatus === "review")
+              ? activeStep === "background"
+                ? [`public/cards/${id}/background.mp4`]
+                : activeStep === "dress"
+                  ? [`public/cards/${id}/foreground.mp4`]
+                  : activeStep === "card" || activeStep === "compress"
+                    ? [
+                        `public/cards/${id}/background.mp4`,
+                        `public/cards/${id}/foreground.mp4`,
+                      ]
+                    : []
+              : [];
+          const artifacts = fromState.length ? fromState : fallback;
+          if (!artifacts.length) return null;
+          return (
+            <Flex direction="column" gap="3" mt="3">
+              {artifacts.map((artifact) =>
+                artifact.endsWith("compress-report.json") ? (
+                  <Text key={artifact} size="2">
+                    Delivery report: <Code className="dashboard-code">{artifact}</Code>
+                  </Text>
+                ) : artifact.endsWith(".json") ? (
+                  <Text key={artifact} size="2">
+                    Mesh written to <Code className="dashboard-code">{artifact}</Code>
+                  </Text>
+                ) : (
+                  <MediaPreview
+                    key={artifact}
+                    label={artifact.split("/").pop() ?? "Result"}
+                    type="video"
+                    value={artifact}
+                  />
+                ),
+              )}
+            </Flex>
+          );
+        })()}
       </div>
 
       <div className="flow-run-bar">
@@ -1849,6 +2008,10 @@ export function RunMode(props: RunModeProps) {
       </div>
         </section>
       </div>
+
+      {cardId.trim() ? (
+        <CardPhotosPanel cardId={cardId.trim()} onError={onError} />
+      ) : null}
     </Flex>
   );
 }

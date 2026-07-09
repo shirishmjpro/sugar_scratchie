@@ -1,0 +1,39 @@
+{
+  "models": [
+    {
+      "id": "asia",
+      "label": "Asia",
+      "avatar": null
+    },
+    {
+      "id": "girl",
+      "label": "Girl",
+      "avatar": null
+    },
+    {
+      "id": "glaucamp",
+      "label": "Glauca",
+      "avatar": null
+    },
+    {
+      "id": "janja",
+      "label": "Janja",
+      "avatar": null
+    },
+    {
+      "id": "julianaval",
+      "label": "julianaval",
+      "avatar": null
+    },
+    {
+      "id": "korea",
+      "label": "Korea",
+      "avatar": null
+    },
+    {
+      "id": "shine",
+      "label": "Shine",
+      "avatar": null
+    }
+  ]
+}

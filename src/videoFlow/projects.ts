@@ -19,6 +19,7 @@ export type VideoFlowProject = {
     dress_prompt?: string;
     card_id?: string;
     card_label?: string;
+    model_id?: string;
     write_webm?: boolean;
     compress_preset?: string;
     resolution?: string;

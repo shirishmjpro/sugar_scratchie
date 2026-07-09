@@ -131,7 +131,7 @@ export function DesignerMode({
     <Flex direction="column" gap="4">
       <Flex align="center" justify="between" wrap="wrap" gap="3">
         <Text color="gray" size="2">
-          Click a node to edit its settings. Save when you are ready, then open Run.
+          Click a node to edit shared defaults. Save, then open a card from Models to run it.
         </Text>
         <Flex gap="2" wrap="wrap">
           <Button type="button" variant="soft" onClick={resetFlow}>
@@ -179,15 +179,17 @@ export function DesignerMode({
 
           {activeNode === "source" ? (
             <Flex direction="column" gap="4">
-              {activeProjectId ? (
-                <Field label="Active project">
-                  <TextField.Root readOnly value={activeProjectId} />
-                </Field>
-              ) : (
-                <Text color="orange" size="2">
-                  Create or select a project above before running this flow.
-                </Text>
-              )}
+              <Text color="gray" size="2">
+                Design edits the shared pipeline template. Create and open motion cards from{" "}
+                <a href="/dashboard/models">Models</a>
+                {activeProjectId ? (
+                  <>
+                    {" "}
+                    (last opened: <strong>{activeProjectId}</strong>)
+                  </>
+                ) : null}
+                .
+              </Text>
               <Field label="Flow name">
                 <TextField.Root
                   value={draft.label}

@@ -213,26 +213,57 @@ def write_state(work: Path, state: dict) -> None:
     state_path(work).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
-def artifact_paths(work: Path, card_id: str, state: dict | None = None) -> dict[VideoFlowStep, list[str]]:
+def video_file_present(path: Path) -> bool:
+    """Fast existence check — no ffprobe. Used for list endpoints."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _work_background_clip(work: Path) -> Path | None:
+    """Prefer the canonical raw clip; fall back to the Grok-compatible resize."""
+    raw = work / "background-raw.mp4"
+    if raw.exists():
+        return raw
+    compat = work / "background-raw-grok-compatible.mp4"
+    return compat if compat.exists() else None
+
+
+def artifact_paths(
+    work: Path,
+    card_id: str,
+    state: dict | None = None,
+    *,
+    probe_videos: bool = True,
+) -> dict[VideoFlowStep, list[str]]:
     mesh_out = MESH_DIR / f"{card_id}.json"
     card_bg = CARDS_DIR / card_id / "background.mp4"
     card_fg = CARDS_DIR / card_id / "foreground.mp4"
     approved = state["approved"] if state else []
-    background_raw = work / "background-raw.mp4"
+    background_clip = _work_background_clip(work)
     foreground_dressed = work / "foreground-dressed.mp4"
     compress_report = work / "compress-report.json"
+    video_ok = output_video_ready if probe_videos else video_file_present
+    # Prefer work-dir clips; fall back to published card videos so previews still
+    # show after cleanup / remake / recovery.
+    background_preview = ""
+    if background_clip and video_ok(background_clip):
+        background_preview = str(background_clip.relative_to(ROOT))
+    elif video_ok(card_bg) and "background" in approved:
+        background_preview = str(card_bg.relative_to(ROOT))
+
+    dress_preview = ""
+    if video_ok(foreground_dressed) and "background" in approved:
+        dress_preview = str(foreground_dressed.relative_to(ROOT))
+    elif video_ok(card_fg) and "dress" in approved:
+        dress_preview = str(card_fg.relative_to(ROOT))
     return {
-        "background": [
-            str(background_raw.relative_to(ROOT)) if output_video_ready(background_raw) else ""
-        ],
-        "dress": [
-            str(foreground_dressed.relative_to(ROOT))
-            if output_video_ready(foreground_dressed) and "background" in approved
-            else ""
-        ],
+        "background": [background_preview],
+        "dress": [dress_preview],
         "card": [
-            str(card_bg.relative_to(ROOT)) if output_video_ready(card_bg) else "",
-            str(card_fg.relative_to(ROOT)) if output_video_ready(card_fg) else "",
+            str(card_bg.relative_to(ROOT)) if video_ok(card_bg) else "",
+            str(card_fg.relative_to(ROOT)) if video_ok(card_fg) else "",
         ],
         "mesh": mesh_artifact_paths(work, card_id),
         "symbols": [
@@ -241,19 +272,32 @@ def artifact_paths(work: Path, card_id: str, state: dict | None = None) -> dict[
             else ""
         ],
         "compress": [
-            str(card_bg.relative_to(ROOT)) if output_video_ready(card_bg) else "",
-            str(card_fg.relative_to(ROOT)) if output_video_ready(card_fg) else "",
+            str(card_bg.relative_to(ROOT)) if video_ok(card_bg) else "",
+            str(card_fg.relative_to(ROOT)) if video_ok(card_fg) else "",
             str(compress_report.relative_to(ROOT)) if compress_report.exists() else "",
         ],
     }
 
 
-def preview_paths(work: Path, card_id: str, state: dict | None = None) -> dict[VideoFlowStep, list[str]]:
-    artifacts = artifact_paths(work, card_id, state)
+def preview_paths(
+    work: Path,
+    card_id: str,
+    state: dict | None = None,
+    *,
+    probe_videos: bool = True,
+) -> dict[VideoFlowStep, list[str]]:
+    artifacts = artifact_paths(work, card_id, state, probe_videos=probe_videos)
     return {step: [path for path in paths if path] for step, paths in artifacts.items()}
 
 
-def step_artifact_ready(work: Path, card_id: str, step: VideoFlowStep, state: dict | None = None) -> bool:
+def step_artifact_ready(
+    work: Path,
+    card_id: str,
+    step: VideoFlowStep,
+    state: dict | None = None,
+    *,
+    probe_videos: bool = True,
+) -> bool:
     if step == "mesh":
         if mesh_candidates_ready(work):
             return True
@@ -267,18 +311,16 @@ def step_artifact_ready(work: Path, card_id: str, step: VideoFlowStep, state: di
         card_bg = CARDS_DIR / card_id / "background.mp4"
         card_fg = CARDS_DIR / card_id / "foreground.mp4"
         report = work / "compress-report.json"
-        return (
-            output_video_ready(card_bg)
-            and output_video_ready(card_fg)
-            and report.exists()
-        )
-    paths = preview_paths(work, card_id, state)[step]
+        video_ok = output_video_ready if probe_videos else video_file_present
+        return video_ok(card_bg) and video_ok(card_fg) and report.exists()
+    paths = preview_paths(work, card_id, state, probe_videos=probe_videos)[step]
     if not paths:
         return False
     for rel in paths:
         path = ROOT / rel
         if step in ("background", "dress", "card"):
-            if not output_video_ready(path):
+            video_ok = output_video_ready if probe_videos else video_file_present
+            if not video_ok(path):
                 return False
         elif not path.exists():
             return False
@@ -458,16 +500,25 @@ def reject_flow_step(card_id: str, step: VideoFlowStep) -> dict:
     return flow_state(card_id)
 
 
-def step_status(work: Path, card_id: str, step: VideoFlowStep, state: dict) -> str:
+def step_status(
+    work: Path,
+    card_id: str,
+    step: VideoFlowStep,
+    state: dict,
+    *,
+    probe_videos: bool = True,
+) -> str:
     if not step_unlocked(state, step):
         return "locked"
     if step in state["approved"]:
-        if not step_artifact_ready(work, card_id, step, state):
+        if not step_artifact_ready(work, card_id, step, state, probe_videos=probe_videos):
             return "ready"
         return "approved"
     if step == "mesh" and mesh_candidates_ready(work):
         return "review"
-    if step in REVIEW_STEPS and step_artifact_ready(work, card_id, step, state):
+    if step in REVIEW_STEPS and step_artifact_ready(
+        work, card_id, step, state, probe_videos=probe_videos
+    ):
         return "review"
     return "ready"
 
@@ -501,12 +552,29 @@ def _sync_foreground_to_background(work: Path, paths: dict[str, Path]) -> None:
     )
 
 
+def _draft_model_id(work: Path) -> str | None:
+    draft_file = draft_path(work)
+    if not draft_file.exists():
+        return None
+    try:
+        data = json.loads(draft_file.read_text(encoding="utf-8"))
+        model_id = data.get("model_id")
+        if isinstance(model_id, str) and model_id.strip():
+            return model_id.strip()
+    except Exception:
+        pass
+    return None
+
+
 def _publish_card(
     *,
     card_id: str,
     card_label: str,
     paths: dict[str, Path],
+    model_id: str | None = None,
 ) -> None:
+    work = paths["background_raw"].parent
+    effective_model_id = model_id or _draft_model_id(work)
     background = str(paths["background_raw"].relative_to(ROOT))
     foreground = str(paths["foreground_dressed"].relative_to(ROOT))
     card_dir = CARDS_DIR / card_id
@@ -520,6 +588,7 @@ def _publish_card(
                 label=card_label,
                 background=background,
                 foreground=foreground,
+                model_id=effective_model_id,
             ),
         )
         print(f"Card updated: {card.id} ({card.label})")
@@ -534,6 +603,7 @@ def _publish_card(
                 label=card_label,
                 background=background,
                 foreground=foreground,
+                model_id=effective_model_id,
             ),
         )
     except HTTPException as exc:
@@ -564,27 +634,41 @@ def _ensure_card_published(
     return card_dir
 
 
-def recover_stale_approvals(work: Path, card_id: str, state: dict) -> bool:
-    """Restore approvals when Grok clips and card still exist but state.json was cleared."""
+def recover_stale_approvals(
+    work: Path,
+    card_id: str,
+    state: dict,
+    *,
+    probe_videos: bool = True,
+) -> bool:
+    """Restore approvals when artifacts still exist but state.json was cleared."""
     if state["approved"]:
         return False
     paths = _paths(work)
     card_dir = CARDS_DIR / card_id
     card_bg = card_dir / "background.mp4"
     card_fg = card_dir / "foreground.mp4"
-    if not (
-        output_video_ready(paths["background_raw"])
-        and output_video_ready(paths["foreground_dressed"])
-        and card_dir.exists()
-        and output_video_ready(card_bg)
-        and output_video_ready(card_fg)
-    ):
+    video_ok = output_video_ready if probe_videos else video_file_present
+    background_clip = _work_background_clip(work)
+    published = (
+        card_dir.exists()
+        and video_ok(card_bg)
+        and video_ok(card_fg)
+    )
+    # Published card implies background + dress + card were done, even if the
+    # work-dir dress clip was cleaned up or only a grok-compatible bg remains.
+    if published:
+        restored: list[VideoFlowStep] = ["background", "dress", "card"]
+    elif background_clip and video_ok(background_clip):
+        restored = ["background"]
+        if video_ok(paths["foreground_dressed"]):
+            restored.append("dress")
+    else:
         return False
-    restored: list[VideoFlowStep] = ["background", "dress", "card"]
     mesh_out = MESH_DIR / f"{card_id}.json"
-    if mesh_out.exists():
+    if "card" in restored and mesh_out.exists():
         restored.append("mesh")
-    if mesh_out.exists() and symbol_points_complete(mesh_out):
+    if "mesh" in restored and symbol_points_complete(mesh_out):
         restored.append("symbols")
     state["approved"] = restored
     if not state.get("recovery_notified"):
@@ -604,17 +688,17 @@ def read_compress_report(card_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def flow_state(card_id: str) -> dict:
+def flow_state(card_id: str, *, probe_videos: bool = True) -> dict:
     work = work_dir(card_id)
     state = read_state(work)
-    recovered = recover_stale_approvals(work, card_id, state)
+    recovered = recover_stale_approvals(work, card_id, state, probe_videos=probe_videos)
     if "mesh" in state["approved"]:
         ensure_active_mesh_snapshotted(work, card_id)
     write_state(work, state)
-    previews = preview_paths(work, card_id, state)
+    previews = preview_paths(work, card_id, state, probe_videos=probe_videos)
     steps = {
         step: {
-            "status": step_status(work, card_id, step, state),
+            "status": step_status(work, card_id, step, state, probe_videos=probe_videos),
             "label": STEP_LABELS[step],
             "artifacts": previews[step],
         }
@@ -624,7 +708,10 @@ def flow_state(card_id: str) -> dict:
         "card_id": card_id,
         "approved": list(state["approved"]),
         "steps": steps,
-        "complete": step_status(work, card_id, "compress", state) == "approved",
+        "complete": step_status(
+            work, card_id, "compress", state, probe_videos=probe_videos
+        )
+        == "approved",
         "mesh_compare": mesh_compare_entries(work, card_id),
         "compress_report": read_compress_report(card_id),
         "recovered_approvals": recovered,
@@ -666,6 +753,7 @@ def save_flow_draft(
     background_video_model: str = "grok-imagine",
     dress_video_model: str = "wan-2.2-video-edit",
     compress_preset: str = "mobile",
+    model_id: str = "",
 ) -> dict:
     work = work_dir(card_id)
     draft = {
@@ -676,6 +764,7 @@ def save_flow_draft(
         "dress_reference_image": dress_reference_image,
         "card_id": card_id,
         "card_label": card_label,
+        "model_id": model_id.strip(),
         "model": model,
         "resolution": resolution,
         "image_field": image_field,
@@ -701,6 +790,24 @@ def save_flow_draft(
     }
     draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
     return draft
+
+
+def patch_flow_draft_model(card_id: str, model_id: str) -> None:
+    """Sync an existing flow draft's model_id after a card is re-assigned.
+
+    No-op when the card has no video-flow work dir / draft."""
+    draft_file = WORK_DIR / card_id / "draft.json"
+    if not draft_file.exists():
+        return
+    try:
+        data = json.loads(draft_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    data["model_id"] = model_id.strip()
+    data["updated_at"] = time.time()
+    draft_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def patch_flow_draft_source(
@@ -869,6 +976,37 @@ def flow_updated_at(work: Path) -> float:
     return max(times) if times else 0.0
 
 
+def list_flow_summary(card_id: str) -> dict:
+    """Lightweight project row for the dropdown — no ffprobe / mesh JSON parsing."""
+    work = WORK_DIR / card_id
+    state = read_state(work)
+    recover_stale_approvals(work, card_id, state, probe_videos=False)
+    write_state(work, state)
+    approved = list(state["approved"])
+    steps = {}
+    for step in STEP_ORDER:
+        if not step_unlocked(state, step):
+            status = "locked"
+        elif step in approved:
+            status = "approved"
+        else:
+            status = "ready"
+        steps[step] = {
+            "status": status,
+            "label": STEP_LABELS[step],
+            "artifacts": [],
+        }
+    return {
+        "card_id": card_id,
+        "approved": approved,
+        "steps": steps,
+        "complete": "compress" in approved,
+        "mesh_compare": [],
+        "compress_report": None,
+        "recovered_approvals": False,
+    }
+
+
 def list_flows() -> list[dict]:
     if not WORK_DIR.exists():
         return []
@@ -881,7 +1019,8 @@ def list_flows() -> list[dict]:
             continue
         if not flow_has_progress(work):
             continue
-        entry = flow_state(card_id)
+        # Dropdown only needs draft + coarse status; full probe happens on open.
+        entry = list_flow_summary(card_id)
         draft = read_flow_draft(card_id)
         if draft:
             entry["draft"] = draft
@@ -959,6 +1098,7 @@ def run_video_flow_step(
     background_video_model: str = "grok-imagine",
     dress_video_model: str = "wan-2.2-video-edit",
     compress_preset: str = "mobile",
+    model_id: str = "",
 ) -> None:
     del foreground_motion_prompt, provider
     tune = mesh_tune_from_dict(mesh_tune)
@@ -993,6 +1133,7 @@ def run_video_flow_step(
         background_video_model=bg_video_model,
         dress_video_model=dress_model,
         compress_preset=delivery_preset,
+        model_id=model_id,
     )
 
     # Re-read state in case approvals changed while the job was queued.
@@ -1086,7 +1227,12 @@ def run_video_flow_step(
         ):
             raise RuntimeError("Source clips missing — complete Grok steps first.")
         _sync_foreground_to_background(work, paths)
-        _publish_card(card_id=card_id, card_label=card_label, paths=paths)
+        _publish_card(
+            card_id=card_id,
+            card_label=card_label,
+            paths=paths,
+            model_id=model_id or None,
+        )
     elif step == "mesh":
         _ensure_card_published(work=work, card_id=card_id, card_label=card_label, paths=paths)
         card_dir = CARDS_DIR / card_id

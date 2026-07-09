@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import uuid
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 
@@ -18,6 +19,11 @@ ORIGINAL_FOREGROUND = "public/cards/Green bg sample 2 swap.mp4"
 ORIGINAL_MESH = "tracked-mesh.json"
 
 
+class PhotoInfo(BaseModel):
+    id: str
+    src: str
+
+
 class CardInfo(BaseModel):
     id: str
     label: str
@@ -25,6 +31,9 @@ class CardInfo(BaseModel):
     foreground: str
     mesh: str
     has_mesh: bool
+    model_id: str | None = None
+    sort_order: int = 0
+    photos: list[PhotoInfo] = Field(default_factory=list)
 
 
 class CreateCardRequest(BaseModel):
@@ -32,12 +41,22 @@ class CreateCardRequest(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     background: str
     foreground: str
+    model_id: str | None = None
 
 
 class UpdateCardRequest(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     background: str | None = None
     foreground: str | None = None
+    model_id: str | None = None
+    sort_order: int | None = None
+
+
+class ReorderCardsRequest(BaseModel):
+    card_ids: list[str] = Field(min_length=1)
+
+
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def relative(root: Path, path: Path) -> str:
@@ -54,33 +73,109 @@ def safe_card_id(value: str) -> str:
     return slug
 
 
-def read_card_label(card_dir: Path, default: str) -> str:
+def read_card_meta(card_dir: Path, default_label: str) -> dict:
     meta = card_dir / "meta.json"
     if not meta.exists():
-        return default
+        return {"label": default_label}
     try:
         data = json.loads(meta.read_text())
+        if isinstance(data, dict):
+            return data
     except Exception:
-        return default
-    label = data.get("label")
+        pass
+    return {"label": default_label}
+
+
+def read_card_label(card_dir: Path, default: str) -> str:
+    meta = read_card_meta(card_dir, default)
+    label = meta.get("label")
     if isinstance(label, str) and label.strip():
         return label.strip()
     return default
 
 
-def write_card_label(card_dir: Path, label: str) -> None:
-    meta = card_dir / "meta.json"
-    data: dict[str, str] = {}
-    if meta.exists():
-        try:
-            loaded = json.loads(meta.read_text())
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            pass
-    data["label"] = label.strip()
+def read_card_model_id(card_dir: Path) -> str | None:
+    meta = read_card_meta(card_dir, "")
+    model_id = meta.get("model_id")
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id.strip()
+    return None
+
+
+def read_card_sort_order(card_dir: Path) -> int:
+    meta = read_card_meta(card_dir, "")
+    value = meta.get("sort_order")
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def write_card_sort_order(card_dir: Path, sort_order: int) -> None:
+    write_card_meta(card_dir, sort_order=int(sort_order))
+
+
+def next_sort_order_for_model(cards_dir: Path, model_id: str | None) -> int:
+    if not model_id or not cards_dir.exists():
+        return 0
+    highest = -1
+    for directory in cards_dir.iterdir():
+        if not directory.is_dir():
+            continue
+        if read_card_model_id(directory) != model_id:
+            continue
+        highest = max(highest, read_card_sort_order(directory))
+    return highest + 1
+
+
+def read_card_photos(card_dir: Path, card_id: str) -> list[PhotoInfo]:
+    meta = read_card_meta(card_dir, card_id)
+    raw = meta.get("photos")
+    if not isinstance(raw, list):
+        return []
+    photos: list[PhotoInfo] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        photo_id = entry.get("id")
+        src = entry.get("src")
+        if isinstance(photo_id, str) and photo_id.strip() and isinstance(src, str) and src.strip():
+            photos.append(PhotoInfo(id=photo_id.strip(), src=src.strip()))
+    return photos
+
+
+def write_card_meta(card_dir: Path, **updates: object) -> None:
+    default_label = card_dir.name.replace("_", " ").title()
+    data = read_card_meta(card_dir, default_label)
+    for key, value in updates.items():
+        if value is not None:
+            data[key] = value
     card_dir.mkdir(parents=True, exist_ok=True)
-    meta.write_text(json.dumps(data, indent=2) + "\n")
+    (card_dir / "meta.json").write_text(json.dumps(data, indent=2) + "\n")
+
+
+def write_card_label(card_dir: Path, label: str) -> None:
+    write_card_meta(card_dir, label=label.strip())
+
+
+def write_card_model_id(card_dir: Path, model_id: str | None) -> None:
+    if model_id and model_id.strip():
+        write_card_meta(card_dir, model_id=model_id.strip())
+    else:
+        data = read_card_meta(card_dir, card_dir.name.replace("_", " ").title())
+        data.pop("model_id", None)
+        card_dir.mkdir(parents=True, exist_ok=True)
+        (card_dir / "meta.json").write_text(json.dumps(data, indent=2) + "\n")
+
+
+def write_card_photos(card_dir: Path, photos: list[PhotoInfo]) -> None:
+    write_card_meta(
+        card_dir,
+        photos=[{"id": photo.id, "src": photo.src} for photo in photos],
+    )
 
 
 def mesh_names(mesh_dir: Path) -> set[str]:
@@ -99,20 +194,24 @@ def list_cards(root: Path, cards_dir: Path, mesh_dir: Path) -> list[CardInfo]:
             foreground=ORIGINAL_FOREGROUND,
             mesh=ORIGINAL_MESH,
             has_mesh=ORIGINAL_MESH in meshes,
+            sort_order=0,
         )
     ]
 
     if not cards_dir.exists():
         return cards
 
-    for directory in sorted(path for path in cards_dir.iterdir() if path.is_dir()):
+    discovered: list[CardInfo] = []
+    for directory in cards_dir.iterdir():
+        if not directory.is_dir():
+            continue
         background = directory / "background.mp4"
         foreground = directory / "foreground.mp4"
         if not background.exists() or not foreground.exists():
             continue
         card_id = directory.name
         mesh = f"{card_id}.json"
-        cards.append(
+        discovered.append(
             CardInfo(
                 id=card_id,
                 label=read_card_label(directory, card_id.replace("_", " ").title()),
@@ -120,8 +219,13 @@ def list_cards(root: Path, cards_dir: Path, mesh_dir: Path) -> list[CardInfo]:
                 foreground=relative(root, foreground),
                 mesh=mesh,
                 has_mesh=mesh in meshes,
+                model_id=read_card_model_id(directory),
+                sort_order=read_card_sort_order(directory),
+                photos=read_card_photos(directory, card_id),
             )
         )
+    discovered.sort(key=lambda card: (card.model_id or "", card.sort_order, card.id))
+    cards.extend(discovered)
     return cards
 
 
@@ -136,12 +240,46 @@ def write_cards_index(root: Path, cards_dir: Path, mesh_dir: Path) -> None:
                 "foreground": public_url(card.foreground),
                 "mesh": card.mesh,
                 "chroma_key": card.id == ORIGINAL_ID,
+                "sort_order": card.sort_order,
+                **({"model_id": card.model_id} if card.model_id else {}),
+                **(
+                    {"photos": [{"id": photo.id, "src": photo.src} for photo in card.photos]}
+                    if card.photos
+                    else {}
+                ),
             }
             for card in cards
         ]
     }
     cards_dir.mkdir(parents=True, exist_ok=True)
     (cards_dir / "index.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def reorder_model_cards(
+    root: Path,
+    cards_dir: Path,
+    mesh_dir: Path,
+    model_id: str,
+    card_ids: list[str],
+) -> list[CardInfo]:
+    if not card_ids:
+        raise HTTPException(status_code=400, detail="card_ids must not be empty")
+    if len(set(card_ids)) != len(card_ids):
+        raise HTTPException(status_code=400, detail="card_ids must be unique")
+
+    cards = list_cards(root, cards_dir, mesh_dir)
+    owned = [card for card in cards if card.model_id == model_id]
+    owned_ids = {card.id for card in owned}
+    if set(card_ids) != owned_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="card_ids must include every motion card for this model, and only those cards",
+        )
+
+    for index, card_id in enumerate(card_ids):
+        write_card_sort_order(card_directory(cards_dir, card_id), index)
+    write_cards_index(root, cards_dir, mesh_dir)
+    return [card for card in list_cards(root, cards_dir, mesh_dir) if card.model_id == model_id]
 
 
 def public_url(workspace_path: str) -> str:
@@ -197,6 +335,10 @@ def create_card(root: Path, cards_dir: Path, mesh_dir: Path, request: CreateCard
     copy_video(background_src, background_dst)
     copy_video(foreground_src, foreground_dst)
     write_card_label(card_dir, request.label)
+    sort_order = next_sort_order_for_model(cards_dir, request.model_id) if request.model_id else 0
+    if request.model_id:
+        write_card_model_id(card_dir, request.model_id)
+        write_card_sort_order(card_dir, sort_order)
     write_cards_index(root, cards_dir, mesh_dir)
     meshes = mesh_names(mesh_dir)
     mesh = f"{card_id}.json"
@@ -207,6 +349,9 @@ def create_card(root: Path, cards_dir: Path, mesh_dir: Path, request: CreateCard
         foreground=relative(root, foreground_dst),
         mesh=mesh,
         has_mesh=mesh in meshes,
+        model_id=request.model_id,
+        sort_order=sort_order,
+        photos=[],
     )
 
 
@@ -228,6 +373,13 @@ def update_card(root: Path, cards_dir: Path, mesh_dir: Path, card_id: str, reque
     if request.label is not None:
         label = request.label.strip()
         write_card_label(card_dir, label)
+    if request.model_id is not None:
+        previous_model = card.model_id
+        if request.model_id and request.model_id != previous_model and request.sort_order is None:
+            write_card_sort_order(card_dir, next_sort_order_for_model(cards_dir, request.model_id))
+        write_card_model_id(card_dir, request.model_id)
+    if request.sort_order is not None:
+        write_card_sort_order(card_dir, request.sort_order)
 
     write_cards_index(root, cards_dir, mesh_dir)
     meshes = mesh_names(mesh_dir)
@@ -238,6 +390,9 @@ def update_card(root: Path, cards_dir: Path, mesh_dir: Path, card_id: str, reque
         foreground=relative(root, foreground_dst),
         mesh=card.mesh,
         has_mesh=card.mesh in meshes,
+        model_id=read_card_model_id(card_dir),
+        sort_order=read_card_sort_order(card_dir),
+        photos=read_card_photos(card_dir, card.id),
     )
 
 
@@ -282,3 +437,62 @@ def compress_card(
         shutil.move(str(tmp), str(src))
         if write_webm:
             compress_video_webm(src, src.with_suffix(".webm"), preset=preset)
+
+
+def card_photos_dir(cards_dir: Path, card_id: str) -> Path:
+    if card_id == ORIGINAL_ID:
+        raise HTTPException(status_code=400, detail="Cannot add photos to the original card")
+    return cards_dir / card_id / "photos"
+
+
+async def upload_card_photo(
+    root: Path,
+    cards_dir: Path,
+    mesh_dir: Path,
+    card_id: str,
+    upload: UploadFile,
+) -> PhotoInfo:
+    cards = list_cards(root, cards_dir, mesh_dir)
+    card = next((entry for entry in cards if entry.id == card_id), None)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Card not found: {card_id}")
+    original = Path(upload.filename or "").name
+    ext = Path(original).suffix.lower()
+    if ext not in PHOTO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Photo must be JPG, PNG, or WebP")
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded photo is empty")
+    photo_id = uuid.uuid4().hex[:12]
+    photos_dir = card_photos_dir(cards_dir, card_id)
+    photos_dir.mkdir(parents=True, exist_ok=True)
+    target = photos_dir / f"{photo_id}{ext}"
+    target.write_bytes(data)
+    src = public_url(f"cards/{card_id}/photos/{photo_id}{ext}")
+    photos = [*card.photos, PhotoInfo(id=photo_id, src=src)]
+    write_card_photos(cards_dir / card_id, photos)
+    write_cards_index(root, cards_dir, mesh_dir)
+    return PhotoInfo(id=photo_id, src=src)
+
+
+def delete_card_photo(
+    root: Path,
+    cards_dir: Path,
+    mesh_dir: Path,
+    card_id: str,
+    photo_id: str,
+) -> None:
+    cards = list_cards(root, cards_dir, mesh_dir)
+    card = next((entry for entry in cards if entry.id == card_id), None)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Card not found: {card_id}")
+    photo = next((entry for entry in card.photos if entry.id == photo_id), None)
+    if not photo:
+        raise HTTPException(status_code=404, detail=f"Photo not found: {photo_id}")
+    photos_dir = card_photos_dir(cards_dir, card_id)
+    for path in photos_dir.glob(f"{photo_id}.*"):
+        if path.is_file():
+            path.unlink()
+    remaining = [entry for entry in card.photos if entry.id != photo_id]
+    write_card_photos(cards_dir / card_id, remaining)
+    write_cards_index(root, cards_dir, mesh_dir)

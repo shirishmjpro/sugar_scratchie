@@ -1,6 +1,5 @@
 import { Callout, Flex } from "@radix-ui/themes";
 import { DesignerMode } from "./designerMode";
-import { ProjectBar } from "./ProjectBar";
 import { VideoFlowShell } from "./VideoFlowShell";
 import { useVideoFlowState } from "./useVideoFlowState";
 
@@ -12,46 +11,41 @@ export function VideoFlowDesignerPage() {
     error,
     setError,
     applyFlowDefinition,
-    projects,
     activeProjectId,
-    selectProject,
-    createProject,
   } = useVideoFlowState();
 
   return (
     <VideoFlowShell
       active="designer"
       error={error}
-      subtitle="Pick or create a project, then edit the flow map and prompts."
+      subtitle="Edit the flow map and default prompts for the pipeline."
       title="Design flow"
     >
       <Flex direction="column" gap="4">
-        <ProjectBar
+        <DesignerMode
           activeProjectId={activeProjectId}
-          pipelineLength={flow.pipeline.length}
-          projects={projects}
-          onCreateProject={createProject}
+          flow={flow}
+          flowJsonText={flowJsonText}
+          onApplyFlow={(next) => {
+            applyFlowDefinition(next);
+            setError("");
+          }}
           onError={setError}
-          onSelectProject={selectProject}
+          onFlowJsonTextChange={setFlowJsonText}
         />
-      <DesignerMode
-        activeProjectId={activeProjectId}
-        flow={flow}
-        flowJsonText={flowJsonText}
-        onApplyFlow={(next) => {
-          applyFlowDefinition(next);
-          setError("");
-        }}
-        onError={setError}
-        onFlowJsonTextChange={setFlowJsonText}
-      />
-      <Callout.Root color="blue">
-        <Callout.Text>
-          When you are happy with the flow, click <strong>Save flow</strong>, then open{" "}
-          <a href="/dashboard/video-flow/run">Run flow</a> to generate clips for{" "}
-          {activeProjectId ? <strong>{activeProjectId}</strong> : "your project"}.
-        </Callout.Text>
-      </Callout.Root>
+        <Callout.Root color="blue">
+          <Callout.Text>
+            When you are happy with the flow, click <strong>Save flow</strong>, then open a motion
+            card from <a href="/dashboard/models">Models</a> to run it
+            {activeProjectId ? (
+              <>
+                {" "}
+                (current project: <strong>{activeProjectId}</strong>)
+              </>
+            ) : null}
+            .
+          </Callout.Text>
+        </Callout.Root>
       </Flex>
     </VideoFlowShell>
   );

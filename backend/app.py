@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import unquote
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -22,13 +22,29 @@ from pydantic import BaseModel, Field
 from backend.cards import (
     CardInfo,
     CreateCardRequest,
+    PhotoInfo,
+    ReorderCardsRequest,
     UpdateCardRequest,
     compress_card,
     create_card,
     delete_card,
+    delete_card_photo,
     list_cards,
+    reorder_model_cards,
     update_card,
+    upload_card_photo,
     write_cards_index,
+)
+from backend.models_store import (
+    CreateModelRequest,
+    ModelInfo,
+    UpdateModelRequest,
+    create_model,
+    delete_model,
+    list_models,
+    update_model,
+    upload_model_avatar,
+    write_models_index,
 )
 from backend.services.ai_provider import AiProvider, BackgroundVideoModel, DressVideoModel, SourceImageModel
 from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
@@ -45,6 +61,7 @@ from backend.services.video_flow import (
     approve_flow_step,
     flow_state,
     list_flows,
+    patch_flow_draft_model,
     read_flow_draft,
     reject_flow_step,
     run_generate_source_image,
@@ -60,6 +77,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PUBLIC = ROOT / "public"
 CARDS_DIR = PUBLIC / "cards"
 MESH_DIR = PUBLIC / "mesh"
+MODELS_DIR = PUBLIC / "models"
 UPLOADS_DIR = ROOT / ".tmp" / "uploads"
 PYTHON = ROOT / ".venv" / "bin" / "python"
 PYTHON_CMD = str(PYTHON if PYTHON.exists() else Path(sys.executable))
@@ -179,6 +197,7 @@ class VideoFlowRequest(BaseModel):
     dress_reference_image: str = ""
     card_id: str = Field(min_length=1, max_length=64)
     card_label: str = Field(min_length=1, max_length=120)
+    model_id: str = ""
     resolution: str = "720p"
     enhance_dress_prompt: bool = True
     tracker: Literal["cotracker", "bootstapir", "blend", "all"] = "all"
@@ -329,8 +348,9 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def ensure_cards_index() -> None:
+def ensure_indexes() -> None:
     write_cards_index(ROOT, CARDS_DIR, MESH_DIR)
+    write_models_index(MODELS_DIR)
 
 
 class JobLogWriter(TextIOBase):
@@ -481,14 +501,69 @@ def post_card(request: CreateCardRequest) -> dict:
 
 @app.put("/api/cards/{card_id}")
 def put_card(card_id: str, request: UpdateCardRequest) -> dict:
+    if request.model_id:
+        if not (MODELS_DIR / request.model_id).is_dir():
+            raise HTTPException(status_code=404, detail=f"Model not found: {request.model_id}")
     card = update_card(ROOT, CARDS_DIR, MESH_DIR, card_id, request)
+    if request.model_id is not None:
+        patch_flow_draft_model(card_id, request.model_id)
     return card.dict()
+
+
+@app.put("/api/models/{model_id}/cards/order")
+def put_model_card_order(model_id: str, request: ReorderCardsRequest) -> dict:
+    if not (MODELS_DIR / model_id).is_dir():
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    cards = reorder_model_cards(ROOT, CARDS_DIR, MESH_DIR, model_id, request.card_ids)
+    return {"cards": [card.dict() for card in cards]}
 
 
 @app.delete("/api/cards/{card_id}")
 def remove_card(card_id: str) -> dict:
     delete_card(ROOT, CARDS_DIR, MESH_DIR, card_id)
     return {"ok": True, "id": card_id}
+
+
+@app.post("/api/cards/{card_id}/photos")
+async def post_card_photo(card_id: str, file: UploadFile = File(...)) -> dict:
+    photo = await upload_card_photo(ROOT, CARDS_DIR, MESH_DIR, card_id, file)
+    return photo.dict()
+
+
+@app.delete("/api/cards/{card_id}/photos/{photo_id}")
+def remove_card_photo(card_id: str, photo_id: str) -> dict:
+    delete_card_photo(ROOT, CARDS_DIR, MESH_DIR, card_id, photo_id)
+    return {"ok": True, "id": photo_id}
+
+
+@app.get("/api/models")
+def get_models() -> dict:
+    models = list_models(MODELS_DIR)
+    return {"models": [model.dict() for model in models]}
+
+
+@app.post("/api/models")
+def post_model(request: CreateModelRequest) -> dict:
+    model = create_model(MODELS_DIR, request)
+    return model.dict()
+
+
+@app.put("/api/models/{model_id}")
+def put_model(model_id: str, request: UpdateModelRequest) -> dict:
+    model = update_model(MODELS_DIR, model_id, request)
+    return model.dict()
+
+
+@app.delete("/api/models/{model_id}")
+def remove_model(model_id: str) -> dict:
+    delete_model(ROOT, MODELS_DIR, CARDS_DIR, MESH_DIR, model_id)
+    return {"ok": True, "id": model_id}
+
+
+@app.post("/api/models/{model_id}/avatar")
+async def post_model_avatar(model_id: str, file: UploadFile = File(...)) -> dict:
+    model = await upload_model_avatar(MODELS_DIR, model_id, file)
+    return model.dict()
 
 
 @app.post("/api/jobs/cards/{card_id}/compress")
@@ -696,6 +771,7 @@ def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> 
         "dress_reference_image": request.dress_reference_image,
         "card_id": request.card_id,
         "card_label": request.card_label,
+        "model_id": request.model_id,
         "model": request.model,
         "resolution": request.resolution,
         "image_field": request.image_field,
@@ -889,6 +965,7 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
             background_video_model=request.background_video_model,
             dress_video_model=request.dress_video_model,
             compress_preset=request.compress_preset,
+            model_id=request.model_id,
         ),
     )
     return job.public()

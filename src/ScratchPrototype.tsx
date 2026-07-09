@@ -11,7 +11,8 @@ import {
   VolumeX,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { fetchModels, type ModelInfo } from "./shared/models";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
 import {
   CANVAS_HEIGHT,
@@ -183,6 +184,9 @@ type Card = {
   foreground: string;
   mesh: string;
   chromaKey: boolean;
+  model_id?: string;
+  sort_order?: number;
+  photos?: Array<{ id: string; src: string }>;
 };
 
 const CARDS_INDEX_SRC = "/cards/index.json";
@@ -246,6 +250,9 @@ type CardsIndexResponse = {
     foreground: string;
     mesh: string;
     chroma_key?: boolean;
+    model_id?: string;
+    sort_order?: number;
+    photos?: Array<{ id: string; src: string }>;
   }>;
 };
 
@@ -274,9 +281,23 @@ function parseCardsIndex(data: CardsIndexResponse): Card[] | null {
       foreground: entry.foreground,
       mesh: entry.mesh,
       chromaKey: cardUsesChromaKey(entry.id, entry.chroma_key),
+      model_id: entry.model_id,
+      sort_order: typeof entry.sort_order === "number" ? entry.sort_order : 0,
+      photos: entry.photos,
     });
   }
   return cards.length > 0 ? cards : null;
+}
+
+function playlistCardsForModel(cards: Card[], modelId: string): Card[] {
+  return cards
+    .filter((entry) => entry.model_id === modelId)
+    .sort((a, b) => {
+      const orderA = a.sort_order ?? 0;
+      const orderB = b.sort_order ?? 0;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.id.localeCompare(b.id);
+    });
 }
 
 async function loadCards(): Promise<Card[]> {
@@ -942,21 +963,47 @@ export function ScratchPrototype() {
   const cameraRef = useRef({ x: 0, y: 0 });
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
   const [cards, setCards] = useState<Card[]>(DEFAULT_CARDS);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [cardsReady, setCardsReady] = useState(false);
   const [selectedMeshFile, setSelectedMeshFile] = useState(DEFAULT_CARDS[1].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [selectedCardId, setSelectedCardId] = useState(DEFAULT_CARDS[1].id);
-  const card = cards.find((entry) => entry.id === selectedCardId) ?? cards[1] ?? cards[0];
-  const chromaKeyRef = useRef(card.chromaKey);
-  chromaKeyRef.current = card.chromaKey;
-  // The mesh lattice is a dev overlay — default it off on phones (where the
-  // toggle is hidden).
-  const [showMesh, setShowMesh] = useState(
-    () =>
-      !(
-        typeof window !== "undefined" &&
-        window.matchMedia("(max-width: 700px)").matches
-      ),
+  const [activeModelId, setActiveModelId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("model")?.trim() || "";
+  });
+  const [selectedCardId, setSelectedCardId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("card")?.trim() || "";
+  });
+  const modelCards = useMemo(
+    () => (activeModelId ? playlistCardsForModel(cards, activeModelId) : []),
+    [cards, activeModelId],
   );
+  const [completedCardIds, setCompletedCardIds] = useState<string[]>([]);
+  const completedCardIdsRef = useRef<string[]>([]);
+  completedCardIdsRef.current = completedCardIds;
+  const remainingCards = useMemo(
+    () => modelCards.filter((entry) => !completedCardIds.includes(entry.id)),
+    [modelCards, completedCardIds],
+  );
+  const activeModel = models.find((entry) => entry.id === activeModelId) ?? null;
+  // Never fall back to another girl's card — only play cards owned by the active model.
+  const card = useMemo(() => {
+    if (!activeModelId || modelCards.length === 0) return null;
+    return (
+      remainingCards.find((entry) => entry.id === selectedCardId) ??
+      remainingCards[0] ??
+      null
+    );
+  }, [activeModelId, modelCards.length, remainingCards, selectedCardId]);
+  const showModelPicker = !cardsReady || !activeModelId || modelCards.length === 0;
+  const playlistFinished =
+    Boolean(activeModelId) && modelCards.length > 0 && remainingCards.length === 0;
+  const chromaKeyRef = useRef(card?.chromaKey ?? false);
+  chromaKeyRef.current = card?.chromaKey ?? false;
+  const advanceAfterScratchRef = useRef<() => void>(() => undefined);
+  // Mesh lattice is a dev overlay — start hidden; toggle with "Show mesh".
+  const [showMesh, setShowMesh] = useState(false);
   const showMeshRef = useRef(showMesh);
   showMeshRef.current = showMesh;
   const bodyMarkerRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -1262,25 +1309,88 @@ export function ScratchPrototype() {
       cancelAnimationFrame(animationId);
       glRendererRef.current = null;
     };
-  }, []);
+    // Re-init when the player stage mounts after the girl picker (canvas is absent until then).
+  }, [showModelPicker]);
 
   useEffect(() => {
     let isCancelled = false;
-    loadCards()
-      .then((loaded) => {
+    Promise.all([loadCards(), fetchModels()])
+      .then(([loaded, loadedModels]) => {
         if (isCancelled) return;
         setCards(loaded);
-        setSelectedCardId((current) =>
-          loaded.some((entry) => entry.id === current)
-            ? current
-            : loaded[1]?.id ?? loaded[0]?.id ?? "",
-        );
+        setModels(loadedModels);
+        setCardsReady(true);
+        const params = new URLSearchParams(window.location.search);
+        const fromUrl = params.get("card")?.trim() || "";
+        let modelFromUrl = params.get("model")?.trim() || "";
+        if (fromUrl) {
+          const cardModel = loaded.find((entry) => entry.id === fromUrl)?.model_id?.trim() || "";
+          // Card wins over a stale ?model= so Shine never opens Brazilian.
+          if (cardModel) modelFromUrl = cardModel;
+        }
+        if (!modelFromUrl) {
+          setActiveModelId("");
+          setSelectedCardId("");
+          return;
+        }
+        const ordered = playlistCardsForModel(loaded, modelFromUrl);
+        setActiveModelId(modelFromUrl);
+        if (ordered.length === 0) {
+          setSelectedCardId("");
+          return;
+        }
+        const startId =
+          fromUrl && ordered.some((entry) => entry.id === fromUrl)
+            ? fromUrl
+            : ordered[0]!.id;
+        setSelectedCardId(startId);
       })
       .catch(() => undefined);
     return () => {
       isCancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !cardsReady) return;
+    const url = new URL(window.location.href);
+    if (activeModelId) url.searchParams.set("model", activeModelId);
+    else url.searchParams.delete("model");
+    if (selectedCardId && modelCards.some((entry) => entry.id === selectedCardId)) {
+      url.searchParams.set("card", selectedCardId);
+    } else {
+      url.searchParams.delete("card");
+    }
+    url.searchParams.delete("playlist");
+    const next = `${url.pathname}${url.searchParams.toString() ? `?${url.searchParams}` : ""}`;
+    window.history.replaceState(null, "", next);
+  }, [activeModelId, cardsReady, modelCards, selectedCardId]);
+
+  useEffect(() => {
+    setCompletedCardIds([]);
+    completedCardIdsRef.current = [];
+  }, [activeModelId]);
+
+  useEffect(() => {
+    if (!cardsReady || !activeModelId) return;
+    if (modelCards.length === 0) {
+      if (selectedCardId) setSelectedCardId("");
+      return;
+    }
+    const belongs =
+      Boolean(selectedCardId) &&
+      modelCards.some((entry) => entry.id === selectedCardId) &&
+      !completedCardIds.includes(selectedCardId);
+    if (belongs) return;
+    setSelectedCardId(remainingCards[0]?.id ?? modelCards[0]?.id ?? "");
+  }, [
+    activeModelId,
+    cardsReady,
+    completedCardIds,
+    modelCards,
+    remainingCards,
+    selectedCardId,
+  ]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1334,10 +1444,18 @@ export function ScratchPrototype() {
   // Switching cards: load that card's mesh and clear scratches/progress so holes
   // from the previous clip don't carry over onto the new fabric.
   useEffect(() => {
+    if (!card) {
+      setSelectedMeshFile("");
+      return;
+    }
     setSelectedMeshFile(card.mesh);
     marksRef.current = [];
     glRendererRef.current?.clearScratch();
+    glRendererRef.current?.clearFlakes();
     glRendererRef.current?.resetForeground();
+    revealSamplesRef.current = [];
+    revealedRef.current = [];
+    revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
     resetGameOutcome();
@@ -1346,14 +1464,17 @@ export function ScratchPrototype() {
       { length: SYMBOL_SLOT_COUNT },
       () => false,
     );
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
     setSessionSymbols(buildSessionSymbols());
     setProgress(0);
     setClaimed(false);
     setRevealedSymbols(0);
     setFlyingCoins([]);
+    setGameResult(null);
     setAutoScratch((current) => ({ ...current, enabled: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCardId]);
+  }, [selectedCardId, card?.id, card?.mesh]);
 
   // Rebuild the reveal sample grid whenever the mesh changes, recomputing which
   // samples are already revealed from the current marks (usually empty after a
@@ -1404,30 +1525,38 @@ export function ScratchPrototype() {
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
     const foregroundVideo = foregroundVideoRef.current;
-    if (!bottomVideo || !foregroundVideo) return;
+    if (!bottomVideo || !foregroundVideo || !card) return;
 
-    const onBottomCanPlay = () => {
+    // New card always starts playing — don't inherit a paused flag from the
+    // previous clip (canplay often fires while the new src is still paused).
+    uiStateRef.current = { ...uiStateRef.current, isPaused: false };
+    setIsPaused(false);
+    bottomVideo.currentTime = 0;
+    foregroundVideo.currentTime = 0;
+
+    const kickPlayback = () => {
       const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
       uiStateRef.current = {
         ...uiStateRef.current,
         duration: nextDuration,
-        isPaused: bottomVideo.paused,
+        isPaused: false,
       };
       setDuration(nextDuration);
       void bottomVideo.play().catch(() => undefined);
-    };
-    const onForegroundCanPlay = () => {
       void foregroundVideo.play().catch(() => undefined);
     };
 
-    bottomVideo.addEventListener("canplay", onBottomCanPlay);
-    foregroundVideo.addEventListener("canplay", onForegroundCanPlay);
+    bottomVideo.addEventListener("canplay", kickPlayback);
+    foregroundVideo.addEventListener("canplay", kickPlayback);
+    if (bottomVideo.readyState >= 2 || foregroundVideo.readyState >= 2) {
+      kickPlayback();
+    }
 
     return () => {
-      bottomVideo.removeEventListener("canplay", onBottomCanPlay);
-      foregroundVideo.removeEventListener("canplay", onForegroundCanPlay);
+      bottomVideo.removeEventListener("canplay", kickPlayback);
+      foregroundVideo.removeEventListener("canplay", kickPlayback);
     };
-  }, []);
+  }, [card?.id]);
 
   // Mobile browsers (notably iOS Safari) will suspend a second, simultaneously
   // playing <video> after a few seconds to save power — which here drops the
@@ -1557,9 +1686,28 @@ export function ScratchPrototype() {
   }
   resetScratchRef.current = resetScratch;
 
+  function advanceAfterScratch() {
+    const finishedId = selectedCardId;
+    if (!finishedId || completedCardIdsRef.current.includes(finishedId)) return;
+    const nextCompleted = [...completedCardIdsRef.current, finishedId];
+    completedCardIdsRef.current = nextCompleted;
+    setCompletedCardIds(nextCompleted);
+    resetGameOutcome();
+    setClaimed(false);
+    claimedRef.current = false;
+    const nextCard = modelCards.find(
+      (entry) => entry.id !== finishedId && !nextCompleted.includes(entry.id),
+    );
+    if (nextCard) {
+      setSelectedCardId(nextCard.id);
+      return;
+    }
+    setSelectedCardId("");
+  }
+  advanceAfterScratchRef.current = advanceAfterScratch;
+
   function tryResolveGame() {
     if (gameResultPendingRef.current !== null) return;
-    if (revealedSymbolsRef.current < SYMBOL_SLOT_COUNT) return;
     const autoMode = autoScratchRef.current.enabled;
     const sampleCount = revealSamplesRef.current.length;
     if (
@@ -1569,6 +1717,13 @@ export function ScratchPrototype() {
         sampleCount,
         autoMode,
       )
+    ) {
+      return;
+    }
+    // Symbol hunt cards wait for all symbols; plain scratch cards advance on full reveal.
+    if (
+      useBodySymbolsRef.current &&
+      revealedSymbolsRef.current < SYMBOL_SLOT_COUNT
     ) {
       return;
     }
@@ -2059,6 +2214,100 @@ export function ScratchPrototype() {
     </div>
   );
 
+  function openModel(modelId: string) {
+    const ordered = playlistCardsForModel(cards, modelId);
+    setCompletedCardIds([]);
+    completedCardIdsRef.current = [];
+    setSelectedCardId("");
+    setActiveModelId(modelId);
+    setSelectedCardId(ordered[0]?.id ?? "");
+  }
+
+  if (showModelPicker) {
+    const playableModels = models.filter(
+      (model) => playlistCardsForModel(cards, model.id).length > 0,
+    );
+    return (
+      <main className="app-shell home-picker">
+        <section className="home-picker-panel">
+          <p className="eyebrow">Sugar Scratchie</p>
+          <h1>Choose a girl</h1>
+          <p className="home-picker-copy">
+            Play only her motion cards, in the order you set on Models.
+          </p>
+          <div className="home-picker-grid">
+            {playableModels.map((model) => {
+              const count = playlistCardsForModel(cards, model.id).length;
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  className="home-picker-card"
+                  onClick={() => openModel(model.id)}
+                >
+                  <span className="home-picker-avatar">
+                    {model.avatar ? (
+                      <img alt="" src={model.avatar} />
+                    ) : (
+                      model.label.slice(0, 1)
+                    )}
+                  </span>
+                  <span className="home-picker-meta">
+                    <strong>{model.label}</strong>
+                    <span>
+                      {count} motion card{count === 1 ? "" : "s"}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {playableModels.length === 0 ? (
+            <p className="home-picker-empty">
+              No models with motion cards yet.{" "}
+              <a href="/dashboard/models">Go to Models</a>
+            </p>
+          ) : null}
+          <div className="home-picker-links">
+            <a href="/dashboard/models">Models</a>
+            <a href="/dashboard">Dashboard</a>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (!card) {
+    return (
+      <main className="app-shell home-picker">
+        <section className="home-picker-panel">
+          <p className="eyebrow">Sugar Scratchie</p>
+          <h1>{activeModel?.label ?? "No cards"}</h1>
+          <p className="home-picker-copy">
+            {playlistFinished
+              ? "All her motion cards are scratched — none left to repeat."
+              : "This girl has no motion cards yet."}
+          </p>
+          <div className="home-picker-links">
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                setActiveModelId("");
+                setSelectedCardId("");
+                setCompletedCardIds([]);
+                completedCardIdsRef.current = [];
+              }}
+            >
+              Choose another girl
+            </button>
+            <a href="/dashboard/models">Models</a>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <section className="prototype">
@@ -2137,6 +2386,7 @@ export function ScratchPrototype() {
           ))
             : null}
           <video
+            key={`bottom-${card.id}`}
             ref={bottomVideoRef}
             className="source-video"
             autoPlay
@@ -2147,6 +2397,7 @@ export function ScratchPrototype() {
             src={card.bottom}
           />
           <video
+            key={`foreground-${card.id}`}
             ref={foregroundVideoRef}
             className="source-video"
             autoPlay
@@ -2266,11 +2517,11 @@ export function ScratchPrototype() {
                     onChange={(event) =>
                       setSelectedCardId(event.currentTarget.value)
                     }
-                    value={selectedCardId}
+                    value={card.id}
                   >
-                    {cards.map((entry) => (
+                    {remainingCards.map((entry, index) => (
                       <option key={entry.id} value={entry.id}>
-                        {entry.label}
+                        {index + 1}. {entry.label}
                       </option>
                     ))}
                   </select>
@@ -2378,28 +2629,51 @@ export function ScratchPrototype() {
               <button
                 type="button"
                 className="game-result-button"
-                onClick={resetScratch}
+                onClick={() => advanceAfterScratchRef.current()}
               >
-                Play again
+                {remainingCards.length > 1 ? "Next card" : "Done"}
               </button>
             </div>
           ) : null}
         </div>
         <aside className="panel">
           <div>
-            <p className="eyebrow">Milestone 1</p>
-            <h1>Full Dress Scratch Test</h1>
+            <p className="eyebrow">{activeModel?.label ?? "Sugar Scratchie"}</p>
+            <h1>{card.label}</h1>
+            <p className="eyebrow">
+              Left {remainingCards.length}/{modelCards.length}
+              {completedCardIds.length > 0
+                ? ` · scratched ${completedCardIds.length}`
+                : ""}
+            </p>
+          </div>
+          <div className="button-row">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setActiveModelId("");
+                setSelectedCardId("");
+                setCompletedCardIds([]);
+                completedCardIdsRef.current = [];
+              }}
+            >
+              Girls
+            </button>
+            <a className="secondary-button" href="/dashboard/models">
+              Models
+            </a>
           </div>
           <label>
             Card
             <select
               aria-label="Card clip"
               onChange={(event) => setSelectedCardId(event.currentTarget.value)}
-              value={selectedCardId}
+              value={card.id}
             >
-              {cards.map((entry) => (
+              {remainingCards.map((entry, index) => (
                 <option key={entry.id} value={entry.id}>
-                  {entry.label}
+                  {index + 1}. {entry.label}
                 </option>
               ))}
             </select>

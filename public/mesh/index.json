@@ -2,7 +2,6 @@
   "files": [
     "asian_1.json",
     "asian_2.json",
-    "brazilian_1.json",
     "chinese_1.json",
     "girl_1.json",
     "girl_2.json",
@@ -12,9 +11,8 @@
     "juliana_1.json",
     "juliana_2.json",
     "juliana_3.json",
-    "korean_2.json",
     "korean_tie.json",
-    "shine_4.json",
+    "shine_3.json",
     "tracked-mesh.json"
   ]
 }

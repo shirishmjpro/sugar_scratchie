@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../shared/api";
 import { labelFromProjectId } from "./projects";
 import type { VideoFlowProject } from "./projects";
@@ -58,6 +58,7 @@ function draftPayload(
     dress_reference_image: draft.dressReferenceImage || flow.defaults.dress_reference_image,
     card_id: draft.cardId,
     card_label: draft.cardLabel || labelFromProjectId(draft.cardId),
+    model_id: draft.modelId,
     resolution: draft.resolution || flow.defaults.resolution,
     enhance_dress_prompt: enhancePrompt,
     tracker: draft.tracker || flow.defaults.tracker,
@@ -95,16 +96,38 @@ export function useVideoFlowState() {
   const [projects, setProjects] = useState<VideoFlowProject[]>([]);
   const [enhancePrompt, setEnhancePrompt] = useState(flow.defaults.enhance_dress_prompt);
 
-  const [image, setImage] = useState(storedDraft?.image ?? "");
+  const bootCardId =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("card")?.trim() || ""
+      : "";
+  // URL ?card= wins over localStorage. Never hydrate image/label from a draft
+  // that belongs to a different card — that caused Shine 4 to show Shine 3's image.
+  const hydrateFromStored =
+    Boolean(storedDraft?.cardId) && (!bootCardId || storedDraft?.cardId === bootCardId);
+
+  const [image, setImage] = useState(hydrateFromStored ? (storedDraft?.image ?? "") : "");
   const [backgroundMotionPrompt, setBackgroundMotionPrompt] = useState(
-    storedDraft?.backgroundMotionPrompt ?? flow.defaults.background_motion_prompt,
+    hydrateFromStored
+      ? (storedDraft?.backgroundMotionPrompt ?? flow.defaults.background_motion_prompt)
+      : flow.defaults.background_motion_prompt,
   );
-  const [dressPrompt, setDressPrompt] = useState(storedDraft?.dressPrompt ?? flow.defaults.dress_prompt);
+  const [dressPrompt, setDressPrompt] = useState(
+    hydrateFromStored
+      ? (storedDraft?.dressPrompt ?? flow.defaults.dress_prompt)
+      : flow.defaults.dress_prompt,
+  );
   const [dressReferenceImage, setDressReferenceImage] = useState(
-    storedDraft?.dressReferenceImage ?? flow.defaults.dress_reference_image,
+    hydrateFromStored
+      ? (storedDraft?.dressReferenceImage ?? flow.defaults.dress_reference_image)
+      : flow.defaults.dress_reference_image,
   );
-  const [cardId, setCardId] = useState(storedDraft?.cardId ?? readActiveProjectId());
-  const [cardLabel, setCardLabel] = useState(storedDraft?.cardLabel ?? "");
+  const [cardId, setCardId] = useState(
+    () => bootCardId || storedDraft?.cardId || readActiveProjectId(),
+  );
+  const [cardLabel, setCardLabel] = useState(
+    hydrateFromStored ? (storedDraft?.cardLabel ?? "") : "",
+  );
+  const [modelId, setModelId] = useState(hydrateFromStored ? (storedDraft?.modelId ?? "") : "");
   const [writeWebm, setWriteWebm] = useState(storedDraft?.writeWebm ?? flow.defaults.write_webm);
   const [compressPreset, setCompressPreset] = useState<CompressPreset>(
     storedDraft?.compressPreset ?? parseCompressPreset(flow.defaults.compress_preset),
@@ -160,13 +183,22 @@ export function useVideoFlowState() {
     }
   }, []);
 
+  const selectionTokenRef = useRef(0);
+  const desiredCardIdRef = useRef(cardId.trim());
+  const switchingCardRef = useRef(false);
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
   const applyVideoFlowDraft = useCallback((draft: StoredVideoFlowDraft) => {
+    // Never apply a draft for a card the user is no longer on.
+    if (desiredCardIdRef.current && draft.cardId !== desiredCardIdRef.current) return;
     setImage(draft.image);
     setBackgroundMotionPrompt(draft.backgroundMotionPrompt || draft.foregroundMotionPrompt);
     setDressPrompt(draft.dressPrompt);
     setDressReferenceImage(draft.dressReferenceImage);
     setCardId(draft.cardId);
     setCardLabel(draft.cardLabel);
+    setModelId(draft.modelId);
     setWriteWebm(draft.writeWebm);
     setCompressPreset(draft.compressPreset ?? "mobile");
     setResolution(draft.resolution);
@@ -184,57 +216,87 @@ export function useVideoFlowState() {
     setDressVideoModel(draft.dressVideoModel ?? DEFAULT_DRESS_VIDEO_MODEL);
     writeStoredVideoFlowDraft(draft);
     writeActiveProjectId(draft.cardId);
+    switchingCardRef.current = false;
   }, []);
 
   const selectProject = useCallback(
-    async (projectId: string) => {
+    async (projectId: string, projectList?: VideoFlowProject[]) => {
       const id = projectId.trim();
       if (!id) return;
       setError("");
 
-      const listed = projects.find((entry) => entry.card_id === id);
-      if (listed?.draft) {
-        const parsed = storedDraftFromApi(listed.draft);
-        if (parsed) {
-          if (listed.steps.mesh.status !== "approved") {
-            parsed.tracker = flow.defaults.tracker;
-          }
-          applyVideoFlowDraft(parsed);
-          return;
-        }
-      }
+      // Claim this selection immediately so a slower in-flight load for another
+      // card (e.g. Shine 3) cannot overwrite Shine 4 when it finishes later.
+      const token = selectionTokenRef.current + 1;
+      selectionTokenRef.current = token;
+      desiredCardIdRef.current = id;
+      switchingCardRef.current = true;
+      const catalog = projectList ?? projectsRef.current;
+      const listed = catalog.find((entry) => entry.card_id === id);
+      const label = listed?.draft?.card_label?.trim() || labelFromProjectId(id);
+      const nextModelId = listed?.draft?.model_id?.trim() ?? "";
+      // Update id/label immediately; image/prompts arrive with the server draft.
+      // Do not clear image here — an empty flash looks like a user edit and can
+      // reject the background step.
+      setCardId(id);
+      setCardLabel(label);
+      setModelId(nextModelId);
+      writeActiveProjectId(id);
 
+      const applyIfCurrent = (draft: StoredVideoFlowDraft) => {
+        if (selectionTokenRef.current !== token) return;
+        if (draft.cardId !== id) return;
+        applyVideoFlowDraft(draft);
+      };
+
+      // Always load the server draft for the selected id. Cached list drafts can be
+      // incomplete after the lightweight list_flows summary change.
       try {
         const data = await api<{ draft: NonNullable<VideoFlowProject["draft"]> }>(
           `/api/video-flow/${encodeURIComponent(id)}/draft`,
         );
+        if (selectionTokenRef.current !== token) return;
         const parsed = storedDraftFromApi(data.draft);
-        if (parsed) {
+        if (parsed && parsed.cardId === id) {
           try {
             const stateData = await api<{ steps: VideoFlowProject["steps"] }>(
               `/api/video-flow/${encodeURIComponent(id)}/state`,
             );
+            if (selectionTokenRef.current !== token) return;
             if (stateData.steps.mesh.status !== "approved") {
               parsed.tracker = flow.defaults.tracker;
             }
           } catch {
             parsed.tracker = flow.defaults.tracker;
           }
-          applyVideoFlowDraft(parsed);
+          applyIfCurrent(parsed);
           return;
         }
       } catch {
-        // Fall through to minimal project shell.
+        // Fall through — use listed draft or empty shell.
       }
 
-      applyVideoFlowDraft({
+      if (selectionTokenRef.current !== token) return;
+      if (listed?.draft) {
+        const parsed = storedDraftFromApi(listed.draft);
+        if (parsed && parsed.cardId === id) {
+          if (listed.steps.mesh.status !== "approved") {
+            parsed.tracker = flow.defaults.tracker;
+          }
+          applyIfCurrent(parsed);
+          return;
+        }
+      }
+
+      applyIfCurrent({
         image: "",
         backgroundMotionPrompt: flow.defaults.background_motion_prompt,
         foregroundMotionPrompt: flow.defaults.background_motion_prompt,
         dressPrompt: flow.defaults.dress_prompt,
         dressReferenceImage: flow.defaults.dress_reference_image,
         cardId: id,
-        cardLabel: listed?.draft?.card_label?.trim() || labelFromProjectId(id),
+        cardLabel: label,
+        modelId: nextModelId,
         writeWebm: flow.defaults.write_webm,
         compressPreset: parseCompressPreset(flow.defaults.compress_preset),
         resolution: flow.defaults.resolution,
@@ -250,43 +312,7 @@ export function useVideoFlowState() {
         dressVideoModel: DEFAULT_DRESS_VIDEO_MODEL,
       });
     },
-    [applyVideoFlowDraft, flow.defaults, projects],
-  );
-
-  const createProject = useCallback(
-    async (projectId: string, label: string) => {
-      const id = projectId.trim();
-      const nextDraft: StoredVideoFlowDraft = {
-        image: "",
-        backgroundMotionPrompt: flow.defaults.background_motion_prompt,
-        foregroundMotionPrompt: flow.defaults.background_motion_prompt,
-        dressPrompt: flow.defaults.dress_prompt,
-        dressReferenceImage: flow.defaults.dress_reference_image,
-        cardId: id,
-        cardLabel: label.trim() || labelFromProjectId(id),
-        writeWebm: flow.defaults.write_webm,
-        compressPreset: parseCompressPreset(flow.defaults.compress_preset),
-        resolution: flow.defaults.resolution,
-        tracker: flow.defaults.tracker,
-        meshTune: DEFAULT_MESH_TUNE,
-        sourceMode: "upload",
-        sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
-        faceImage: "",
-        baseImage: "",
-        aiProvider: DEFAULT_SOURCE_IMAGE_PROVIDER,
-        sourceImageModel: DEFAULT_SOURCE_IMAGE_MODEL,
-        backgroundVideoModel: "grok-imagine",
-        dressVideoModel: DEFAULT_DRESS_VIDEO_MODEL,
-      };
-
-      await api(`/api/video-flow/${encodeURIComponent(id)}/draft`, {
-        method: "POST",
-        body: JSON.stringify(draftPayload(nextDraft, flow, enhancePrompt)),
-      });
-      applyVideoFlowDraft(nextDraft);
-      await refreshProjects();
-    },
-    [applyVideoFlowDraft, enhancePrompt, flow, refreshProjects],
+    [applyVideoFlowDraft, flow.defaults],
   );
 
   useEffect(() => {
@@ -300,29 +326,57 @@ export function useVideoFlowState() {
 
   useEffect(() => {
     let cancelled = false;
+    const bootCard = new URLSearchParams(window.location.search).get("card")?.trim() || "";
     refreshProjects()
       .then((list) => {
         if (cancelled) return;
+        if (bootCard) {
+          // Consume ?card= immediately so a later projects refresh cannot re-open
+          // an older card from a stale URL.
+          const params = new URLSearchParams(window.location.search);
+          params.delete("card");
+          const query = params.toString();
+          window.history.replaceState(
+            null,
+            "",
+            `${window.location.pathname}${query ? `?${query}` : ""}`,
+          );
+          // Pass the fresh list — projectsRef may not have re-rendered yet.
+          void selectProject(bootCard, list);
+          return;
+        }
         const storedId = storedDraft?.cardId?.trim() || readActiveProjectId();
-        if (storedId) return;
+        if (storedId) {
+          // Ensure server draft wins over a possibly mixed localStorage draft.
+          void selectProject(storedId, list);
+          return;
+        }
         if (list.length > 0) {
-          void selectProject(list[0].card_id);
+          void selectProject(list[0].card_id, list);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [refreshProjects, selectProject, storedDraft?.cardId]);
+    // Boot once on mount — do not re-run when selectProject identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
+    const id = cardId.trim();
+    if (!id) return;
+    // Skip while switching — otherwise we persist Shine 4's id with Shine 3's image.
+    if (switchingCardRef.current) return;
+    if (desiredCardIdRef.current && id !== desiredCardIdRef.current) return;
     writeStoredVideoFlowDraft({
       image,
       backgroundMotionPrompt,
       foregroundMotionPrompt: backgroundMotionPrompt,
       dressPrompt,
       dressReferenceImage,
-      cardId,
+      cardId: id,
       cardLabel,
+      modelId,
       writeWebm,
       compressPreset,
       resolution,
@@ -337,7 +391,7 @@ export function useVideoFlowState() {
       backgroundVideoModel,
       dressVideoModel,
     });
-    if (cardId.trim()) writeActiveProjectId(cardId.trim());
+    writeActiveProjectId(id);
   }, [
     image,
     backgroundMotionPrompt,
@@ -345,6 +399,7 @@ export function useVideoFlowState() {
     dressReferenceImage,
     cardId,
     cardLabel,
+    modelId,
     writeWebm,
     compressPreset,
     resolution,
@@ -402,6 +457,8 @@ export function useVideoFlowState() {
     setCardId,
     cardLabel,
     setCardLabel,
+    modelId,
+    setModelId,
     writeWebm,
     setWriteWebm,
     compressPreset,
@@ -435,7 +492,6 @@ export function useVideoFlowState() {
     refreshJobs,
     refreshProjects,
     selectProject,
-    createProject,
     applyFlowDefinition,
     applyVideoFlowDraft,
     applyJsonFromDesigner,

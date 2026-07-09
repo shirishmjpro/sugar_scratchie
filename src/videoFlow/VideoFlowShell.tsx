@@ -1,4 +1,4 @@
-import { ExternalLink, LoaderCircle } from "lucide-react";
+import { ExternalLink, LoaderCircle, UserRound } from "lucide-react";
 import { Box, Button, Flex, Heading, Text } from "@radix-ui/themes";
 import type { ReactNode } from "react";
 import { iconProps } from "./ui";
@@ -23,7 +23,12 @@ export function VideoFlowShell({
   return (
     <div className="video-flow-page">
       <header className="video-flow-header">
-        <Flex align={{ initial: "start", md: "center" }} direction={{ initial: "column", md: "row" }} gap="4" justify="between">
+        <Flex
+          align={{ initial: "start", md: "center" }}
+          direction={{ initial: "column", md: "row" }}
+          gap="4"
+          justify="between"
+        >
           <Box>
             <Text color="red" size="2" weight="bold">
               Video Flow
@@ -37,16 +42,22 @@ export function VideoFlowShell({
           </Box>
           <Flex align="center" gap="2" wrap="wrap">
             <nav className="video-flow-nav">
-              <a className={active === "hub" ? "is-active" : ""} href="/dashboard/video-flow">
-                Overview
-              </a>
-              <a className={active === "designer" ? "is-active" : ""} href="/dashboard/video-flow/designer">
-                Design
-              </a>
               <a className={active === "run" ? "is-active" : ""} href="/dashboard/video-flow/run">
                 Run
               </a>
+              <a
+                className={active === "designer" ? "is-active" : ""}
+                href="/dashboard/video-flow/designer"
+              >
+                Design
+              </a>
             </nav>
+            <Button asChild color="gray" variant="soft">
+              <a href="/dashboard/models">
+                <UserRound {...iconProps} />
+                Models
+              </a>
+            </Button>
             <Button asChild color="gray" variant="soft">
               <a href="/dashboard">
                 <ExternalLink {...iconProps} />
