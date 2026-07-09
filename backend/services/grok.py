@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -285,7 +286,9 @@ def format_http_error(exc: urllib.error.HTTPError, body: str) -> str:
         if "content moderation" in lowered:
             return (
                 "xAI rejected the result (content moderation). "
-                "Try a less revealing prompt, different source photos, or use Upload instead."
+                "Step 2 sends your approved bikini clip to x.ai — it scans the video frames, "
+                "not just the dress prompt. Switch Step 2 to WaveSpeed WAN 2.2 Video Edit, "
+                "or use Upload for a pre-made foreground clip."
             )
         return f"xAI API error: {err}"
     return f"API error {exc.code}:\n{body}"

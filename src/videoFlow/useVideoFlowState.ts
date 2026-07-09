@@ -4,7 +4,10 @@ import { labelFromProjectId } from "./projects";
 import type { VideoFlowProject } from "./projects";
 import { DEFAULT_VIDEO_FLOW_JSON, parseVideoFlowJson, stringifyVideoFlowJson, type VideoFlowJson } from "./schema";
 import {
+  DEFAULT_DRESS_VIDEO_MODEL,
   DEFAULT_PORTRAIT_PROMPT,
+  DEFAULT_SOURCE_IMAGE_MODEL,
+  DEFAULT_SOURCE_IMAGE_PROVIDER,
   isStockPortraitPrompt,
   readActiveProjectId,
   readFlowJsonText,
@@ -16,6 +19,11 @@ import {
   writeStoredVideoFlowDraft,
   type SourceImageMode,
   type StoredVideoFlowDraft,
+  type AiProvider,
+  type SourceImageModel,
+  type BackgroundVideoModel,
+  type DressVideoModel,
+  canUseAiProvider,
 } from "./storage";
 import { DEFAULT_MESH_TUNE, meshTuneToApi } from "./meshTune";
 import { MESH_TRACKER_MODES, type MeshTrackerMode } from "./ui";
@@ -31,6 +39,7 @@ type JobInfo = {
 type HealthResponse = {
   ok: boolean;
   xai_key_loaded: boolean;
+  wavespeed_key_loaded: boolean;
 };
 
 function draftPayload(
@@ -57,6 +66,10 @@ function draftPayload(
     source_prompt: draft.sourcePrompt,
     face_image: draft.faceImage,
     base_image: draft.baseImage,
+    provider: draft.aiProvider,
+    image_model: draft.sourceImageModel,
+    background_video_model: draft.backgroundVideoModel,
+    dress_video_model: draft.dressVideoModel,
   };
 }
 
@@ -103,8 +116,22 @@ export function useVideoFlowState() {
   });
   const [faceImage, setFaceImage] = useState(storedDraft?.faceImage ?? "");
   const [baseImage, setBaseImage] = useState(storedDraft?.baseImage ?? "");
+  const [aiProvider, setAiProvider] = useState<AiProvider>(
+    storedDraft?.aiProvider ?? DEFAULT_SOURCE_IMAGE_PROVIDER,
+  );
+  const [sourceImageModel, setSourceImageModel] = useState<SourceImageModel>(
+    storedDraft?.sourceImageModel ?? DEFAULT_SOURCE_IMAGE_MODEL,
+  );
+  const [backgroundVideoModel, setBackgroundVideoModel] = useState<BackgroundVideoModel>(
+    storedDraft?.backgroundVideoModel ?? "grok-imagine",
+  );
+  const [dressVideoModel, setDressVideoModel] = useState<DressVideoModel>(
+    storedDraft?.dressVideoModel ?? DEFAULT_DRESS_VIDEO_MODEL,
+  );
 
   const canUseGrok = Boolean(health?.xai_key_loaded);
+  const canUseWavespeed = Boolean(health?.wavespeed_key_loaded);
+  const canUseSourceAi = canUseAiProvider(aiProvider, health);
   const activeProjectId = cardId.trim();
 
   async function refreshHealth() {
@@ -145,6 +172,10 @@ export function useVideoFlowState() {
     );
     setFaceImage(draft.faceImage);
     setBaseImage(draft.baseImage);
+    setAiProvider(draft.aiProvider);
+    setSourceImageModel(draft.sourceImageModel);
+    setBackgroundVideoModel(draft.backgroundVideoModel);
+    setDressVideoModel(draft.dressVideoModel ?? DEFAULT_DRESS_VIDEO_MODEL);
     writeStoredVideoFlowDraft(draft);
     writeActiveProjectId(draft.cardId);
   }, []);
@@ -206,6 +237,10 @@ export function useVideoFlowState() {
         sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
         faceImage: "",
         baseImage: "",
+        aiProvider: DEFAULT_SOURCE_IMAGE_PROVIDER,
+        sourceImageModel: DEFAULT_SOURCE_IMAGE_MODEL,
+        backgroundVideoModel: "grok-imagine",
+        dressVideoModel: DEFAULT_DRESS_VIDEO_MODEL,
       });
     },
     [applyVideoFlowDraft, flow.defaults, projects],
@@ -230,6 +265,10 @@ export function useVideoFlowState() {
         sourcePrompt: DEFAULT_PORTRAIT_PROMPT,
         faceImage: "",
         baseImage: "",
+        aiProvider: DEFAULT_SOURCE_IMAGE_PROVIDER,
+        sourceImageModel: DEFAULT_SOURCE_IMAGE_MODEL,
+        backgroundVideoModel: "grok-imagine",
+        dressVideoModel: DEFAULT_DRESS_VIDEO_MODEL,
       };
 
       await api(`/api/video-flow/${encodeURIComponent(id)}/draft`, {
@@ -284,6 +323,10 @@ export function useVideoFlowState() {
       sourcePrompt,
       faceImage,
       baseImage,
+      aiProvider,
+      sourceImageModel,
+      backgroundVideoModel,
+      dressVideoModel,
     });
     if (cardId.trim()) writeActiveProjectId(cardId.trim());
   }, [
@@ -301,6 +344,10 @@ export function useVideoFlowState() {
     sourcePrompt,
     faceImage,
     baseImage,
+    aiProvider,
+    sourceImageModel,
+    backgroundVideoModel,
+    dressVideoModel,
   ]);
 
   function applyFlowDefinition(next: VideoFlowJson) {
@@ -331,6 +378,7 @@ export function useVideoFlowState() {
     projects,
     activeProjectId,
     enhancePrompt,
+    setEnhancePrompt,
     image,
     setImage,
     backgroundMotionPrompt,
@@ -359,7 +407,17 @@ export function useVideoFlowState() {
     setFaceImage,
     baseImage,
     setBaseImage,
+    aiProvider,
+    setAiProvider,
+    sourceImageModel,
+    setSourceImageModel,
+    backgroundVideoModel,
+    setBackgroundVideoModel,
+    dressVideoModel,
+    setDressVideoModel,
     canUseGrok,
+    canUseWavespeed,
+    canUseSourceAi,
     refreshHealth,
     refreshJobs,
     refreshProjects,

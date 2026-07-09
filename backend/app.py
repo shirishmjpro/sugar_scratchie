@@ -30,6 +30,7 @@ from backend.cards import (
     update_card,
     write_cards_index,
 )
+from backend.services.ai_provider import AiProvider, BackgroundVideoModel, DressVideoModel, SourceImageModel
 from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
 from backend.services.mesh_symbols import (
     SYMBOL_POINT_COUNT,
@@ -191,6 +192,10 @@ class VideoFlowRequest(BaseModel):
     source_prompt: str = ""
     face_image: str = ""
     base_image: str = ""
+    provider: AiProvider = "xai"
+    image_model: SourceImageModel = "grok-imagine"
+    background_video_model: BackgroundVideoModel = "grok-imagine"
+    dress_video_model: DressVideoModel = "wan-2.2-video-edit"
 
 
 class GenerateSourceImageRequest(BaseModel):
@@ -200,6 +205,8 @@ class GenerateSourceImageRequest(BaseModel):
     face_image: str = ""
     base_image: str = ""
     aspect_ratio: str = "9:16"
+    provider: AiProvider = "xai"
+    image_model: SourceImageModel = "grok-imagine"
 
 
 class VideoFlowStepRequest(VideoFlowRequest):
@@ -442,6 +449,7 @@ def health() -> dict:
         "root": str(ROOT),
         "env_files": env_files,
         "xai_key_loaded": bool(os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")),
+        "wavespeed_key_loaded": bool(os.environ.get("WAVESPEED_API_KEY")),
         "ffmpeg_available": shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
         "python": PYTHON_CMD,
     }
@@ -689,6 +697,10 @@ def video_flow_draft_kwargs(request: VideoFlowRequest, *, image: Path | str) -> 
         "face_image": request.face_image,
         "base_image": request.base_image,
         "mesh_tune": request.mesh_tune.model_dump(),
+        "ai_provider": request.provider,
+        "source_image_model": request.image_model,
+        "background_video_model": request.background_video_model,
+        "dress_video_model": request.dress_video_model,
     }
 
 
@@ -727,6 +739,8 @@ def generate_source_image_job(request: GenerateSourceImageRequest) -> dict:
             face_image=face_image,
             base_image=base_image,
             aspect_ratio=request.aspect_ratio,
+            provider=request.provider,
+            image_model=request.image_model,
         ),
     )
     return job.public()
@@ -828,7 +842,7 @@ def save_symbol_points(card_id: str, request: SymbolPointsRequest) -> dict:
 @app.post("/api/jobs/video-flow/step")
 def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
     try:
-        validate_step_enqueue(request.card_id, request.step, force=request.force)
+        validate_step_enqueue(request.card_id, request.step, force=request.force, image=request.image)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
@@ -858,6 +872,9 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
             dress_reference_image=dress_reference,
             mesh_tune=request.mesh_tune.model_dump(),
             force=request.force,
+            provider=request.provider,
+            background_video_model=request.background_video_model,
+            dress_video_model=request.dress_video_model,
         ),
     )
     return job.public()

@@ -3,6 +3,45 @@ import { DEFAULT_MESH_TUNE, meshTuneFromApi, type MeshTuneSettings } from "./mes
 
 export type SourceImageMode = "upload" | "prompt" | "face_swap";
 
+export type AiProvider = "xai" | "wavespeed";
+
+export type SourceImageModel = "grok-imagine" | "seedream-v5-lite";
+
+export type BackgroundVideoModel = "grok-imagine" | "wan-2.2-spicy";
+
+export type DressVideoModel = "grok-imagine" | "wan-2.2-video-edit";
+
+export const DEFAULT_SOURCE_IMAGE_PROVIDER: AiProvider = "wavespeed";
+export const DEFAULT_SOURCE_IMAGE_MODEL: SourceImageModel = "seedream-v5-lite";
+export const DEFAULT_DRESS_VIDEO_MODEL: DressVideoModel = "wan-2.2-video-edit";
+
+export function parseBackgroundVideoModel(value: unknown): BackgroundVideoModel {
+  return value === "wan-2.2-spicy" ? "wan-2.2-spicy" : "grok-imagine";
+}
+
+export function parseDressVideoModel(value: unknown): DressVideoModel {
+  return value === "wan-2.2-video-edit" ? "wan-2.2-video-edit" : "grok-imagine";
+}
+
+export function wavespeedPipelineModelValue(
+  sourceImageModel: SourceImageModel,
+  backgroundVideoModel: BackgroundVideoModel,
+): string {
+  if (backgroundVideoModel === "wan-2.2-spicy") return "wan-2.2-spicy";
+  return sourceImageModel;
+}
+
+export function parseAiProvider(value: unknown): AiProvider {
+  return value === "wavespeed" || value === "seedream-v5-lite" ? "wavespeed" : "xai";
+}
+
+export function parseSourceImageModel(value: unknown, legacyProvider?: unknown): SourceImageModel {
+  if (value === "seedream-v5-lite" || value === "seedream-v5.0-lite" || legacyProvider === "seedream-v5-lite" || legacyProvider === "seedream-v5.0-lite") {
+    return "seedream-v5-lite";
+  }
+  return "grok-imagine";
+}
+
 export const DEFAULT_PORTRAIT_PROMPT =
   "Full-body portrait of a woman in casual fitted resort wear, plain white studio background, facing camera, fashion editorial photo.";
 
@@ -30,6 +69,10 @@ export type StoredVideoFlowDraft = {
   sourcePrompt: string;
   faceImage: string;
   baseImage: string;
+  aiProvider: AiProvider;
+  sourceImageModel: SourceImageModel;
+  backgroundVideoModel: BackgroundVideoModel;
+  dressVideoModel: DressVideoModel;
 };
 
 const DRAFT_STORAGE_KEY = "sugar-scratchie:video-flow-draft";
@@ -60,6 +103,10 @@ export function readStoredVideoFlowDraft(): StoredVideoFlowDraft | null {
         : (parsed.sourcePrompt ?? DEFAULT_PORTRAIT_PROMPT),
       faceImage: parsed.faceImage ?? "",
       baseImage: parsed.baseImage ?? "",
+      aiProvider: parseAiProvider(parsed.aiProvider),
+      sourceImageModel: parseSourceImageModel(parsed.sourceImageModel, parsed.aiProvider),
+      backgroundVideoModel: parseBackgroundVideoModel(parsed.backgroundVideoModel),
+      dressVideoModel: parseDressVideoModel(parsed.dressVideoModel),
     };
   } catch {
     return null;
@@ -96,6 +143,15 @@ export function writeActiveProjectId(projectId: string) {
   }
 }
 
+export function canUseAiProvider(
+  provider: AiProvider,
+  health: { xai_key_loaded?: boolean; wavespeed_key_loaded?: boolean } | null,
+): boolean {
+  if (!health) return false;
+  if (provider === "xai") return Boolean(health.xai_key_loaded);
+  return Boolean(health.wavespeed_key_loaded);
+}
+
 export function readFlowJsonText(): string {
   const stored = readStoredFlowJson();
   return stringifyVideoFlowJson(stored ?? DEFAULT_VIDEO_FLOW_JSON);
@@ -117,6 +173,10 @@ export function storedDraftFromApi(draft?: {
   face_image?: string;
   base_image?: string;
   mesh_tune?: unknown;
+  ai_provider?: string;
+  source_image_model?: string;
+  background_video_model?: string;
+  dress_video_model?: string;
 }): StoredVideoFlowDraft | null {
   if (!draft?.card_id) return null;
   const sourceMode = draft.source_mode;
@@ -139,5 +199,9 @@ export function storedDraftFromApi(draft?: {
     sourcePrompt: draft.source_prompt ?? "",
     faceImage: draft.face_image ?? "",
     baseImage: draft.base_image ?? "",
+    aiProvider: parseAiProvider(draft.ai_provider),
+    sourceImageModel: parseSourceImageModel(draft.source_image_model, draft.ai_provider),
+    backgroundVideoModel: parseBackgroundVideoModel(draft.background_video_model),
+    dressVideoModel: parseDressVideoModel(draft.dress_video_model),
   };
 }

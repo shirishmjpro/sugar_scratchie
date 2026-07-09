@@ -596,6 +596,56 @@ textarea:focus-visible {
   max-height: 160px;
 }
 
+.dashboard-preview-media-button {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: zoom-in;
+  display: block;
+  padding: 0;
+  width: 100%;
+}
+
+.dashboard-preview-media-button:disabled {
+  cursor: default;
+}
+
+.dashboard-preview-media-button--compact {
+  max-width: 240px;
+}
+
+.media-preview-zoom {
+  align-items: center;
+  background: rgba(8, 8, 8, 0.92);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 9999;
+}
+
+.media-preview-zoom-close {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  position: fixed;
+  right: 20px;
+  top: 20px;
+  width: 36px;
+  height: 36px;
+}
+
+.media-preview-zoom-image {
+  max-height: 92vh;
+  max-width: 92vw;
+  object-fit: contain;
+}
+
 .dashboard-mesh-stack {
   aspect-ratio: 390 / 672;
   background: #171513;

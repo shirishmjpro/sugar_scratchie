@@ -11,17 +11,23 @@ from typing import Literal
 from fastapi import HTTPException
 
 from backend.cards import CreateCardRequest, UpdateCardRequest, card_paths, create_card, update_card
-from backend.services.grok import (
-    DRESS_ENHANCE_SYSTEM,
-    DEFAULT_PORTRAIT_PROMPT,
+from backend.services.ai_provider import (
     edit_video,
     generate_portrait_image,
     image_to_video,
+    normalize_background_video_model,
+    normalize_dress_video_model,
+    normalize_provider,
+    normalize_source_image_model,
+    swap_face_on_image,
+)
+from backend.services.grok import (
+    DRESS_ENHANCE_SYSTEM,
+    DEFAULT_PORTRAIT_PROMPT,
     is_stock_portrait_prompt,
     output_video_ready,
     probe_video,
     request_id_sidecar,
-    swap_face_on_image,
 )
 from backend.services.mesh_symbols import (
     clear_symbol_points,
@@ -271,7 +277,13 @@ def step_unlocked(state: dict, step: VideoFlowStep) -> bool:
     return all(dep in state["approved"] for dep in STEP_DEPS[step])
 
 
-def validate_step_enqueue(card_id: str, step: VideoFlowStep, *, force: bool = False) -> None:
+def validate_step_enqueue(
+    card_id: str,
+    step: VideoFlowStep,
+    *,
+    force: bool = False,
+    image: str | Path | None = None,
+) -> None:
     """Reject out-of-order step runs before a job is queued."""
     work = work_dir(card_id)
     state = read_state(work)
@@ -283,10 +295,16 @@ def validate_step_enqueue(card_id: str, step: VideoFlowStep, *, force: bool = Fa
         )
     if step in state["approved"] and not force:
         return
+    stale_source_image = (
+        step == "background"
+        and image
+        and _source_image_newer_than_background(work, _paths(work), image)
+    )
     if (
         step_artifact_ready(work, card_id, step, state)
         and not force
         and step in REVIEW_STEPS
+        and not stale_source_image
     ):
         raise RuntimeError(
             "Result already exists — approve or reject it in the dashboard before re-running."
@@ -618,6 +636,10 @@ def save_flow_draft(
     face_image: str = "",
     base_image: str = "",
     mesh_tune: dict | None = None,
+    ai_provider: str = "xai",
+    source_image_model: str = "grok-imagine",
+    background_video_model: str = "grok-imagine",
+    dress_video_model: str = "wan-2.2-video-edit",
 ) -> dict:
     work = work_dir(card_id)
     draft = {
@@ -641,6 +663,13 @@ def save_flow_draft(
         "face_image": face_image,
         "base_image": base_image,
         "mesh_tune": mesh_tune_from_dict(mesh_tune).model_dump(),
+        "ai_provider": normalize_provider(ai_provider),
+        "source_image_model": normalize_source_image_model(
+            source_image_model,
+            provider=ai_provider,
+        ),
+        "background_video_model": normalize_background_video_model(background_video_model),
+        "dress_video_model": normalize_dress_video_model(dress_video_model),
         "updated_at": time.time(),
     }
     draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
@@ -658,9 +687,11 @@ def patch_flow_draft_source(
 ) -> dict:
     work = work_dir(card_id)
     existing = read_flow_draft(card_id) or {}
+    new_image = str(image)
+    image_changed = new_image != str(existing.get("image", ""))
     draft = {
         **existing,
-        "image": str(image),
+        "image": new_image,
         "source_mode": source_mode,
         "source_prompt": source_prompt,
         "face_image": face_image,
@@ -669,7 +700,48 @@ def patch_flow_draft_source(
         "updated_at": time.time(),
     }
     draft_path(work).write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
+    if image_changed:
+        invalidate_after_source_image_change(card_id)
     return draft
+
+
+def _resolve_image_path(image: str | Path) -> Path:
+    path = Path(str(image))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def _source_image_newer_than_background(
+    work: Path,
+    paths: dict[str, Path],
+    image: str | Path,
+) -> bool:
+    background = paths["background_raw"]
+    if not output_video_ready(background):
+        return False
+    source = _resolve_image_path(image)
+    if not source.exists():
+        return False
+    return source.stat().st_mtime > background.stat().st_mtime
+
+
+def _clear_background_clip(paths: dict[str, Path]) -> None:
+    paths["background_raw"].unlink(missing_ok=True)
+    request_id_sidecar(paths["background_raw"]).unlink(missing_ok=True)
+
+
+def invalidate_after_source_image_change(card_id: str) -> dict:
+    work = work_dir(card_id)
+    state = read_state(work)
+    paths = _paths(work)
+    has_background = output_video_ready(paths["background_raw"]) or "background" in state.get(
+        "approved", []
+    )
+    if not has_background:
+        return flow_state(card_id)
+    print("Source image changed — clearing background clip and downstream steps.")
+    return reject_flow_step(card_id, "background")
 
 
 def _draft_path_value(value: str | Path) -> str:
@@ -692,12 +764,19 @@ def run_generate_source_image(
     face_image: str | Path = "",
     base_image: str | Path = "",
     aspect_ratio: str = "9:16",
+    provider: str = "xai",
+    image_model: str = "grok-imagine",
 ) -> dict:
     work = work_dir(card_id)
     out = source_image_path(work)
+    out.unlink(missing_ok=True)
     text = prompt.strip() or DEFAULT_PORTRAIT_PROMPT
+    ai_provider = normalize_provider(provider)
+    source_image_model = normalize_source_image_model(image_model, provider=provider)
     if mode == "prompt":
         generate_portrait_image(
+            provider=ai_provider,
+            image_model=source_image_model,
             prompt=text,
             out=out,
             face_image=face_image or None,
@@ -715,6 +794,8 @@ def run_generate_source_image(
         if not base_image or not face_image:
             raise RuntimeError("Face swap requires base_image and face_image.")
         swap_face_on_image(
+            provider=ai_provider,
+            image_model=source_image_model,
             base_image=base_image,
             face_image=face_image,
             out=out,
@@ -731,6 +812,7 @@ def run_generate_source_image(
         )
     else:  # pragma: no cover
         raise RuntimeError(f"Unknown source image mode: {mode}")
+    invalidate_after_source_image_change(card_id)
     print(f"Source image written: {out.name}")
     return patched
 
@@ -846,9 +928,15 @@ def run_video_flow_step(
     dress_reference_image: str = "",
     mesh_tune: dict | None = None,
     force: bool = False,
+    provider: str = "xai",
+    background_video_model: str = "grok-imagine",
+    dress_video_model: str = "wan-2.2-video-edit",
 ) -> None:
-    del foreground_motion_prompt  # kept in draft/API for backward compatibility
+    del foreground_motion_prompt, provider
     tune = mesh_tune_from_dict(mesh_tune)
+    ai_provider = "xai"
+    bg_video_model = normalize_background_video_model(background_video_model)
+    dress_model = normalize_dress_video_model(dress_video_model)
     work = work_dir(card_id)
     state = read_state(work)
     paths = _paths(work)
@@ -872,6 +960,9 @@ def run_video_flow_step(
         write_webm=write_webm,
         dress_reference_image=dress_reference_image,
         mesh_tune=tune.model_dump(),
+        ai_provider=ai_provider,
+        background_video_model=bg_video_model,
+        dress_video_model=dress_model,
     )
 
     # Re-read state in case approvals changed while the job was queued.
@@ -886,8 +977,12 @@ def run_video_flow_step(
         return
 
     if step_artifact_ready(work, card_id, step, state) and not force and step in REVIEW_STEPS:
-        print(f"Result already exists — open the dashboard to approve or reject it.")
-        return
+        if step == "background" and _source_image_newer_than_background(work, paths, image):
+            print("Source image is newer than the saved background clip — regenerating.")
+            _clear_background_clip(paths)
+        else:
+            print(f"Result already exists — open the dashboard to approve or reject it.")
+            return
 
     if (
         step == "mesh"
@@ -903,7 +998,14 @@ def run_video_flow_step(
         state = read_state(work)
 
     if step == "background":
+        if _source_image_newer_than_background(work, paths, image):
+            _clear_background_clip(paths)
+        if bg_video_model == "wan-2.2-spicy":
+            print("Background video: WaveSpeed WAN 2.2 Spicy (image-to-video)")
+        else:
+            print("Background video: x.ai Grok Imagine")
         image_to_video(
+            provider=ai_provider,
             image=image,
             prompt=background_motion_prompt,
             out=paths["background_raw"],
@@ -911,15 +1013,27 @@ def run_video_flow_step(
             resolution=resolution,
             image_field=image_field,
             endpoint=endpoint,
+            background_video_model=bg_video_model,
         )
     elif step == "dress":
         if not output_video_ready(paths["background_raw"]):
             raise RuntimeError("Background clip missing — run the bikini step first.")
         print("Dress edit uses the approved background clip as input (same motion and scenery).")
+        if dress_model == "wan-2.2-video-edit":
+            print("Dress video: WaveSpeed WAN 2.2 Video Edit")
+        else:
+            print("Dress video: x.ai Grok Imagine (scans the bikini input video for moderation)")
         reference = (dress_reference_image or "").strip()
         if reference:
-            print(f"Using dress reference image: {reference}")
+            if dress_model == "wan-2.2-video-edit":
+                print(
+                    f"Dress reference image on disk ({reference}) — "
+                    "describe the outfit in the prompt; WAN edit is prompt-only."
+                )
+            else:
+                print(f"Using dress reference image: {reference}")
         edit_video(
+            provider=ai_provider,
             video=paths["background_raw"],
             prompt=dress_prompt,
             out=paths["foreground_dressed"],
@@ -930,6 +1044,7 @@ def run_video_flow_step(
             prepare_compatible=True,
             enhance_system=DRESS_ENHANCE_SYSTEM,
             reference_image=reference or None,
+            dress_video_model=dress_model,
         )
         _sync_foreground_to_background(work, paths)
     elif step == "card":

@@ -1,4 +1,4 @@
-import { FileUp } from "lucide-react";
+import { FileUp, Maximize2, Trash2, X } from "lucide-react";
 import { Badge, Box, Button, Flex, Text, TextField } from "@radix-ui/themes";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
@@ -52,50 +52,126 @@ export function MediaPreview({
   size = "normal",
   type,
   value,
+  zoomable = false,
+  onDelete,
 }: {
   label: string;
   size?: "compact" | "normal";
   type: "image" | "video";
   value: string;
+  zoomable?: boolean;
+  onDelete?: () => void;
 }) {
   const src = previewSource(value);
   const [hasError, setHasError] = useState(false);
+  const [zoomOpen, setZoomOpen] = useState(false);
 
   useEffect(() => {
     setHasError(false);
+    setZoomOpen(false);
   }, [src]);
+
+  useEffect(() => {
+    if (!zoomOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setZoomOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [zoomOpen]);
 
   if (!src || hasError) return null;
 
+  const showZoom = zoomable && type === "image";
+
   return (
-    <Box className={`dashboard-preview${size === "compact" ? " dashboard-preview--compact" : ""}`}>
-      <Flex align="center" justify="between" mb="2">
-        <Text color="gray" size="1" weight="bold">
-          {label}
-        </Text>
-        <Badge color="gray" variant="soft">
-          {type}
-        </Badge>
-      </Flex>
-      {type === "image" ? (
-        <img
-          alt={label}
-          className={`dashboard-preview-media${size === "compact" ? " dashboard-preview-media--compact" : ""}`}
-          onError={() => setHasError(true)}
-          src={src}
-        />
-      ) : (
-        <video
-          className="dashboard-preview-media"
-          controls
-          muted
-          onError={() => setHasError(true)}
-          playsInline
-          preload="metadata"
-          src={src}
-        />
-      )}
-    </Box>
+    <>
+      <Box className={`dashboard-preview${size === "compact" ? " dashboard-preview--compact" : ""}`}>
+        <Flex align="center" justify="between" mb="2">
+          <Text color="gray" size="1" weight="bold">
+            {label}
+          </Text>
+          <Flex align="center" gap="1">
+            {showZoom ? (
+              <Button
+                aria-label={`Zoom ${label}`}
+                size="1"
+                type="button"
+                variant="ghost"
+                onClick={() => setZoomOpen(true)}
+              >
+                <Maximize2 {...iconProps} />
+              </Button>
+            ) : null}
+            {onDelete ? (
+              <Button
+                aria-label={`Remove ${label}`}
+                color="red"
+                size="1"
+                type="button"
+                variant="ghost"
+                onClick={onDelete}
+              >
+                <Trash2 {...iconProps} />
+              </Button>
+            ) : null}
+            <Badge color="gray" variant="soft">
+              {type}
+            </Badge>
+          </Flex>
+        </Flex>
+        {type === "image" ? (
+          <button
+            className={`dashboard-preview-media-button${size === "compact" ? " dashboard-preview-media-button--compact" : ""}`}
+            disabled={!showZoom}
+            type="button"
+            onClick={() => {
+              if (showZoom) setZoomOpen(true);
+            }}
+          >
+            <img
+              alt={label}
+              className={`dashboard-preview-media${size === "compact" ? " dashboard-preview-media--compact" : ""}`}
+              onError={() => setHasError(true)}
+              src={src}
+            />
+          </button>
+        ) : (
+          <video
+            className="dashboard-preview-media"
+            controls
+            muted
+            onError={() => setHasError(true)}
+            playsInline
+            preload="metadata"
+            src={src}
+          />
+        )}
+      </Box>
+      {showZoom && zoomOpen ? (
+        <div
+          className="media-preview-zoom"
+          role="dialog"
+          aria-label={`${label} zoom`}
+          onClick={() => setZoomOpen(false)}
+        >
+          <button
+            aria-label="Close zoom"
+            className="media-preview-zoom-close"
+            type="button"
+            onClick={() => setZoomOpen(false)}
+          >
+            <X {...iconProps} />
+          </button>
+          <img
+            alt={label}
+            className="media-preview-zoom-image"
+            src={src}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -107,6 +183,7 @@ export function FilePathPicker({
   preview,
   previewLabel,
   previewSize = "normal",
+  previewZoomable = false,
   value,
 }: {
   accept?: string;
@@ -116,6 +193,7 @@ export function FilePathPicker({
   preview?: "image" | "video";
   previewLabel?: string;
   previewSize?: "compact" | "normal";
+  previewZoomable?: boolean;
   value: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -170,6 +248,8 @@ export function FilePathPicker({
           size={previewSize}
           type={preview}
           value={value}
+          zoomable={previewZoomable && preview === "image"}
+          onDelete={() => onChange("")}
         />
       ) : null}
     </Flex>

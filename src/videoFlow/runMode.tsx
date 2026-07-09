@@ -1,4 +1,4 @@
-import { Check, Loader2, Play, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, Loader2, Play, RotateCcw } from "lucide-react";
 import {
   Badge,
   Box,
@@ -16,7 +16,7 @@ import {
   TextArea,
   TextField,
 } from "@radix-ui/themes";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../shared/api";
 import { flowStepBadge, type FlowNodeRuntime } from "./flowCanvas";
 import {
@@ -31,7 +31,7 @@ import { MeshTunePanel } from "./MeshTunePanel";
 import { meshTuneToApi, type MeshTuneSettings } from "./meshTune";
 import { SymbolPointPicker } from "./SymbolPointPicker";
 import { Field, FilePathPicker, iconProps, MediaPreview, MESH_TRACKERS, MESH_TRACKER_MODES, meshTrackerFromArtifact, meshTrackerModeLabel, type MeshTracker, type MeshTrackerMode } from "./ui";
-import { isStockPortraitPrompt, storedDraftFromApi, type SourceImageMode, type StoredVideoFlowDraft } from "./storage";
+import { isStockPortraitPrompt, storedDraftFromApi, wavespeedPipelineModelValue, type AiProvider, type BackgroundVideoModel, type DressVideoModel, type SourceImageMode, type SourceImageModel, type StoredVideoFlowDraft } from "./storage";
 
 type JobInfo = {
   id: string;
@@ -65,37 +65,123 @@ function flowStepFromJobCommand(command: string[]): VideoFlowStepKey | null {
   return null;
 }
 
-function pipelineFocusStep(
+function nextPipelineStep(
   flow: VideoFlowJson,
-  flowState: VideoFlowState | null,
-  runningStep: VideoFlowStepKey | null,
-  failedStep: VideoFlowStepKey | null,
+  current: VideoFlowStepKey,
 ): VideoFlowStepKey | null {
-  if (
-    runningStep &&
-    flowState?.steps[runningStep]?.status !== "locked"
-  ) {
-    return runningStep;
-  }
-  if (failedStep) return failedStep;
-  if (!flowState) return flow.pipeline[0] ?? null;
-  for (const step of flow.pipeline) {
-    const status = flowState.steps[step]?.status;
-    if (status === "review" || status === "ready") return step;
-  }
-  return null;
+  const index = flow.pipeline.indexOf(current);
+  if (index < 0 || index >= flow.pipeline.length - 1) return null;
+  return flow.pipeline[index + 1] ?? null;
 }
 
 function formatSourceImageJobError(log: string | undefined): string {
   if (!log) return "Source image job failed — check the Jobs tab for details.";
-  const cleaned = log.replace(/^Job runner error: /, "");
-  if (cleaned.toLowerCase().includes("content moderation")) {
+  const fullLog = (log || "").replace(/^Job runner error: /, "");
+  const cleaned = fullLog.split("\n").pop()?.trim() || fullLog;
+  const lowered = cleaned.toLowerCase();
+  if (lowered.includes("both wavespeed and x.ai blocked")) {
+    return cleaned.replace(/^Job runner error: /, "");
+  }
+  if (
+    lowered.includes("content moderation") ||
+    lowered.includes("potentially sensitive") ||
+    lowered.includes("flagged as potentially sensitive")
+  ) {
+    const triedFallback = /retrying via x\.ai/i.test(log || "");
     return (
-      "xAI rejected the result (content moderation). " +
-      "Try a less revealing prompt, different photos, or use Upload instead."
+      (triedFallback
+        ? "WaveSpeed and x.ai both blocked this prompt (content moderation). "
+        : "Image generation was blocked (content moderation). ") +
+      "Use a neutral, fully-clothed studio portrait prompt, or upload a source image instead."
     );
   }
+  const wavespeedFailed = cleaned.match(/WaveSpeed [^:]+ failed: (.+)$/);
+  if (wavespeedFailed?.[1]) return wavespeedFailed[1];
   return cleaned;
+}
+
+function formatStepJobError(log: string | undefined, step: VideoFlowStepKey | null): string {
+  if (!log) return "Step failed — check the Jobs tab for details.";
+  const cleaned = log.replace(/^Job runner error: /, "").trim();
+  const lowered = cleaned.toLowerCase();
+  if (step === "dress" && lowered.includes("content moderation")) {
+    if (
+      lowered.includes("switch step 2") ||
+      lowered.includes("wan 2.2") ||
+      lowered.includes("wavespeed")
+    ) {
+      return cleaned;
+    }
+    return `${cleaned} Step 2 sends your approved bikini clip to the API — x.ai scans the video frames, not just your dress prompt. Switch to WaveSpeed WAN 2.2 Video Edit above.`;
+  }
+  return cleaned;
+}
+
+function SourceImageProviderFields({
+  aiProvider,
+  sourceImageModel,
+  backgroundVideoModel,
+  onAiProviderChange,
+  onSourceImageModelChange,
+  onBackgroundVideoModelChange,
+}: {
+  aiProvider: AiProvider;
+  sourceImageModel: SourceImageModel;
+  backgroundVideoModel: BackgroundVideoModel;
+  onAiProviderChange: (value: AiProvider) => void;
+  onSourceImageModelChange: (value: SourceImageModel) => void;
+  onBackgroundVideoModelChange: (value: BackgroundVideoModel) => void;
+}) {
+  const pipelineModel = wavespeedPipelineModelValue(sourceImageModel, backgroundVideoModel);
+
+  return (
+    <>
+      <Field label="Provider">
+        <Select.Root value={aiProvider} onValueChange={(value) => onAiProviderChange(value as AiProvider)}>
+          <Select.Trigger />
+          <Select.Content>
+            <Select.Item value="xai">x.ai</Select.Item>
+            <Select.Item value="wavespeed">WaveSpeed</Select.Item>
+          </Select.Content>
+        </Select.Root>
+      </Field>
+      {aiProvider === "wavespeed" ? (
+        <Field label="Image model">
+          <Select.Root
+            value={pipelineModel}
+            onValueChange={(value) => {
+              if (value === "wan-2.2-spicy") {
+                onBackgroundVideoModelChange("wan-2.2-spicy");
+                return;
+              }
+              onSourceImageModelChange(value as SourceImageModel);
+              onBackgroundVideoModelChange("grok-imagine");
+            }}
+          >
+            <Select.Trigger />
+            <Select.Content>
+              <Select.Item value="grok-imagine">Grok Imagine</Select.Item>
+              <Select.Item value="seedream-v5-lite">Seedream v5.0 Lite</Select.Item>
+              <Select.Item value="wan-2.2-spicy">WAN 2.2 Spicy (Step 1 video)</Select.Item>
+            </Select.Content>
+          </Select.Root>
+        </Field>
+      ) : (
+        <Text color="gray" size="2">
+          Seedream v5.0 Lite and WAN 2.2 Spicy are available under the WaveSpeed provider.
+        </Text>
+      )}
+      {aiProvider === "wavespeed" && backgroundVideoModel === "wan-2.2-spicy" ? (
+        <Callout.Root color="blue">
+          <Callout.Text>
+            WAN 2.2 Spicy animates your source portrait on <strong>Step 1 (image to video)</strong> via
+            WaveSpeed — not for still portraits. Use Grok Imagine or Seedream above to generate the source
+            image first.
+          </Callout.Text>
+        </Callout.Root>
+      ) : null}
+    </>
+  );
 }
 
 function resolveFlowNodeStatuses(
@@ -269,6 +355,12 @@ type RunModeProps = {
   flow: VideoFlowJson;
   jobs: JobInfo[];
   canUseGrok: boolean;
+  canUseSourceAi: boolean;
+  canUseWavespeed: boolean;
+  aiProvider: AiProvider;
+  sourceImageModel: SourceImageModel;
+  backgroundVideoModel: BackgroundVideoModel;
+  dressVideoModel: DressVideoModel;
   enhancePrompt: boolean;
   image: string;
   backgroundMotionPrompt: string;
@@ -298,6 +390,11 @@ type RunModeProps = {
   onSourcePromptChange: (value: string) => void;
   onFaceImageChange: (value: string) => void;
   onBaseImageChange: (value: string) => void;
+  onAiProviderChange: (value: AiProvider) => void;
+  onSourceImageModelChange: (value: SourceImageModel) => void;
+  onBackgroundVideoModelChange: (value: BackgroundVideoModel) => void;
+  onDressVideoModelChange: (value: DressVideoModel) => void;
+  onEnhancePromptChange: (value: boolean) => void;
   onApplyDraft: (draft: StoredVideoFlowDraft) => void;
   onRefreshJobs: () => Promise<void>;
   onRefreshAssets: () => Promise<void>;
@@ -309,6 +406,12 @@ export function RunMode(props: RunModeProps) {
     flow,
     jobs,
     canUseGrok,
+    canUseSourceAi,
+    canUseWavespeed,
+    aiProvider,
+    sourceImageModel,
+    backgroundVideoModel,
+    dressVideoModel,
     enhancePrompt,
     image,
     backgroundMotionPrompt,
@@ -338,6 +441,11 @@ export function RunMode(props: RunModeProps) {
     onSourcePromptChange,
     onFaceImageChange,
     onBaseImageChange,
+    onAiProviderChange,
+    onSourceImageModelChange,
+    onBackgroundVideoModelChange,
+    onDressVideoModelChange,
+    onEnhancePromptChange,
     onApplyDraft,
     onRefreshJobs,
     onRefreshAssets,
@@ -352,6 +460,7 @@ export function RunMode(props: RunModeProps) {
   const [flowState, setFlowState] = useState<VideoFlowState | null>(null);
   const [flowBusy, setFlowBusy] = useState(false);
   const [showFaceSwapPrompt, setShowFaceSwapPrompt] = useState(false);
+  const [showMeshAdvanced, setShowMeshAdvanced] = useState(false);
   const [sourceJobHandledId, setSourceJobHandledId] = useState("");
   const [compareTracker, setCompareTracker] = useState<MeshTracker>("cotracker");
 
@@ -396,11 +505,16 @@ export function RunMode(props: RunModeProps) {
 
   const meshCompareCount = flowState?.mesh_compare?.length ?? 0;
   const meshStepApproved = flowState?.steps.mesh?.status === "approved";
+  const meshInReview = flowState?.steps.mesh?.status === "review";
   const meshComparePin =
-    meshCandidateRunning || (meshStepApproved && meshCompareCount >= 2);
+    (meshInReview && meshCompareCount >= 1) || (meshStepApproved && meshCompareCount >= 2);
 
   const [meshFocusOverride, setMeshFocusOverride] = useState(false);
-  const shouldPinMesh = meshComparePin && !meshFocusOverride;
+  const shouldPinMesh = meshComparePin && !meshFocusOverride && !meshCandidateRunning;
+
+  const handledStepJobId = useRef("");
+  const handledMeshJobId = useRef("");
+  const previousImageRef = useRef(image);
 
   const runningStep = useMemo(() => {
     if (!stepJob || stepJob.status === "queued" || stepJob.status === "running") {
@@ -453,8 +567,27 @@ export function RunMode(props: RunModeProps) {
       if (stepJob.status === "succeeded" && (finishedStep === "card" || finishedStep === "mesh")) {
         void onRefreshAssets();
       }
+      if (
+        stepJob.status === "succeeded" &&
+        finishedStep &&
+        handledStepJobId.current !== stepJob.id
+      ) {
+        handledStepJobId.current = stepJob.id;
+        const nodeId = stepToNodeMap[finishedStep];
+        if (nodeId) {
+          if (reviewSteps.has(finishedStep) || (finishedStep === "mesh" && tracker === "all")) {
+            if (finishedStep === "mesh") setMeshFocusOverride(false);
+            setActiveNode(nodeId);
+          } else {
+            const next = nextPipelineStep(flow, finishedStep);
+            const nextNode = next ? stepToNodeMap[next] : undefined;
+            if (nextNode) setActiveNode(nextNode);
+            else setActiveNode(nodeId);
+          }
+        }
+      }
     }
-  }, [stepJob?.id, stepJob?.status]);
+  }, [flow, reviewSteps, stepJob?.id, stepJob?.status, stepToNodeMap, tracker]);
 
   useEffect(() => {
     if (stepJob) return;
@@ -467,9 +600,17 @@ export function RunMode(props: RunModeProps) {
       void refreshFlowState();
       if (meshCandidateJob.status === "succeeded") {
         void onRefreshAssets();
+        if (handledMeshJobId.current !== meshCandidateJob.id) {
+          handledMeshJobId.current = meshCandidateJob.id;
+          const meshNode = stepToNodeMap.mesh;
+          if (meshNode) {
+            setMeshFocusOverride(false);
+            setActiveNode(meshNode);
+          }
+        }
       }
     }
-  }, [meshCandidateJob?.id, meshCandidateJob?.status, stepJob?.id]);
+  }, [meshCandidateJob?.id, meshCandidateJob?.status, stepJob?.id, stepToNodeMap]);
 
   useEffect(() => {
     if (activeRunningStep !== "mesh" && !meshCandidateRunning) return;
@@ -492,6 +633,8 @@ export function RunMode(props: RunModeProps) {
         );
         const parsed = storedDraftFromApi(data.draft);
         if (parsed) onApplyDraft(parsed);
+        const stateData = await api<VideoFlowState>(`/api/video-flow/${encodeURIComponent(id)}/state`);
+        setFlowState(stateData);
       } catch (caught) {
         onError(caught instanceof Error ? caught.message : String(caught));
       }
@@ -499,33 +642,33 @@ export function RunMode(props: RunModeProps) {
   }, [cardId, onApplyDraft, onError, sourceImageJob, sourceJobHandledId]);
 
   useEffect(() => {
-    if (meshCandidateRunning) setMeshFocusOverride(false);
-  }, [meshCandidateRunning]);
-
-  const focusStep = useMemo(() => {
-    if (shouldPinMesh) return "mesh";
-    return pipelineFocusStep(flow, flowState, effectiveRunningStep, failedStep);
-  }, [flow, flowState, effectiveRunningStep, failedStep, shouldPinMesh]);
+    const prev = previousImageRef.current;
+    if (image === prev) return;
+    previousImageRef.current = image;
+    const id = cardId.trim();
+    if (!id || !image.trim()) return;
+    void (async () => {
+      try {
+        const data = await api<VideoFlowState>(
+          `/api/video-flow/${encodeURIComponent(id)}/reject`,
+          { method: "POST", body: JSON.stringify({ step: "background" }) },
+        );
+        setFlowState(data);
+      } catch {
+        // New projects may not have pipeline state yet.
+      }
+    })();
+  }, [image, cardId]);
 
   useEffect(() => {
-    if (effectiveRunningStep && stepToNodeMap[effectiveRunningStep]) {
-      setActiveNode(stepToNodeMap[effectiveRunningStep]!);
-      return;
-    }
     if (failedStep && stepToNodeMap[failedStep]) {
       setActiveNode(stepToNodeMap[failedStep]!);
       return;
     }
     if (shouldPinMesh && stepToNodeMap.mesh) {
       setActiveNode(stepToNodeMap.mesh);
-      return;
     }
-    if (!focusStep || !stepToNodeMap[focusStep]) return;
-    const status = flowState?.steps[focusStep]?.status;
-    if (status === "review" || status === "ready") {
-      setActiveNode(stepToNodeMap[focusStep]!);
-    }
-  }, [effectiveRunningStep, failedStep, focusStep, flowState, stepToNodeMap, shouldPinMesh]);
+  }, [failedStep, shouldPinMesh, stepToNodeMap]);
 
   useEffect(() => {
     if (!staleRunningStep || !stepJob) return;
@@ -559,7 +702,16 @@ export function RunMode(props: RunModeProps) {
     meshCandidateRunning ||
     flowBusy;
 
-  const actionStep: VideoFlowStepKey | null = activeStep ?? focusStep;
+  const firstActionStep = useMemo(() => {
+    if (!flowState) return flow.pipeline[0] ?? null;
+    for (const step of flow.pipeline) {
+      const status = flowState.steps[step]?.status;
+      if (status === "review" || status === "ready") return step;
+    }
+    return null;
+  }, [flow, flowState]);
+
+  const actionStep: VideoFlowStepKey | null = activeStep ?? firstActionStep;
   const actionStatus =
     actionStep && effectiveRunningStep === actionStep
       ? "running"
@@ -570,7 +722,16 @@ export function RunMode(props: RunModeProps) {
           : null;
   const actionStepState = actionStep ? flowState?.steps[actionStep] : undefined;
   const actionPreviewArtifacts = actionStepState?.artifacts ?? [];
-  const actionNeedsGrok = actionStep === "background" || actionStep === "dress";
+  const actionNeedsGrok =
+    (actionStep === "dress" && dressVideoModel === "grok-imagine") ||
+    (actionStep === "background" && backgroundVideoModel === "grok-imagine");
+  const actionNeedsWavespeed =
+    (actionStep === "dress" && dressVideoModel === "wan-2.2-video-edit") ||
+    (actionStep === "background" && backgroundVideoModel === "wan-2.2-spicy");
+  const canUseBackgroundVideo =
+    backgroundVideoModel === "wan-2.2-spicy" ? canUseWavespeed : canUseGrok;
+  const canUseDressVideo =
+    dressVideoModel === "wan-2.2-video-edit" ? canUseWavespeed : canUseGrok;
   const actionIsInteractive = actionStep === "symbols";
 
   const meshCompareArtifacts = useMemo((): MeshCompareEntry[] => {
@@ -622,11 +783,22 @@ export function RunMode(props: RunModeProps) {
     source_prompt: sourcePrompt,
     face_image: faceImage,
     base_image: baseImage,
+    provider: aiProvider,
+    image_model: sourceImageModel,
+    background_video_model: backgroundVideoModel,
+    dress_video_model: dressVideoModel,
   };
 
-  const canGeneratePromptImage = Boolean(cardId.trim() && canUseGrok && !sourceImageBusy);
+  const stepApiReady =
+    actionStep === "background"
+      ? canUseBackgroundVideo
+      : actionStep === "dress"
+        ? canUseDressVideo
+        : true;
+
+  const canGeneratePromptImage = Boolean(cardId.trim() && canUseSourceAi && !sourceImageBusy);
   const canGenerateFaceSwap = Boolean(
-    cardId.trim() && baseImage.trim() && faceImage.trim() && canUseGrok && !sourceImageBusy,
+    cardId.trim() && baseImage.trim() && faceImage.trim() && canUseSourceAi && !sourceImageBusy,
   );
 
   async function generateSourceImage(mode: "prompt" | "face_swap") {
@@ -649,6 +821,8 @@ export function RunMode(props: RunModeProps) {
           face_image: faceImage.trim(),
           base_image: baseImage.trim(),
           aspect_ratio: "9:16",
+          provider: aiProvider,
+          image_model: sourceImageModel,
         }),
       });
       await onRefreshJobs();
@@ -666,6 +840,8 @@ export function RunMode(props: RunModeProps) {
       cardLabel.trim() &&
       image &&
       (!actionNeedsGrok || canUseGrok) &&
+      (!actionNeedsWavespeed || canUseWavespeed) &&
+      stepApiReady &&
       actionStatus === "ready" &&
       !jobBusy,
   );
@@ -676,6 +852,8 @@ export function RunMode(props: RunModeProps) {
       cardLabel.trim() &&
       image &&
       (!actionNeedsGrok || canUseGrok) &&
+      (!actionNeedsWavespeed || canUseWavespeed) &&
+      stepApiReady &&
       actionStatus === "approved" &&
       !jobBusy,
   );
@@ -699,9 +877,6 @@ export function RunMode(props: RunModeProps) {
   async function generateMeshCandidate() {
     const id = cardId.trim();
     if (!id) return;
-    setMeshFocusOverride(false);
-    const meshNode = stepToNodeMap.mesh;
-    if (meshNode) setActiveNode(meshNode);
     setFlowBusy(true);
     onError("");
     try {
@@ -739,6 +914,11 @@ export function RunMode(props: RunModeProps) {
         },
       );
       setFlowState(data);
+      const next = nextPipelineStep(flow, step);
+      if (next && data.steps[next]?.status === "ready") {
+        const nodeId = stepToNodeMap[next];
+        if (nodeId) setActiveNode(nodeId);
+      }
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -899,8 +1079,7 @@ export function RunMode(props: RunModeProps) {
           {actionStatus === "failed" && stepJob?.logs.length ? (
             <Callout.Root color="red" mb="4">
               <Callout.Text>
-                {stepJob.logs[stepJob.logs.length - 1]?.replace(/^Job runner error: /, "") ??
-                  "Step failed — check the Jobs tab for details."}
+                {formatStepJobError(stepJob.logs[stepJob.logs.length - 1], actionStep)}
               </Callout.Text>
             </Callout.Root>
           ) : null}
@@ -943,6 +1122,7 @@ export function RunMode(props: RunModeProps) {
                       preview="image"
                       previewLabel="Source image"
                       previewSize="compact"
+                      previewZoomable
                       value={image}
                       onChange={onImageChange}
                       onError={onError}
@@ -952,6 +1132,14 @@ export function RunMode(props: RunModeProps) {
 
                 <Tabs.Content value="prompt">
                   <Flex direction="column" gap="4">
+                    <SourceImageProviderFields
+                      aiProvider={aiProvider}
+                      sourceImageModel={sourceImageModel}
+                      backgroundVideoModel={backgroundVideoModel}
+                      onAiProviderChange={onAiProviderChange}
+                      onSourceImageModelChange={onSourceImageModelChange}
+                      onBackgroundVideoModelChange={onBackgroundVideoModelChange}
+                    />
                     <Field label="Portrait prompt">
                       <TextArea
                         className="dashboard-textarea"
@@ -959,10 +1147,6 @@ export function RunMode(props: RunModeProps) {
                         onChange={(event) => onSourcePromptChange(event.currentTarget.value)}
                       />
                     </Field>
-                    <Text color="gray" size="2">
-                      Bikini styling is added in the next step (image to video). Keep this prompt
-                      neutral to avoid xAI moderation rejections.
-                    </Text>
                     <Field label="Optional face reference (steers identity)">
                       <FilePathPicker
                         accept="image/*"
@@ -975,14 +1159,6 @@ export function RunMode(props: RunModeProps) {
                         onError={onError}
                       />
                     </Field>
-                    {faceImage.trim() ? (
-                      <Callout.Root color="orange">
-                        <Callout.Text>
-                          Face-guided generation uses a moderation-safe resort-wear default unless you
-                          change the prompt. Bikini or revealing prompts are often rejected.
-                        </Callout.Text>
-                      </Callout.Root>
-                    ) : null}
                     <Flex align="center" gap="3" wrap="wrap">
                       <Button
                         disabled={!canGeneratePromptImage}
@@ -992,17 +1168,55 @@ export function RunMode(props: RunModeProps) {
                         {sourceImageBusy ? <Loader2 {...iconProps} className="spin" /> : <Play {...iconProps} />}
                         Generate source image
                       </Button>
-                      {!canUseGrok ? (
+                      {!canUseSourceAi ? (
                         <Text color="gray" size="2">
-                          Add XAI_API_KEY to .env first.
+                          {aiProvider === "xai"
+                            ? "Add XAI_API_KEY to .env first."
+                            : "Add WAVESPEED_API_KEY to .env first."}
                         </Text>
                       ) : null}
                     </Flex>
+                    {sourceImageJob ? (
+                      <Callout.Root
+                        color={
+                          sourceImageJob.status === "failed" || sourceImageJob.status === "cancelled"
+                            ? "red"
+                            : sourceImageJob.status === "succeeded"
+                              ? "green"
+                              : "blue"
+                        }
+                      >
+                        <Callout.Text>
+                          Source image job {sourceImageJob.status}
+                          {sourceImageJob.status === "failed"
+                            ? ` — ${formatSourceImageJobError(sourceImageJob.logs[sourceImageJob.logs.length - 1])}`
+                            : ""}
+                        </Callout.Text>
+                      </Callout.Root>
+                    ) : null}
+                    {image ? (
+                      <MediaPreview
+                        label="Resolved source image"
+                        size="compact"
+                        type="image"
+                        value={image}
+                        zoomable
+                        onDelete={() => onImageChange("")}
+                      />
+                    ) : null}
                   </Flex>
                 </Tabs.Content>
 
                 <Tabs.Content value="face_swap">
                   <Flex direction="column" gap="4">
+                    <SourceImageProviderFields
+                      aiProvider={aiProvider}
+                      sourceImageModel={sourceImageModel}
+                      backgroundVideoModel={backgroundVideoModel}
+                      onAiProviderChange={onAiProviderChange}
+                      onSourceImageModelChange={onSourceImageModelChange}
+                      onBackgroundVideoModelChange={onBackgroundVideoModelChange}
+                    />
                     <Field label="Base image (body / scene to keep)">
                       <FilePathPicker
                         accept="image/*"
@@ -1059,53 +1273,47 @@ export function RunMode(props: RunModeProps) {
                         {sourceImageBusy ? <Loader2 {...iconProps} className="spin" /> : <Play {...iconProps} />}
                         Apply face swap
                       </Button>
-                      {!canUseGrok ? (
+                      {!canUseSourceAi ? (
                         <Text color="gray" size="2">
-                          Add XAI_API_KEY to .env first.
+                          {aiProvider === "xai"
+                            ? "Add XAI_API_KEY to .env first."
+                            : "Add WAVESPEED_API_KEY to .env first."}
                         </Text>
                       ) : null}
                     </Flex>
+                    {sourceImageJob ? (
+                      <Callout.Root
+                        color={
+                          sourceImageJob.status === "failed" || sourceImageJob.status === "cancelled"
+                            ? "red"
+                            : sourceImageJob.status === "succeeded"
+                              ? "green"
+                              : "blue"
+                        }
+                      >
+                        <Callout.Text>
+                          Source image job {sourceImageJob.status}
+                          {sourceImageJob.status === "failed"
+                            ? ` — ${formatSourceImageJobError(sourceImageJob.logs[sourceImageJob.logs.length - 1])}`
+                            : ""}
+                        </Callout.Text>
+                      </Callout.Root>
+                    ) : null}
+                    {image ? (
+                      <MediaPreview
+                        label="Resolved source image"
+                        size="compact"
+                        type="image"
+                        value={image}
+                        zoomable
+                        onDelete={() => onImageChange("")}
+                      />
+                    ) : null}
                   </Flex>
                 </Tabs.Content>
               </Box>
             </Tabs.Root>
 
-            {sourceImageJob ? (
-              <Callout.Root
-                color={
-                  sourceImageJob.status === "failed" || sourceImageJob.status === "cancelled"
-                    ? "red"
-                    : sourceImageJob.status === "succeeded"
-                      ? "green"
-                      : "blue"
-                }
-              >
-                <Callout.Text>
-                  Source image job {sourceImageJob.status}
-                  {sourceImageJob.status === "failed"
-                    ? ` — ${formatSourceImageJobError(sourceImageJob.logs[sourceImageJob.logs.length - 1])}`
-                    : ""}
-                </Callout.Text>
-              </Callout.Root>
-            ) : null}
-
-            {image ? (
-              <MediaPreview label="Resolved source image" size="compact" type="image" value={image} />
-            ) : null}
-
-            <Field label="Grok resolution">
-              <Select.Root
-                value={resolution || "default"}
-                onValueChange={(value) => onResolutionChange(value === "default" ? "" : value)}
-              >
-                <Select.Trigger />
-                <Select.Content>
-                  <Select.Item value="720p">720p</Select.Item>
-                  <Select.Item value="480p">480p</Select.Item>
-                  <Select.Item value="default">Default</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </Field>
             <Grid columns={{ initial: "1", md: "2" }} gap="3">
               <Field label="Card id (work folder)">
                 <TextField.Root
@@ -1126,17 +1334,83 @@ export function RunMode(props: RunModeProps) {
         ) : null}
 
         {activeNode === "background" ? (
-          <Field label="Bikini background prompt (image to video — approve before dress-up)">
-            <TextArea
-              className="dashboard-textarea"
-              value={backgroundMotionPrompt}
-              onChange={(event) => onBackgroundMotionPromptChange(event.currentTarget.value)}
-            />
-          </Field>
+          <Flex direction="column" gap="4">
+            {image ? (
+              <Callout.Root color="blue">
+                <Callout.Text>
+                  Step 1 uses the current source image above. If you changed it, click{" "}
+                  <strong>Run step</strong> or <strong>Remake step</strong> — old clips are cleared
+                  automatically.
+                </Callout.Text>
+              </Callout.Root>
+            ) : null}
+            <Field label="Step 1 video model">
+              <Select.Root
+                value={backgroundVideoModel}
+                onValueChange={(value) => onBackgroundVideoModelChange(value as BackgroundVideoModel)}
+              >
+                <Select.Trigger />
+                <Select.Content>
+                  <Select.Item value="grok-imagine">x.ai Grok Imagine</Select.Item>
+                  <Select.Item value="wan-2.2-spicy">WaveSpeed WAN 2.2 Spicy</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </Field>
+            <Field label="Video resolution">
+              <Select.Root
+                value={resolution || "default"}
+                onValueChange={(value) => onResolutionChange(value === "default" ? "" : value)}
+              >
+                <Select.Trigger />
+                <Select.Content>
+                  <Select.Item value="720p">720p</Select.Item>
+                  <Select.Item value="480p">480p</Select.Item>
+                  {backgroundVideoModel === "grok-imagine" ? (
+                    <Select.Item value="default">Default</Select.Item>
+                  ) : null}
+                </Select.Content>
+              </Select.Root>
+            </Field>
+            <Field label="Bikini background prompt (image to video — approve before dress-up)">
+              <TextArea
+                className="dashboard-textarea"
+                value={backgroundMotionPrompt}
+                onChange={(event) => onBackgroundMotionPromptChange(event.currentTarget.value)}
+              />
+            </Field>
+          </Flex>
         ) : null}
 
         {activeNode === "dress" ? (
           <Flex direction="column" gap="4">
+            <Callout.Root color="orange">
+              <Callout.Text size="2">
+                Step 2 edits your approved bikini clip in place. x.ai Grok scans every frame of
+                that video for moderation — a modest dress prompt can still fail. Use{" "}
+                <strong>WaveSpeed WAN 2.2 Video Edit</strong> to avoid that scan.
+              </Callout.Text>
+            </Callout.Root>
+            <Field label="Step 2 video model">
+              <Select.Root
+                value={dressVideoModel}
+                onValueChange={(value) => onDressVideoModelChange(value as DressVideoModel)}
+              >
+                <Select.Trigger />
+                <Select.Content>
+                  <Select.Item value="wan-2.2-video-edit">
+                    WaveSpeed WAN 2.2 Video Edit (recommended)
+                  </Select.Item>
+                  <Select.Item value="grok-imagine">x.ai Grok Imagine</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </Field>
+            {!canUseDressVideo ? (
+              <Text color="gray" size="2">
+                {dressVideoModel === "wan-2.2-video-edit"
+                  ? "Add WAVESPEED_API_KEY to .env first."
+                  : "Add XAI_API_KEY to .env first."}
+              </Text>
+            ) : null}
             <Field label="Dress-up edit prompt (video edit on approved background — same scenery)">
               <TextArea
                 className="dashboard-textarea"
@@ -1144,7 +1418,7 @@ export function RunMode(props: RunModeProps) {
                 onChange={(event) => onDressPromptChange(event.currentTarget.value)}
               />
             </Field>
-            <Field label="Dress reference image (optional — guides the outfit shape/style)">
+            <Field label="Dress reference image (optional — Grok only; describe outfit in prompt for WAN)">
               <FilePathPicker
                 accept="image/*"
                 placeholder="Pick a dress photo or paste a path/URL"
@@ -1156,10 +1430,20 @@ export function RunMode(props: RunModeProps) {
                 onError={onError}
               />
             </Field>
+            <label className="checkbox-label">
+              <Checkbox
+                checked={enhancePrompt}
+                disabled={dressVideoModel === "wan-2.2-video-edit"}
+                onCheckedChange={(checked) => onEnhancePromptChange(checked === true)}
+              />
+              Enhance dress prompt with Grok chat before video edit
+            </label>
             <Text color="gray" size="2">
-              Grok edits the approved background clip in place — same beach, same frames; only
-              the outfit changes. Prompt enhancement is{" "}
-              {enhancePrompt ? "on" : "off"}.
+              Edits the approved background clip frame-for-frame — same scenery and motion; only
+              the outfit changes.
+              {dressVideoModel === "grok-imagine"
+                ? ` Prompt enhancement is ${enhancePrompt ? "on" : "off"}.`
+                : " WAN edit uses your prompt as written (no enhancement, no reference image upload)."}
             </Text>
           </Flex>
         ) : null}
@@ -1201,15 +1485,31 @@ export function RunMode(props: RunModeProps) {
               </Select.Root>
             </Field>
 
-            <Separator size="4" />
-            <MeshTunePanel value={meshTune} onChange={onMeshTuneChange} />
+            <button
+              type="button"
+              className="video-flow-advanced-toggle"
+              onClick={() => setShowMeshAdvanced((value) => !value)}
+            >
+              <ChevronDown
+                {...iconProps}
+                style={{ transform: showMeshAdvanced ? "rotate(180deg)" : undefined }}
+              />
+              Advanced options — mesh quality tuning
+            </button>
+
+            {showMeshAdvanced ? (
+              <Box pt="3">
+                <MeshTunePanel value={meshTune} onChange={onMeshTuneChange} />
+              </Box>
+            ) : null}
 
             <Callout.Root color="blue">
               <Callout.Text size="2">
-                <strong>Two things you can change:</strong> (1) Tuning sliders → then{" "}
-                <strong>Remake step</strong> or <strong>Regenerate</strong> below. (2) Scratch mask →{" "}
-                <strong>Erase</strong> brush on bad zones, then <strong>Save mask</strong>. You cannot drag
-                mesh points — folded triangles are tracking limits on this clip.
+                <strong>Two things you can change:</strong> (1) Tuning sliders in{" "}
+                <strong>Advanced options</strong> → then <strong>Remake step</strong> or{" "}
+                <strong>Regenerate</strong> below. (2) Scratch mask → <strong>Erase</strong> brush on
+                bad zones, then <strong>Save mask</strong>. You cannot drag mesh points — folded
+                triangles are tracking limits on this clip.
               </Callout.Text>
             </Callout.Root>
 

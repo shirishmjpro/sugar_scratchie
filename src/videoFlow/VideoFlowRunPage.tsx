@@ -10,8 +10,11 @@ export function VideoFlowRunPage() {
     flow,
     jobs,
     canUseGrok,
+    canUseSourceAi,
+    canUseWavespeed,
     health,
     enhancePrompt,
+    setEnhancePrompt,
     image,
     setImage,
     backgroundMotionPrompt,
@@ -40,6 +43,14 @@ export function VideoFlowRunPage() {
     setFaceImage,
     baseImage,
     setBaseImage,
+    aiProvider,
+    setAiProvider,
+    sourceImageModel,
+    setSourceImageModel,
+    backgroundVideoModel,
+    setBackgroundVideoModel,
+    dressVideoModel,
+    setDressVideoModel,
     error,
     setError,
     refreshHealth,
@@ -64,9 +75,11 @@ export function VideoFlowRunPage() {
         refreshProjects().catch(() => undefined);
       }}
     >
-      {health && !health.xai_key_loaded ? (
+      {health && !health.xai_key_loaded && !health.wavespeed_key_loaded ? (
         <Callout.Root color="orange" mb="4">
-          <Callout.Text>Add XAI_API_KEY to .env before running Grok steps.</Callout.Text>
+          <Callout.Text>
+            Add XAI_API_KEY and/or WAVESPEED_API_KEY to .env for video pipeline steps.
+          </Callout.Text>
         </Callout.Root>
       ) : null}
       <Flex direction="column" gap="4">
@@ -89,6 +102,12 @@ export function VideoFlowRunPage() {
           flow={flow}
           jobs={jobs}
           canUseGrok={canUseGrok}
+          canUseSourceAi={canUseSourceAi}
+          canUseWavespeed={canUseWavespeed}
+          aiProvider={aiProvider}
+          sourceImageModel={sourceImageModel}
+          backgroundVideoModel={backgroundVideoModel}
+          dressVideoModel={dressVideoModel}
           enhancePrompt={enhancePrompt}
           image={image}
           backgroundMotionPrompt={backgroundMotionPrompt}
@@ -118,6 +137,11 @@ export function VideoFlowRunPage() {
           onSourcePromptChange={setSourcePrompt}
           onFaceImageChange={setFaceImage}
           onBaseImageChange={setBaseImage}
+          onAiProviderChange={setAiProvider}
+          onSourceImageModelChange={setSourceImageModel}
+          onBackgroundVideoModelChange={setBackgroundVideoModel}
+          onDressVideoModelChange={setDressVideoModel}
+          onEnhancePromptChange={setEnhancePrompt}
           onApplyDraft={applyVideoFlowDraft}
           onRefreshJobs={refreshJobs}
           onRefreshAssets={async () => undefined}
