@@ -150,13 +150,23 @@
       "model_id": "korea"
     },
     {
+      "id": "shine_1",
+      "label": "Shine 1",
+      "bottom": "/cards/shine_1/background.mp4",
+      "foreground": "/cards/shine_1/foreground.mp4",
+      "mesh": "shine_1.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "shine"
+    },
+    {
       "id": "shine_3",
       "label": "Shine 3",
       "bottom": "/cards/shine_3/background.mp4",
       "foreground": "/cards/shine_3/foreground.mp4",
       "mesh": "shine_3.json",
       "chroma_key": false,
-      "sort_order": 0,
+      "sort_order": 1,
       "model_id": "shine"
     },
     {
@@ -166,7 +176,7 @@
       "foreground": "/cards/shine_4/foreground.mp4",
       "mesh": "shine_4.json",
       "chroma_key": false,
-      "sort_order": 1,
+      "sort_order": 2,
       "model_id": "shine"
     }
   ]

@@ -45,7 +45,12 @@ import {
   type ModelInfo,
   type PhotoInfo,
 } from "./shared/models";
-import { labelFromProjectId, PROJECT_ID_PATTERN, slugifyProjectId } from "./videoFlow/projects";
+import {
+  labelFromProjectId,
+  PROJECT_ID_PATTERN,
+  slugifyProjectId,
+  type VideoFlowProject,
+} from "./videoFlow/projects";
 
 type CardInfo = {
   id: string;
@@ -53,6 +58,8 @@ type CardInfo = {
   model_id?: string | null;
   sort_order?: number;
   photos?: PhotoInfo[];
+  /** True when this row is a Video Flow draft that has not been published as a card yet. */
+  draft?: boolean;
 };
 
 const iconProps = { size: 16, strokeWidth: 2 } as const;
@@ -71,6 +78,8 @@ function editCardHref(cardId: string): string {
 
 function sortModelCards(cards: CardInfo[]): CardInfo[] {
   return [...cards].sort((a, b) => {
+    // Published cards keep sort_order; drafts sort after them by id.
+    if (Boolean(a.draft) !== Boolean(b.draft)) return a.draft ? 1 : -1;
     const orderA = a.sort_order ?? 0;
     const orderB = b.sort_order ?? 0;
     if (orderA !== orderB) return orderA - orderB;
@@ -78,9 +87,27 @@ function sortModelCards(cards: CardInfo[]): CardInfo[] {
   });
 }
 
+function draftCardsFromFlows(flows: VideoFlowProject[], publishedIds: Set<string>): CardInfo[] {
+  const drafts: CardInfo[] = [];
+  for (const flow of flows) {
+    if (publishedIds.has(flow.card_id)) continue;
+    const modelId = flow.draft?.model_id?.trim();
+    if (!modelId) continue;
+    drafts.push({
+      id: flow.card_id,
+      label: flow.draft?.card_label?.trim() || labelFromProjectId(flow.card_id),
+      model_id: modelId,
+      draft: true,
+      photos: [],
+    });
+  }
+  return drafts;
+}
+
 export function ModelsPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [cards, setCards] = useState<CardInfo[]>([]);
+  const [draftCards, setDraftCards] = useState<CardInfo[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [newModelId, setNewModelId] = useState("");
@@ -95,21 +122,29 @@ export function ModelsPage() {
   const [avatarTargetId, setAvatarTargetId] = useState("");
 
   async function refresh() {
-    const [nextModels, assets] = await Promise.all([
+    const [nextModels, assets, flowData] = await Promise.all([
       fetchModels(),
       api<{ cards: CardInfo[] }>("/api/cards"),
+      api<{ flows: VideoFlowProject[] }>("/api/video-flow").catch(() => ({ flows: [] as VideoFlowProject[] })),
     ]);
+    const published = assets.cards;
     setModels(nextModels);
-    setCards(assets.cards);
+    setCards(published);
+    setDraftCards(draftCardsFromFlows(flowData.flows, new Set(published.map((card) => card.id))));
   }
 
   useEffect(() => {
     refresh().catch((caught) => setError(String(caught)));
   }, []);
 
+  const allKnownCardIds = useMemo(
+    () => [...cards.map((card) => card.id), ...draftCards.map((card) => card.id)],
+    [cards, draftCards],
+  );
+
   const cardsByModel = useMemo(() => {
     const map = new Map<string, CardInfo[]>();
-    for (const card of cards) {
+    for (const card of [...cards, ...draftCards]) {
       if (!card.model_id) continue;
       const bucket = map.get(card.model_id) ?? [];
       bucket.push(card);
@@ -119,7 +154,7 @@ export function ModelsPage() {
       map.set(modelId, sortModelCards(bucket));
     }
     return map;
-  }, [cards]);
+  }, [cards, draftCards]);
 
   const importableCards = useMemo(
     () => cards.filter((card) => card.id !== "original"),
@@ -203,7 +238,7 @@ export function ModelsPage() {
   }
 
   async function handleMoveCard(modelId: string, cardId: string, direction: -1 | 1) {
-    const modelCards = cardsByModel.get(modelId) ?? [];
+    const modelCards = (cardsByModel.get(modelId) ?? []).filter((card) => !card.draft);
     const index = modelCards.findIndex((card) => card.id === cardId);
     const nextIndex = index + direction;
     if (index < 0 || nextIndex < 0 || nextIndex >= modelCards.length) return;
@@ -236,10 +271,7 @@ export function ModelsPage() {
   }
 
   function openCreateCard(modelId: string) {
-    const suggested = suggestCardId(
-      modelId,
-      cards.map((card) => card.id),
-    );
+    const suggested = suggestCardId(modelId, allKnownCardIds);
     setCreatingCardFor(modelId);
     setNewCardId(suggested);
     setNewCardLabel(labelFromProjectId(suggested));
@@ -258,7 +290,7 @@ export function ModelsPage() {
       setError("Card id must be lowercase letters, numbers, and underscores.");
       return;
     }
-    if (cards.some((card) => card.id === id)) {
+    if (allKnownCardIds.includes(id)) {
       setError(`Card “${id}” already exists.`);
       return;
     }
@@ -594,13 +626,16 @@ export function ModelsPage() {
                         </Flex>
                       )}
                       <Text color="gray" mt="1" size="2">
-                        {modelCards.length} motion card{modelCards.length === 1 ? "" : "s"}
+                        {modelCards.filter((card) => !card.draft).length} published
+                        {modelCards.some((card) => card.draft)
+                          ? ` · ${modelCards.filter((card) => card.draft).length} draft`
+                          : ""}
                       </Text>
                     </Box>
                   </Flex>
 
                   <Flex gap="2" mb="3" wrap="wrap">
-                    {modelCards.length > 0 ? (
+                    {modelCards.some((card) => !card.draft) ? (
                       <Button asChild size="1">
                         <a href={playAllHref(model.id)}>
                           <Play {...iconProps} />
@@ -678,43 +713,59 @@ export function ModelsPage() {
                         </Table.Row>
                       </Table.Header>
                       <Table.Body>
-                        {modelCards.map((card, index) => (
+                        {modelCards.map((card, index) => {
+                          const publishedCards = modelCards.filter((entry) => !entry.draft);
+                          const publishedIndex = publishedCards.findIndex((entry) => entry.id === card.id);
+                          return (
                           <Table.Row key={card.id}>
                             <Table.Cell>
                               {index + 1}. {card.label} <CodeInline>{card.id}</CodeInline>
+                              {card.draft ? (
+                                <Badge color="amber" ml="2" variant="soft">
+                                  draft
+                                </Badge>
+                              ) : null}
                             </Table.Cell>
-                            <Table.Cell>{card.photos?.length ?? 0}</Table.Cell>
+                            <Table.Cell>{card.draft ? "—" : (card.photos?.length ?? 0)}</Table.Cell>
                             <Table.Cell align="right">
                               <Flex align="center" gap="1" justify="end">
-                                <Button
-                                  color="gray"
-                                  disabled={busy || index === 0}
-                                  size="1"
-                                  title="Move up"
-                                  variant="ghost"
-                                  onClick={() => void handleMoveCard(model.id, card.id, -1)}
-                                >
-                                  <ChevronUp {...iconProps} />
-                                </Button>
-                                <Button
-                                  color="gray"
-                                  disabled={busy || index === modelCards.length - 1}
-                                  size="1"
-                                  title="Move down"
-                                  variant="ghost"
-                                  onClick={() => void handleMoveCard(model.id, card.id, 1)}
-                                >
-                                  <ChevronDown {...iconProps} />
-                                </Button>
-                                <Button asChild size="1" variant="soft">
-                                  <a
-                                    href={playCardHref(model.id, card.id)}
-                                    title={`Play ${card.label}`}
-                                  >
-                                    <Play {...iconProps} />
-                                    Play
-                                  </a>
-                                </Button>
+                                {card.draft ? null : (
+                                  <>
+                                    <Button
+                                      color="gray"
+                                      disabled={busy || publishedIndex <= 0}
+                                      size="1"
+                                      title="Move up"
+                                      variant="ghost"
+                                      onClick={() => void handleMoveCard(model.id, card.id, -1)}
+                                    >
+                                      <ChevronUp {...iconProps} />
+                                    </Button>
+                                    <Button
+                                      color="gray"
+                                      disabled={
+                                        busy ||
+                                        publishedIndex < 0 ||
+                                        publishedIndex >= publishedCards.length - 1
+                                      }
+                                      size="1"
+                                      title="Move down"
+                                      variant="ghost"
+                                      onClick={() => void handleMoveCard(model.id, card.id, 1)}
+                                    >
+                                      <ChevronDown {...iconProps} />
+                                    </Button>
+                                    <Button asChild size="1" variant="soft">
+                                      <a
+                                        href={playCardHref(model.id, card.id)}
+                                        title={`Play ${card.label}`}
+                                      >
+                                        <Play {...iconProps} />
+                                        Play
+                                      </a>
+                                    </Button>
+                                  </>
+                                )}
                                 <Button asChild size="1" variant="soft">
                                   <a
                                     href={editCardHref(card.id)}
@@ -724,20 +775,23 @@ export function ModelsPage() {
                                     Edit
                                   </a>
                                 </Button>
-                                <Button
-                                  color="gray"
-                                  disabled={busy}
-                                  size="1"
-                                  title="Detach card from this model"
-                                  variant="ghost"
-                                  onClick={() => void handleAssignCard(card.id, "")}
-                                >
-                                  <X {...iconProps} />
-                                </Button>
+                                {card.draft ? null : (
+                                  <Button
+                                    color="gray"
+                                    disabled={busy}
+                                    size="1"
+                                    title="Detach card from this model"
+                                    variant="ghost"
+                                    onClick={() => void handleAssignCard(card.id, "")}
+                                  >
+                                    <X {...iconProps} />
+                                  </Button>
+                                )}
                               </Flex>
                             </Table.Cell>
                           </Table.Row>
-                        ))}
+                          );
+                        })}
                       </Table.Body>
                     </Table.Root>
                   ) : (

@@ -303,8 +303,18 @@ def finalize_card_videos(
         "foreground": _clip_report(foreground_dst, role="foreground"),
     }
 
-    bg_meta = probe_video(motion_reference if motion_reference.is_file() else background_src)
-    fg_meta = probe_video(foreground_src if foreground_src.is_file() else foreground_dst)
+    # Prefer work-dir motion/source clips; fall back to published card videos when
+    # the work dir was cleaned up (common after remake / recovery).
+    motion_ref = (
+        motion_reference
+        if motion_reference.is_file()
+        else background_src
+        if background_src.is_file()
+        else background_dst
+    )
+    fg_source = foreground_src if foreground_src.is_file() else foreground_dst
+    bg_meta = probe_video(motion_ref)
+    fg_meta = probe_video(fg_source)
     card_bg_meta = probe_video(background_dst)
     card_fg_meta = probe_video(foreground_dst)
     duration_delta = abs(float(card_bg_meta["duration"]) - float(card_fg_meta["duration"]))
@@ -324,7 +334,7 @@ def finalize_card_videos(
 
     aligned_fg = work_dir / "foreground-aligned-for-compress.mp4"
     align_clip_to_reference(
-        motion_reference if motion_reference.is_file() else background_dst,
+        motion_ref,
         foreground_dst,
         aligned_fg,
     )

@@ -154,7 +154,7 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
       kind: "process",
       title: "Create card",
       subtitle: "public/cards/",
-      description: "Publish raw clips under public/cards/<id>/",
+      description: "Publish raw clips under public/cards/<id>/, or import both videos by hand",
       x: 620,
       y: 56,
       step: "card",

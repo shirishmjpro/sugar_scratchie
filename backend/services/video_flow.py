@@ -567,6 +567,73 @@ def _draft_model_id(work: Path) -> str | None:
     return None
 
 
+def import_manual_clips(
+    *,
+    card_id: str,
+    card_label: str,
+    background: str | Path,
+    foreground: str | Path,
+    model_id: str | None = None,
+) -> dict:
+    """Skip Grok steps 0–3 by publishing hand-picked background + foreground clips.
+
+    Copies both videos into the work dir and public/cards/<id>/, then marks
+    background, dress, and card as approved so mesh can run next.
+    """
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise RuntimeError("Invalid card id")
+    label = card_label.strip()
+    if not label:
+        raise RuntimeError("Card label is required")
+
+    background_src = Path(background)
+    foreground_src = Path(foreground)
+    if not background_src.is_absolute():
+        background_src = ROOT / background_src
+    if not foreground_src.is_absolute():
+        foreground_src = ROOT / foreground_src
+    background_src = background_src.resolve()
+    foreground_src = foreground_src.resolve()
+    if ROOT.resolve() not in background_src.parents and background_src != ROOT.resolve():
+        raise RuntimeError(f"Background path is outside the project: {background}")
+    if ROOT.resolve() not in foreground_src.parents and foreground_src != ROOT.resolve():
+        raise RuntimeError(f"Foreground path is outside the project: {foreground}")
+    if not background_src.is_file():
+        raise RuntimeError(f"Background video not found: {background}")
+    if not foreground_src.is_file():
+        raise RuntimeError(f"Foreground video not found: {foreground}")
+    if not output_video_ready(background_src):
+        raise RuntimeError(f"Background video is unreadable: {background}")
+    if not output_video_ready(foreground_src):
+        raise RuntimeError(f"Foreground video is unreadable: {foreground}")
+
+    work = work_dir(card_id)
+    paths = _paths(work)
+    shutil.copy2(background_src, paths["background_raw"])
+    shutil.copy2(foreground_src, paths["foreground_dressed"])
+    _publish_card(
+        card_id=card_id,
+        card_label=label,
+        paths=paths,
+        model_id=model_id,
+    )
+
+    state = read_state(work)
+    state["approved"] = ["background", "dress", "card"]
+    # Keep mesh/symbols if those artifacts already exist for this card.
+    mesh_out = MESH_DIR / f"{card_id}.json"
+    if mesh_out.exists():
+        state["approved"].append("mesh")
+        if symbol_points_complete(mesh_out):
+            state["approved"].append("symbols")
+    write_state(work, state)
+    print(
+        f"Imported manual clips for {card_id} — "
+        "background, dress, and card marked approved."
+    )
+    return flow_state(card_id)
+
+
 def _publish_card(
     *,
     card_id: str,
@@ -1299,12 +1366,19 @@ def run_video_flow_step(
         bg_dst, fg_dst = card_paths(ROOT, CARDS_DIR, card_id)
         if not output_video_ready(bg_dst) or not output_video_ready(fg_dst):
             raise RuntimeError("Card videos missing — run create card first.")
+        # Work-dir raws may be gone after cleanup; published card clips are enough.
+        background_clip = _work_background_clip(work) or bg_dst
+        foreground_clip = (
+            paths["foreground_dressed"]
+            if output_video_ready(paths["foreground_dressed"])
+            else fg_dst
+        )
         report = finalize_card_videos(
-            background_src=paths["background_raw"],
-            foreground_src=paths["foreground_dressed"],
+            background_src=background_clip,
+            foreground_src=foreground_clip,
             background_dst=bg_dst,
             foreground_dst=fg_dst,
-            motion_reference=paths["background_raw"],
+            motion_reference=background_clip,
             work_dir=work,
             backup_dir=ROOT / ".video-backups",
             preset=delivery_preset,

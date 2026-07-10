@@ -664,6 +664,9 @@ export function RunMode(props: RunModeProps) {
   const [activeNode, setActiveNode] = useState<FlowNodeId>("source");
   const [flowState, setFlowState] = useState<VideoFlowState | null>(null);
   const [flowBusy, setFlowBusy] = useState(false);
+  const [manualBackground, setManualBackground] = useState("");
+  const [manualForeground, setManualForeground] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
   const [showFaceSwapPrompt, setShowFaceSwapPrompt] = useState(false);
   const [showMeshAdvanced, setShowMeshAdvanced] = useState(false);
   const [sourceJobHandledId, setSourceJobHandledId] = useState("");
@@ -1036,12 +1039,16 @@ export function RunMode(props: RunModeProps) {
     }
   }
 
+  const cardApproved = Boolean(flowState?.approved?.includes("card"));
+  const needsSourceImage =
+    actionStep === "background" || actionStep === "dress" || actionStep === "card";
+
   const canRunActionStep = Boolean(
     actionStep &&
       !actionIsInteractive &&
       cardId.trim() &&
       cardLabel.trim() &&
-      image &&
+      (!needsSourceImage || image) &&
       (!actionNeedsGrok || canUseGrok) &&
       (!actionNeedsWavespeed || canUseWavespeed) &&
       stepApiReady &&
@@ -1053,13 +1060,52 @@ export function RunMode(props: RunModeProps) {
     actionStep &&
       cardId.trim() &&
       cardLabel.trim() &&
-      image &&
+      (!needsSourceImage || image) &&
       (!actionNeedsGrok || canUseGrok) &&
       (!actionNeedsWavespeed || canUseWavespeed) &&
       stepApiReady &&
       actionStatus === "approved" &&
       !jobBusy,
   );
+
+  const canImportManualClips = Boolean(
+    cardId.trim() &&
+      cardLabel.trim() &&
+      manualBackground.trim() &&
+      manualForeground.trim() &&
+      !importBusy &&
+      !jobBusy,
+  );
+
+  async function importManualClips() {
+    const id = cardId.trim();
+    if (!id || !canImportManualClips) return;
+    setImportBusy(true);
+    onError("");
+    try {
+      const next = await api<VideoFlowState>(
+        `/api/video-flow/${encodeURIComponent(id)}/import-clips`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            background: manualBackground.trim(),
+            foreground: manualForeground.trim(),
+            card_label: cardLabel.trim(),
+            model_id: modelId.trim(),
+          }),
+        },
+      );
+      setFlowState(next);
+      setManualBackground("");
+      setManualForeground("");
+      await onRefreshAssets();
+      selectStep("mesh");
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setImportBusy(false);
+    }
+  }
 
   async function runStep(step: VideoFlowStepKey, force = false) {
     setFlowBusy(true);
@@ -1206,11 +1252,11 @@ export function RunMode(props: RunModeProps) {
                   "video-flow-run-step",
                   `is-${status}`,
                   activeStep === step ? "is-active" : "",
-                  status === "locked" ? "is-disabled" : "",
+                  status === "locked" && step !== "card" ? "is-disabled" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                disabled={status === "locked"}
+                disabled={status === "locked" && step !== "card"}
                 onClick={() => selectStep(step)}
               >
                 <span className="video-flow-run-step-num">{index + 1}</span>
@@ -1705,10 +1751,66 @@ export function RunMode(props: RunModeProps) {
         ) : null}
 
         {activeNode === "card" ? (
-          <Text size="2">
-            Copies approved Grok clips to <Code>public/cards/{cardId || "<id>"}/</Code> before mesh
-            and compress.
-          </Text>
+          <Flex direction="column" gap="4">
+            <Text size="2">
+              Skip Setup through Create card by uploading both clips yourself. They are copied to{" "}
+              <Code>public/cards/{cardId || "<id>"}/</Code> and mesh unlocks next.
+            </Text>
+            <Callout.Root color="blue">
+              <Callout.Text>
+                <strong>background.mp4</strong> is the revealed bikini layer.{" "}
+                <strong>foreground.mp4</strong> is the dress layer you scratch through.
+              </Callout.Text>
+            </Callout.Root>
+            <Field label="Background video (bikini / revealed)">
+              <FilePathPicker
+                accept="video/*"
+                placeholder="Pick background.mp4 or paste a path"
+                preview="video"
+                previewLabel="background.mp4"
+                previewSize="compact"
+                value={manualBackground}
+                onChange={setManualBackground}
+                onError={onError}
+              />
+            </Field>
+            <Field label="Foreground video (dress / scratch layer)">
+              <FilePathPicker
+                accept="video/*"
+                placeholder="Pick foreground.mp4 or paste a path"
+                preview="video"
+                previewLabel="foreground.mp4"
+                previewSize="compact"
+                value={manualForeground}
+                onChange={setManualForeground}
+                onError={onError}
+              />
+            </Field>
+            <Flex align="center" gap="3" wrap="wrap">
+              <Button
+                disabled={!canImportManualClips}
+                type="button"
+                onClick={() => void importManualClips()}
+              >
+                {importBusy ? <Loader2 {...iconProps} className="spin" /> : <Play {...iconProps} />}
+                {cardApproved ? "Replace clips & unlock mesh" : "Import clips & unlock mesh"}
+              </Button>
+              {!cardId.trim() || !cardLabel.trim() ? (
+                <Text color="gray" size="2">
+                  Set card id and label in Setup first.
+                </Text>
+              ) : null}
+            </Flex>
+            {cardApproved ? (
+              <Text color="gray" size="2">
+                Card already published. Re-importing replaces both videos and keeps mesh ready.
+              </Text>
+            ) : (
+              <Text color="gray" size="2">
+                Or run the AI pipeline (Setup → image to video → dress → Create card) instead.
+              </Text>
+            )}
+          </Flex>
         ) : null}
 
         {activeNode === "mesh" ? (
@@ -1936,6 +2038,10 @@ export function RunMode(props: RunModeProps) {
             </Text>
           ) : activeNode === "source" ? (
             <Text size="2">Setup — source image and card id.</Text>
+          ) : activeNode === "card" ? (
+            <Text size="2">
+              Create card — upload both videos to skip the AI steps, or run after dress is approved.
+            </Text>
           ) : (
             <Text size="2">Select a pipeline step to run or remake.</Text>
           )}

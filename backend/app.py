@@ -61,6 +61,7 @@ from backend.services.video_flow import (
     STEP_ORDER,
     approve_flow_step,
     flow_state,
+    import_manual_clips,
     list_flows,
     patch_flow_draft_model,
     read_flow_draft,
@@ -191,7 +192,7 @@ class ImageDressFlowRequest(BaseModel):
 
 
 class VideoFlowRequest(BaseModel):
-    image: str
+    image: str = ""
     background_motion_prompt: str = Field(min_length=1)
     foreground_motion_prompt: str = ""
     dress_prompt: str = Field(min_length=1)
@@ -238,6 +239,13 @@ class VideoFlowStepRequest(VideoFlowRequest):
 class VideoFlowStepAction(BaseModel):
     step: VideoFlowStep
     mesh_tracker: Literal["bootstapir", "cotracker", "blend"] | None = None
+
+
+class VideoFlowImportClipsRequest(BaseModel):
+    background: str = Field(min_length=1)
+    foreground: str = Field(min_length=1)
+    card_label: str = Field(min_length=1, max_length=120)
+    model_id: str = ""
 
 
 class MeshCandidateRequest(BaseModel):
@@ -898,6 +906,26 @@ def get_video_flow_draft(card_id: str) -> dict:
     return {"draft": draft}
 
 
+@app.post("/api/video-flow/{card_id}/import-clips")
+def import_video_flow_clips(card_id: str, request: VideoFlowImportClipsRequest) -> dict:
+    if not re.fullmatch(r"[a-z0-9_]+", card_id):
+        raise HTTPException(status_code=400, detail="Invalid card id")
+    background = workspace_path(request.background, must_exist=True)
+    foreground = workspace_path(request.foreground, must_exist=True)
+    try:
+        result = import_manual_clips(
+            card_id=card_id,
+            card_label=request.card_label,
+            background=background,
+            foreground=foreground,
+            model_id=request.model_id.strip() or None,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    cancel_stale_video_flow_jobs(card_id)
+    return result
+
+
 @app.post("/api/video-flow/{card_id}/approve")
 def approve_video_flow_step(card_id: str, request: VideoFlowStepAction) -> dict:
     if not re.fullmatch(r"[a-z0-9_]+", card_id):
@@ -964,11 +992,22 @@ def video_flow_step_job(request: VideoFlowStepRequest) -> dict:
         validate_step_enqueue(request.card_id, request.step, force=request.force, image=request.image)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    image = request.image if request.image.startswith(("http://", "https://")) else workspace_path(request.image, must_exist=True)
+    # Mesh / symbols / compress only need the published card — source image is optional.
+    image_required = request.step in ("background", "dress", "card")
+    if request.image.strip():
+        image = (
+            request.image
+            if request.image.startswith(("http://", "https://"))
+            else workspace_path(request.image, must_exist=image_required)
+        )
+    elif image_required:
+        raise HTTPException(status_code=400, detail="Source image is required for this step")
+    else:
+        image = ""
     dress_reference = request.dress_reference_image.strip()
     if dress_reference and not dress_reference.startswith(("http://", "https://")):
         dress_reference = str(workspace_path(dress_reference, must_exist=True))
-    save_flow_draft(**video_flow_draft_kwargs(request, image=image))
+    save_flow_draft(**video_flow_draft_kwargs(request, image=image or request.image))
     job = enqueue(
         "video-flow-step",
         ["video-flow-step", request.step, request.card_id],

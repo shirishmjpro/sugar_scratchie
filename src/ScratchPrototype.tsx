@@ -1,16 +1,5 @@
-import {
-  Award,
-  Clover,
-  Coins,
-  Gem,
-  Heart,
-  Sparkles,
-  Star,
-  Ticket,
-  Volume2,
-  VolumeX,
-  type LucideIcon,
-} from "lucide-react";
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
+import { Volume2, VolumeX } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { fetchModels, type ModelInfo } from "./shared/models";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
@@ -314,7 +303,7 @@ async function loadCards(): Promise<Card[]> {
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
-const SYMBOL_TYPE_COUNT = 8;
+const SYMBOL_TYPE_COUNT = 12;
 const SYMBOL_SLOT_COUNT = SYMBOL_POINT_COUNT;
 const SYMBOL_REVEAL_STEP_MANUAL = 0.056;
 const SYMBOL_REVEAL_STEP_AUTO = 0.083;
@@ -342,15 +331,19 @@ const SCRATCH_ZOOM_DEFAULTS: ScratchZoomSettings = {
   bounce: false,
 };
 
-const SYMBOL_TYPES: { icon: LucideIcon; label: string; color: string }[] = [
-  { icon: Star, label: "Star", color: "#ffd54a" },
-  { icon: Coins, label: "Coin", color: "#ffb74a" },
-  { icon: Gem, label: "Gem", color: "#7ec8ff" },
-  { icon: Clover, label: "Lucky", color: "#6ddf8a" },
-  { icon: Award, label: "Badge", color: "#c9a0ff" },
-  { icon: Ticket, label: "Ticket", color: "#ff9eb8" },
-  { icon: Heart, label: "Heart", color: "#ff6b8a" },
-  { icon: Sparkles, label: "Sparkle", color: "#fff4a8" },
+const SYMBOL_TYPES: { src: string; label: string }[] = [
+  { src: "/lotties/01-Heart.lottie", label: "Heart" },
+  { src: "/lotties/02-Lock.lottie", label: "Lock" },
+  { src: "/lotties/03-GemDiamond.lottie", label: "Gem" },
+  { src: "/lotties/04-Star.lottie", label: "Star" },
+  { src: "/lotties/05-Diamond.lottie", label: "Diamond" },
+  { src: "/lotties/06-Magnet.lottie", label: "Magnet" },
+  { src: "/lotties/07-Crown.lottie", label: "Crown" },
+  { src: "/lotties/08-Gold%20Coins.lottie", label: "Gold Coins" },
+  { src: "/lotties/09-Key.lottie", label: "Key" },
+  { src: "/lotties/10-Treasure%20Chest.lottie", label: "Treasure Chest" },
+  { src: "/lotties/11-Diamond%20Cards.lottie", label: "Diamond Cards" },
+  { src: "/lotties/12-WinnerTrophy.lottie", label: "Trophy" },
 ];
 
 function buildSessionSymbols(): number[] {
@@ -578,11 +571,19 @@ function playGameOutcomeSound(
   return 2.05 * 1000 + GAME_OUTCOME_OVERLAY_PAD_MS;
 }
 
-function GameSymbolIcon({ typeId, size = 16 }: { typeId: number; size?: number }) {
+function GameSymbolIcon({ typeId, size = 24 }: { typeId: number; size?: number }) {
   const entry = SYMBOL_TYPES[typeId] ?? SYMBOL_TYPES[0];
-  const Icon = entry.icon;
   return (
-    <Icon aria-hidden="true" color={entry.color} size={size} strokeWidth={2.2} />
+    <DotLottieReact
+      src={entry.src}
+      autoplay
+      loop
+      aria-hidden="true"
+      width={size}
+      height={size}
+      style={{ width: size, height: size }}
+      className="game-symbol-lottie"
+    />
   );
 }
 
@@ -1292,8 +1293,7 @@ export function ScratchPrototype() {
             bodyPoints[index].v,
           );
           const stagePos = worldPointToStage(world, canvas, stage, camera);
-          // Keep unfound marks as faint targets so the last one is not invisible.
-          marker.style.display = "flex";
+          marker.style.display = revealed ? "flex" : "none";
           marker.style.transform = `translate(${stagePos.x}px, ${stagePos.y}px)`;
           marker.classList.toggle("is-revealed", revealed);
         }
@@ -2361,9 +2361,8 @@ export function ScratchPrototype() {
                   className="body-symbol-marker"
                   style={{ display: "none" }}
                 >
-                  <span className="body-symbol-number">{index + 1}</span>
                   <span className="body-symbol-icon">
-                    <GameSymbolIcon typeId={typeId} size={22} />
+                    <GameSymbolIcon typeId={typeId} size={42} />
                   </span>
                 </div>
               ))
