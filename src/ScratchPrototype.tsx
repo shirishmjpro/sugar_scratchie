@@ -2346,11 +2346,6 @@ export function ScratchPrototype() {
               ))}
             </div>
           ) : null}
-          {useBodySymbols ? (
-            <div className="body-symbol-progress" aria-live="polite">
-              {revealedSymbols}/{SYMBOL_SLOT_COUNT}
-            </div>
-          ) : null}
           {useBodySymbols
             ? sessionSymbols.map((typeId, index) => (
                 <div

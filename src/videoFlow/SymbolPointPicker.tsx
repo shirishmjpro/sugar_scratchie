@@ -22,11 +22,16 @@ type SymbolPointsResponse = {
   complete: boolean;
 };
 
+/** Subset of video-flow state returned by POST /symbol-points (approve). */
+type SymbolPointsSaveResult = {
+  steps: Record<string, { status?: string }>;
+};
+
 type SymbolPointPickerProps = {
   cardId: string;
   foregroundVideo: string;
   meshJsonPath: string;
-  onSaved: () => void;
+  onSaved: (flowState: SymbolPointsSaveResult) => void;
   onError: (message: string) => void;
 };
 
@@ -81,9 +86,24 @@ export function SymbolPointPicker({
       }
       meshRef.current = meshData;
       setMesh(meshData);
-      setPoints(pointsResponse.points);
       const refTime = meshData.frames[Math.floor(meshData.frames.length / 2)]?.t ?? 0;
       setMeshTime(refTime);
+      // After mesh generation, seed 12 body suggestions if none are saved yet.
+      if (pointsResponse.points.length === 0) {
+        const sample = sampleTrackedMesh(meshData, refTime);
+        const suggested = randomSymbolPoints(
+          sample,
+          SYMBOL_POINT_COUNT,
+          meshData.garment,
+        );
+        setPoints(
+          suggested.length === SYMBOL_POINT_COUNT
+            ? suggested
+            : pointsResponse.points,
+        );
+      } else {
+        setPoints(pointsResponse.points);
+      }
     } catch (caught) {
       meshRef.current = null;
       setMesh(null);
@@ -178,11 +198,14 @@ export function SymbolPointPicker({
     setSaving(true);
     onError("");
     try {
-      await api(`/api/video-flow/${encodeURIComponent(cardId)}/symbol-points`, {
-        method: "POST",
-        body: JSON.stringify({ points }),
-      });
-      onSaved();
+      const data = await api<SymbolPointsSaveResult>(
+        `/api/video-flow/${encodeURIComponent(cardId)}/symbol-points`,
+        {
+          method: "POST",
+          body: JSON.stringify({ points }),
+        },
+      );
+      onSaved(data);
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -205,8 +228,9 @@ export function SymbolPointPicker({
   return (
     <Flex direction="column" gap="3">
       <Text size="2" color="gray">
-        Generate {SYMBOL_POINT_COUNT} random points on her body (garment mask interior — not hair or
-        mesh fringe), or click to place by hand. Coordinates stay in mesh UV space at runtime.
+        {SYMBOL_POINT_COUNT} body suggestions are placed automatically after mesh generation
+        (garment mask interior — not hair or mesh fringe). Regenerate, click to add by hand, then
+        save. Coordinates stay in mesh UV space at runtime.
       </Text>
 
       <div className="symbol-picker-stage">

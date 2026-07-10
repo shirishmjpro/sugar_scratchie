@@ -714,8 +714,9 @@ export function RunMode(props: RunModeProps) {
   const meshCompareCount = flowState?.mesh_compare?.length ?? 0;
   const meshStepApproved = flowState?.steps.mesh?.status === "approved";
   const meshInReview = flowState?.steps.mesh?.status === "review";
-  const meshComparePin =
-    (meshInReview && meshCompareCount >= 1) || (meshStepApproved && meshCompareCount >= 2);
+  // Only pin while the user still needs to pick a tracker. After approve, let
+  // the pipeline advance to Place symbols / Compress.
+  const meshComparePin = meshInReview && meshCompareCount >= 1;
 
   const [meshFocusOverride, setMeshFocusOverride] = useState(false);
   const shouldPinMesh = meshComparePin && !meshFocusOverride && !meshCandidateRunning;
@@ -1166,7 +1167,11 @@ export function RunMode(props: RunModeProps) {
       const next = nextPipelineStep(flow, step);
       if (next && data.steps[next]?.status === "ready") {
         const nodeId = stepToNodeMap[next];
-        if (nodeId) setActiveNode(nodeId);
+        if (nodeId) {
+          // Leaving mesh after approve — don't let compare-pin yank us back.
+          if (step === "mesh") setMeshFocusOverride(true);
+          setActiveNode(nodeId);
+        }
       }
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : String(caught));
@@ -1962,7 +1967,14 @@ export function RunMode(props: RunModeProps) {
             cardId={cardId.trim()}
             foregroundVideo={`/cards/${encodeURIComponent(cardId.trim())}/foreground.mp4`}
             meshJsonPath={`/mesh/${encodeURIComponent(cardId.trim())}.json`}
-            onSaved={() => void refreshFlowState()}
+            onSaved={(nextState) => {
+              setFlowState(nextState as VideoFlowState);
+              const next = nextPipelineStep(flow, "symbols");
+              if (next && (nextState.steps[next]?.status === "ready" || nextState.steps[next]?.status === "approved")) {
+                const nodeId = stepToNodeMap[next];
+                if (nodeId) setActiveNode(nodeId);
+              }
+            }}
             onError={onError}
           />
         ) : null}
