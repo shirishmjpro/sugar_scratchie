@@ -5,6 +5,7 @@ import {
   CANVAS_WIDTH,
   drawMeshLines,
   parseTrackedMesh,
+  randomSymbolPoints,
   sampleMeshUvToWorld,
   sampleTrackedMesh,
   SYMBOL_POINT_COUNT,
@@ -153,6 +154,25 @@ export function SymbolPointPicker({
     setPoints((current) => [...current, { u: uv.x, v: uv.y }]);
   }
 
+  function handleGenerateRandom() {
+    const meshNow = meshRef.current;
+    if (!meshNow) return;
+    const sample = sampleTrackedMesh(meshNow, meshTime);
+    const generated = randomSymbolPoints(
+      sample,
+      SYMBOL_POINT_COUNT,
+      meshNow.garment,
+    );
+    if (generated.length !== SYMBOL_POINT_COUNT) {
+      onError(
+        "No body/garment cells to place points in — edit the garment mask first.",
+      );
+      return;
+    }
+    onError("");
+    setPoints(generated);
+  }
+
   async function handleSave() {
     if (points.length !== SYMBOL_POINT_COUNT) return;
     setSaving(true);
@@ -185,8 +205,8 @@ export function SymbolPointPicker({
   return (
     <Flex direction="column" gap="3">
       <Text size="2" color="gray">
-        Click on the garment to place {SYMBOL_POINT_COUNT} symbol points. Coordinates are stored in
-        mesh UV space and follow the body at runtime — nothing is baked into the video.
+        Generate {SYMBOL_POINT_COUNT} random points on her body (garment mask interior — not hair or
+        mesh fringe), or click to place by hand. Coordinates stay in mesh UV space at runtime.
       </Text>
 
       <div className="symbol-picker-stage">
@@ -209,6 +229,9 @@ export function SymbolPointPicker({
       </div>
 
       <Flex gap="2" wrap="wrap">
+        <Button type="button" onClick={handleGenerateRandom}>
+          Generate random 12
+        </Button>
         <Button type="button" variant="soft" onClick={() => setShowMesh((current) => !current)}>
           {showMesh ? "Hide mesh" : "Show mesh"}
         </Button>

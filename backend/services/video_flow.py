@@ -30,6 +30,7 @@ from backend.services.grok import (
     probe_video,
     request_id_sidecar,
 )
+from backend.services.garment_mask import generate_garment_mask
 from backend.services.mesh_symbols import (
     clear_symbol_points,
     read_symbol_points,
@@ -1072,6 +1073,10 @@ def run_mesh_candidate_generation(
         )
     )
     print(f"Candidate written: {candidate.name}")
+    try:
+        generate_garment_mask(candidate)
+    except Exception as exc:
+        print(f"Auto garment mask skipped for {candidate.name}: {exc}")
 
 
 def run_video_flow_step(
@@ -1260,6 +1265,10 @@ def run_video_flow_step(
                     }
                 )
                 print(f"Candidate written: {candidate.name}")
+                try:
+                    generate_garment_mask(candidate)
+                except Exception as exc:
+                    print(f"Auto garment mask skipped for {candidate.name}: {exc}")
             print("All mesh candidates ready — pick bootstapir, cotracker, or blend in the dashboard.")
         else:
             mesh_out = MESH_DIR / f"{card.id}.json"
@@ -1271,6 +1280,10 @@ def run_video_flow_step(
                 }
             )
             print(f"Mesh written: {mesh_out.name}")
+            try:
+                generate_garment_mask(mesh_out)
+            except Exception as exc:
+                print(f"Auto garment mask skipped for {mesh_out.name}: {exc}")
     elif step == "symbols":
         mesh_out = MESH_DIR / f"{card_id}.json"
         if not mesh_out.exists():

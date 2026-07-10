@@ -17,6 +17,13 @@ type GarmentMeshData = {
   garment?: number[] | null;
 };
 
+type JobInfo = {
+  id: string;
+  status: string;
+  return_code: number | null;
+  logs: string[];
+};
+
 function frameForTime(frames: TrackedMeshFrame[], time: number) {
   if (frames.length === 0) return null;
   const lastTime = frames[frames.length - 1]?.t ?? 0;
@@ -85,6 +92,8 @@ export function MaskEditor({
   const [brushMode, setBrushMode] = useState<"add" | "erase">("add");
   const [brushRadius, setBrushRadius] = useState(26);
   const [playing, setPlaying] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [autoRunning, setAutoRunning] = useState(false);
 
   const meshFetchUrl =
     meshUrl ??
@@ -153,7 +162,7 @@ export function MaskEditor({
     return () => {
       cancelled = true;
     };
-  }, [meshFetchUrl]);
+  }, [meshFetchUrl, reloadToken]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -308,6 +317,38 @@ export function MaskEditor({
     recomputeCoverage();
   }
 
+  /** Grow or shrink the scratchable mask by one lattice ring (4-neighborhood). */
+  function morphMask(expand: boolean) {
+    const garment = garmentRef.current;
+    const { cols, rows } = dimsRef.current;
+    if (!garment || cols <= 0 || rows <= 0) return;
+    const next = new Uint8Array(garment.length);
+    for (let row = 0; row < rows; row += 1) {
+      for (let col = 0; col < cols; col += 1) {
+        const index = row * cols + col;
+        const value = garment[index];
+        if (expand) {
+          let on = value === 1;
+          if (!on && col > 0 && garment[index - 1]) on = true;
+          if (!on && col + 1 < cols && garment[index + 1]) on = true;
+          if (!on && row > 0 && garment[index - cols]) on = true;
+          if (!on && row + 1 < rows && garment[index + cols]) on = true;
+          next[index] = on ? 1 : 0;
+        } else {
+          let keep = value === 1;
+          if (keep && (col === 0 || !garment[index - 1])) keep = false;
+          if (keep && (col + 1 >= cols || !garment[index + 1])) keep = false;
+          if (keep && (row === 0 || !garment[index - cols])) keep = false;
+          if (keep && (row + 1 >= rows || !garment[index + cols])) keep = false;
+          next[index] = keep ? 1 : 0;
+        }
+      }
+    }
+    garment.set(next);
+    setDirty(true);
+    recomputeCoverage();
+  }
+
   async function save() {
     const garment = garmentRef.current;
     const savePath = meshSavePath ?? meshFile;
@@ -329,6 +370,40 @@ export function MaskEditor({
       onError(message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function autoDetect() {
+    const savePath = meshSavePath ?? meshFile;
+    if (!savePath || autoRunning) return;
+    setAutoRunning(true);
+    setSaveMsg("");
+    onError("");
+    try {
+      const job = await api<JobInfo>("/api/jobs/mesh/auto-garment", {
+        method: "POST",
+        body: JSON.stringify({ file: savePath, union_existing: false }),
+      });
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const latest = await api<JobInfo>(`/api/jobs/${encodeURIComponent(job.id)}`);
+        if (latest.status === "succeeded" || latest.status === "failed" || latest.status === "cancelled") {
+          if (latest.status !== "succeeded") {
+            const tail = latest.logs.slice(-4).join("\n");
+            throw new Error(tail || `Auto mask ${latest.status}`);
+          }
+          break;
+        }
+        if (attempt === 179) throw new Error("Auto mask timed out");
+      }
+      setDirty(false);
+      setSaveMsg("Auto-detected body/clothes mask — tweak with Grow/Erase if needed, then Save.");
+      setReloadToken((token) => token + 1);
+      onSaved?.();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setAutoRunning(false);
     }
   }
 
@@ -365,10 +440,21 @@ export function MaskEditor({
           <Badge color={dirty ? "orange" : "gray"}>{dirty ? "Unsaved" : "Saved"}</Badge>
         </Flex>
         <Text color="gray" size="2">
-          You cannot move mesh dots — only choose which cells are scratchable. Select <strong>Erase</strong>,
-          scrub to a bad frame (e.g. folded waist), drag over the green zone to turn it off, then{" "}
-          <strong>Save mask</strong>. Tuning sliders only apply after you regenerate the mesh.
+          <strong>Auto detect</strong> builds a clothes/arms/legs mask from the foreground video.
+          Then use <strong>Grow</strong> / <strong>Erase</strong> to cover more of the outfit or
+          clear hair/face bleed, and <strong>Save mask</strong>.
         </Text>
+
+        <Field label="Auto">
+          <Flex gap="2" wrap="wrap">
+            <Button
+              disabled={!meshReady || autoRunning || saving}
+              onClick={() => void autoDetect()}
+            >
+              {autoRunning ? "Detecting…" : "Auto detect body/clothes"}
+            </Button>
+          </Flex>
+        </Field>
 
         <Field label="Brush">
           <Flex gap="2" wrap="wrap">
@@ -416,6 +502,22 @@ export function MaskEditor({
 
         <Field label="Whole mask">
           <Flex gap="2" wrap="wrap">
+            <Button
+              color="green"
+              variant="soft"
+              disabled={!meshReady}
+              onClick={() => morphMask(true)}
+            >
+              Grow +1
+            </Button>
+            <Button
+              color="orange"
+              variant="soft"
+              disabled={!meshReady}
+              onClick={() => morphMask(false)}
+            >
+              Shrink −1
+            </Button>
             <Button color="gray" variant="soft" onClick={() => fillAll(1)}>
               Fill all
             </Button>

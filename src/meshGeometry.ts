@@ -191,6 +191,139 @@ export function cellVisible(sample: TrackedMeshSample, col: number, row: number)
   );
 }
 
+function vertexOnBody(
+  sample: TrackedMeshSample,
+  garment: number[] | null,
+  col: number,
+  row: number,
+) {
+  const index = row * sample.cols + col;
+  if (!sample.vis[index]) return false;
+  if (garment && !garment[index]) return false;
+  return true;
+}
+
+/** True when every corner of the cell is on the body/garment mask. */
+function cellOnBody(
+  sample: TrackedMeshSample,
+  garment: number[] | null,
+  col: number,
+  row: number,
+) {
+  return (
+    vertexOnBody(sample, garment, col, row) &&
+    vertexOnBody(sample, garment, col + 1, row) &&
+    vertexOnBody(sample, garment, col, row + 1) &&
+    vertexOnBody(sample, garment, col + 1, row + 1)
+  );
+}
+
+/**
+ * Prefer interior body cells so points sit on clothing, not hair fringe / mesh bleed.
+ * `erosion` = how many rings of border cells to skip (1 keeps most of the torso).
+ */
+function collectBodyCells(
+  sample: TrackedMeshSample,
+  garment: number[] | null,
+  erosion: number,
+): Array<{ u0: number; u1: number; v0: number; v1: number }> {
+  const { cols, rows, uv } = sample;
+  const cells: Array<{ u0: number; u1: number; v0: number; v1: number }> = [];
+  for (let row = 0; row < rows - 1; row += 1) {
+    for (let col = 0; col < cols - 1; col += 1) {
+      if (!cellOnBody(sample, garment, col, row)) continue;
+      let interior = true;
+      for (let dy = -erosion; dy <= erosion && interior; dy += 1) {
+        for (let dx = -erosion; dx <= erosion; dx += 1) {
+          const nc = col + dx;
+          const nr = row + dy;
+          if (nc < 0 || nr < 0 || nc >= cols - 1 || nr >= rows - 1) {
+            interior = false;
+            break;
+          }
+          if (!cellOnBody(sample, garment, nc, nr)) {
+            interior = false;
+            break;
+          }
+        }
+      }
+      if (!interior) continue;
+      const topLeft = uv[row * cols + col];
+      const bottomRight = uv[(row + 1) * cols + col + 1];
+      // Keep the sample inset from cell edges so UV never sits on a hair/skin border.
+      const padU = (Math.max(topLeft.x, bottomRight.x) - Math.min(topLeft.x, bottomRight.x)) * 0.2;
+      const padV = (Math.max(topLeft.y, bottomRight.y) - Math.min(topLeft.y, bottomRight.y)) * 0.2;
+      cells.push({
+        u0: Math.min(topLeft.x, bottomRight.x) + padU,
+        u1: Math.max(topLeft.x, bottomRight.x) - padU,
+        v0: Math.min(topLeft.y, bottomRight.y) + padV,
+        v1: Math.max(topLeft.y, bottomRight.y) - padV,
+      });
+    }
+  }
+  return cells;
+}
+
+/** Sample `count` random UV points on the garment body (not hair / mesh fringe). */
+export function randomSymbolPoints(
+  sample: TrackedMeshSample,
+  count: number = SYMBOL_POINT_COUNT,
+  garment: number[] | null = null,
+): SymbolPoint[] {
+  // Try eroded interior first; relax if the mask is thin (sleeves-only clips, etc.).
+  let cells = collectBodyCells(sample, garment, 2);
+  if (cells.length < Math.max(12, count * 2)) {
+    cells = collectBodyCells(sample, garment, 1);
+  }
+  if (cells.length < Math.max(8, count)) {
+    cells = collectBodyCells(sample, garment, 0);
+  }
+  if (cells.length === 0 || count <= 0) return [];
+
+  const sampleCandidate = (): SymbolPoint => {
+    const cell = cells[Math.floor(Math.random() * cells.length)];
+    const uSpan = Math.max(1e-4, cell.u1 - cell.u0);
+    const vSpan = Math.max(1e-4, cell.v1 - cell.v0);
+    return {
+      u: cell.u0 + Math.random() * uSpan,
+      v: cell.v0 + Math.random() * vSpan,
+    };
+  };
+
+  const farEnough = (
+    points: SymbolPoint[],
+    candidate: SymbolPoint,
+    minDist: number,
+  ) => {
+    const world = sampleMeshUvToWorld(sample, candidate.u, candidate.v);
+    const minDistSq = minDist * minDist;
+    for (const point of points) {
+      const other = sampleMeshUvToWorld(sample, point.u, point.v);
+      const dx = other.x - world.x;
+      const dy = other.y - world.y;
+      if (dx * dx + dy * dy < minDistSq) return false;
+    }
+    return true;
+  };
+
+  // Canvas is 390×672; start ~torso-cell spacing and relax until we fill the set.
+  const minDistances = [90, 70, 55, 40, 28, 18, 10, 0];
+  for (const minDist of minDistances) {
+    const points: SymbolPoint[] = [];
+    const maxAttempts = count * 160;
+    for (let attempt = 0; attempt < maxAttempts && points.length < count; attempt += 1) {
+      const candidate = sampleCandidate();
+      if (!farEnough(points, candidate, minDist)) continue;
+      points.push(candidate);
+    }
+    if (points.length === count) return points;
+  }
+
+  const fallback: SymbolPoint[] = [];
+  while (fallback.length < count) fallback.push(sampleCandidate());
+  return fallback;
+}
+
 function barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) {
   const v0x = b.x - a.x;
   const v0y = b.y - a.y;

@@ -21,6 +21,7 @@ import {
   Callout,
   Card,
   Container,
+  Dialog,
   Flex,
   Grid,
   Heading,
@@ -89,6 +90,7 @@ export function ModelsPage() {
   const [creatingCardFor, setCreatingCardFor] = useState("");
   const [newCardId, setNewCardId] = useState("");
   const [newCardLabel, setNewCardLabel] = useState("");
+  const [createModelOpen, setCreateModelOpen] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [avatarTargetId, setAvatarTargetId] = useState("");
 
@@ -149,6 +151,7 @@ export function ModelsPage() {
       await createModel(newModelId.trim(), newModelLabel.trim() || newModelId.trim());
       setNewModelId("");
       setNewModelLabel("");
+      setCreateModelOpen(false);
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -318,41 +321,52 @@ export function ModelsPage() {
             </Callout.Root>
           ) : null}
 
-          <Card size="3">
+          <Card size="3" className="models-create-inline">
             <Heading size="4" mb="3">
               Create model
             </Heading>
-            <Grid columns={{ initial: "1", md: "3" }} gap="3">
-              <label>
-                <Text as="div" mb="1" size="2" weight="medium">
-                  Model id
-                </Text>
-                <TextField.Root
-                  disabled={busy}
-                  placeholder="janja"
-                  value={newModelId}
-                  onChange={(event) => setNewModelId(event.currentTarget.value)}
-                />
-              </label>
-              <label>
-                <Text as="div" mb="1" size="2" weight="medium">
-                  Display name
-                </Text>
-                <TextField.Root
-                  disabled={busy}
-                  placeholder="Janja"
-                  value={newModelLabel}
-                  onChange={(event) => setNewModelLabel(event.currentTarget.value)}
-                />
-              </label>
-              <Flex align="end">
-                <Button disabled={busy || !newModelId.trim()} onClick={() => void handleCreateModel()}>
-                  <UserRound {...iconProps} />
+            <CreateModelFields
+              busy={busy}
+              modelId={newModelId}
+              modelLabel={newModelLabel}
+              onModelIdChange={setNewModelId}
+              onModelLabelChange={setNewModelLabel}
+              onSubmit={() => void handleCreateModel()}
+            />
+          </Card>
+
+          <Box className="models-create-mobile">
+            <Dialog.Root open={createModelOpen} onOpenChange={setCreateModelOpen}>
+              <Dialog.Trigger>
+                <Button size="3" style={{ width: "100%" }} variant="soft">
+                  <Plus {...iconProps} />
                   Create model
                 </Button>
-              </Flex>
-            </Grid>
-          </Card>
+              </Dialog.Trigger>
+              <Dialog.Content style={{ maxWidth: 420 }}>
+                <Dialog.Title>Create model</Dialog.Title>
+                <Dialog.Description size="2" mb="3">
+                  Add a girl/persona. You can attach motion cards after.
+                </Dialog.Description>
+                <CreateModelFields
+                  busy={busy}
+                  modelId={newModelId}
+                  modelLabel={newModelLabel}
+                  stacked
+                  onModelIdChange={setNewModelId}
+                  onModelLabelChange={setNewModelLabel}
+                  onSubmit={() => void handleCreateModel()}
+                />
+                <Flex gap="2" mt="3" justify="end">
+                  <Dialog.Close>
+                    <Button color="gray" disabled={busy} variant="soft">
+                      Cancel
+                    </Button>
+                  </Dialog.Close>
+                </Flex>
+              </Dialog.Content>
+            </Dialog.Root>
+          </Box>
 
           {modelsWithoutCards.length > 0 ? (
             <Card size="3">
@@ -801,6 +815,61 @@ function CodeInline({ children }: { children: ReactNode }) {
     <Text as="span" color="gray" size="1">
       <code>{children}</code>
     </Text>
+  );
+}
+
+function CreateModelFields({
+  busy,
+  modelId,
+  modelLabel,
+  stacked = false,
+  onModelIdChange,
+  onModelLabelChange,
+  onSubmit,
+}: {
+  busy: boolean;
+  modelId: string;
+  modelLabel: string;
+  stacked?: boolean;
+  onModelIdChange: (value: string) => void;
+  onModelLabelChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <Grid columns={stacked ? "1" : { initial: "1", md: "3" }} gap="3">
+      <label>
+        <Text as="div" mb="1" size="2" weight="medium">
+          Model id
+        </Text>
+        <TextField.Root
+          disabled={busy}
+          placeholder="janja"
+          value={modelId}
+          onChange={(event) => onModelIdChange(event.currentTarget.value)}
+        />
+      </label>
+      <label>
+        <Text as="div" mb="1" size="2" weight="medium">
+          Display name
+        </Text>
+        <TextField.Root
+          disabled={busy}
+          placeholder="Janja"
+          value={modelLabel}
+          onChange={(event) => onModelLabelChange(event.currentTarget.value)}
+        />
+      </label>
+      <Flex align={stacked ? "stretch" : "end"}>
+        <Button
+          disabled={busy || !modelId.trim()}
+          style={stacked ? { width: "100%" } : undefined}
+          onClick={onSubmit}
+        >
+          <UserRound {...iconProps} />
+          Create model
+        </Button>
+      </Flex>
+    </Grid>
   );
 }
 

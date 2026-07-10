@@ -48,6 +48,7 @@ from backend.models_store import (
 )
 from backend.services.ai_provider import AiProvider, BackgroundVideoModel, DressVideoModel, SourceImageModel
 from backend.services.grok import edit_video, image_dress_flow as run_image_dress_flow, image_to_video as run_image_to_video
+from backend.services.garment_mask import generate_garment_mask as run_generate_garment_mask
 from backend.services.mesh_symbols import (
     SYMBOL_POINT_COUNT,
     read_symbol_points,
@@ -269,6 +270,16 @@ class UploadedFileInfo(BaseModel):
 class SaveGarmentRequest(BaseModel):
     file: str
     garment: list[int]
+
+
+class AutoGarmentMaskRequest(BaseModel):
+    file: str
+    union_existing: bool = False
+    # Optional overrides — defaults live in garment_mask.py
+    mask_source: Literal["garment", "body"] = "garment"
+    threshold: float = Field(default=0.22, ge=0.05, le=0.9)
+    pixel_dilate: int = Field(default=3, ge=0, le=8)
+    grid_dilate: int = Field(default=2, ge=0, le=5)
 
 
 def resolve_mesh_json_path(file: str) -> Path:
@@ -657,6 +668,25 @@ def save_garment_mask(request: SaveGarmentRequest) -> dict:
         "sum": int(sum(data["garment"])),
         "total": expected,
     }
+
+
+@app.post("/api/jobs/mesh/auto-garment")
+def auto_garment_mask_job(request: AutoGarmentMaskRequest) -> dict:
+    """SegFormer auto-detect of scratchable body/clothes cells for a mesh JSON."""
+    path = resolve_mesh_json_path(request.file)
+    job = enqueue(
+        "auto-garment-mask",
+        ["auto-garment-mask", path.name],
+        lambda path=path, request=request: run_generate_garment_mask(
+            path,
+            mask_source=request.mask_source,
+            threshold=request.threshold,
+            pixel_dilate=request.pixel_dilate,
+            grid_dilate=request.grid_dilate,
+            union_existing=request.union_existing,
+        ),
+    )
+    return job.public()
 
 
 @app.post("/api/jobs/generate-mesh")

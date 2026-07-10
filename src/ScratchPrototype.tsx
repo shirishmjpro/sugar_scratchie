@@ -325,7 +325,8 @@ const GAME_OUTCOME_SILENT_DELAY_MS = 1500;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
 const SOUND_STORAGE_KEY = "sugar-scratchie:sound";
-const SYMBOL_REVEAL_UV_RADIUS = 0.045;
+// Slightly larger than the manual brush so a scratch that covers the mark counts.
+const SYMBOL_REVEAL_UV_RADIUS = 0.06;
 
 type ScratchZoomSettings = {
   enabled: boolean;
@@ -1285,16 +1286,13 @@ export function ScratchPrototype() {
           const marker = bodyMarkerRefs.current[index];
           if (!marker) continue;
           const revealed = revealedPointsRef.current[index];
-          if (!revealed) {
-            marker.style.display = "none";
-            continue;
-          }
           const world = sampleMeshUvToWorld(
             trackedSample,
             bodyPoints[index].u,
             bodyPoints[index].v,
           );
           const stagePos = worldPointToStage(world, canvas, stage, camera);
+          // Keep unfound marks as faint targets so the last one is not invisible.
           marker.style.display = "flex";
           marker.style.transform = `translate(${stagePos.x}px, ${stagePos.y}px)`;
           marker.classList.toggle("is-revealed", revealed);
@@ -1639,7 +1637,11 @@ export function ScratchPrototype() {
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
     if (soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
-    setAutoScratch((current) => ({ ...current, enabled: true }));
+    // Sync the ref immediately — setState alone would leave this frame's auto path off.
+    autoScratchRef.current = { ...autoScratchRef.current, enabled: true };
+    setAutoScratch((current) =>
+      current.enabled ? current : { ...current, enabled: true },
+    );
   }
 
   const symbolsHuntComplete =
@@ -2344,6 +2346,11 @@ export function ScratchPrototype() {
               ))}
             </div>
           ) : null}
+          {useBodySymbols ? (
+            <div className="body-symbol-progress" aria-live="polite">
+              {revealedSymbols}/{SYMBOL_SLOT_COUNT}
+            </div>
+          ) : null}
           {useBodySymbols
             ? sessionSymbols.map((typeId, index) => (
                 <div
@@ -2351,7 +2358,7 @@ export function ScratchPrototype() {
                   ref={(el) => {
                     bodyMarkerRefs.current[index] = el;
                   }}
-                  className={`body-symbol-marker${index < revealedSymbols ? " is-revealed" : ""}`}
+                  className="body-symbol-marker"
                   style={{ display: "none" }}
                 >
                   <span className="body-symbol-number">{index + 1}</span>

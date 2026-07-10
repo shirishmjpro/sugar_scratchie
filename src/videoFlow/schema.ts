@@ -181,7 +181,7 @@ export const DEFAULT_VIDEO_FLOW_JSON: VideoFlowJson = {
       kind: "process",
       title: "Place symbols",
       subtitle: "12 mesh points",
-      description: "Click 12 symbol locations on the garment mesh",
+      description: "Place 12 symbol points randomly (or by click) on the garment mesh",
       x: 920,
       y: 56,
       step: "symbols",
