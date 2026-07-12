@@ -96,6 +96,12 @@ def track_bootstapir(frames_rgb, queries, device="mps"):
     T = frames_rgb.shape[0]
     M = queries.shape[0]
     video, (sx, sy) = _preprocess(frames_rgb, device)
+    chunk_count = max(1, (M + QUERY_CHUNK - 1) // QUERY_CHUNK)
+    print(
+        f"BootsTAPIR: {M} points x {T} frames on {device} "
+        f"({chunk_count} chunk{'s' if chunk_count != 1 else ''}, res={INFER_RES}) ...",
+        flush=True,
+    )
 
     # CoTracker queries are (t, x, y) in canvas px; TAPIR wants (t, y, x) in
     # inference px.
@@ -107,8 +113,13 @@ def track_bootstapir(frames_rgb, queries, device="mps"):
     vis_out = np.empty((T, M), dtype=np.uint8)
     conf_out = np.empty((T, M), dtype=np.float32)
 
-    for start in range(0, M, QUERY_CHUNK):
+    for chunk_idx, start in enumerate(range(0, M, QUERY_CHUNK), start=1):
         end = min(start + QUERY_CHUNK, M)
+        print(
+            f"BootsTAPIR chunk {chunk_idx}/{chunk_count}: "
+            f"points {start + 1}-{end} of {M} ...",
+            flush=True,
+        )
         with torch.no_grad():
             out = model(video, qp_t[start:end][None], query_chunk_size=64)
         tracks = out["tracks"][0]  # (m, T, 2) as (x, y) in INFER_RES px
@@ -123,5 +134,6 @@ def track_bootstapir(frames_rgb, queries, device="mps"):
         tracks_out[:, start:end, :] = tracks.transpose(1, 0, 2)  # T,m,2
         conf_out[:, start:end] = conf.T  # T,m
         vis_out[:, start:end] = (conf > VIS_THRESHOLD).astype(np.uint8).T
+        print(f"BootsTAPIR chunk {chunk_idx}/{chunk_count} done.", flush=True)
 
     return tracks_out, vis_out, conf_out

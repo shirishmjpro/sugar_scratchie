@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:api": ".venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8090",
+    "dev:api": ".venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8090 --reload",
     "dev:all": "concurrently -k --kill-others-on-fail -n api,web -c blue,green \"npm run dev:api\" \"npm run dev\"",
     "generate:mesh": "PYTORCH_ENABLE_MPS_FALLBACK=1 .venv/bin/python scripts/generate-mesh-tracking.py",
+    "video-flow": ".venv/bin/python scripts/video-flow.py",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lottiefiles/dotlottie-react": "^0.19.8",
     "@radix-ui/themes": "^3.3.0",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",

@@ -1,11 +1,144 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Award, Clover, Coins, Gem, Heart, Sparkles, Star, Ticket, Volume2, VolumeX, type LucideIcon } from "lucide-react";
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
+import { Volume2, VolumeX } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { fetchModels, type ModelInfo } from "./shared/models";
 import { GarmentGLRenderer, PRESENT_ZOOM } from "./glRenderer";
+import {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  parseTrackedMesh,
+  sampleMeshUvToWorld,
+  sampleTrackedMesh,
+  SYMBOL_POINT_COUNT,
+  trackedWorldToUv,
+  type TrackedMesh,
+  type TrackedMeshSample,
+  type Vec2,
+} from "./meshGeometry";
 
-type Vec2 = {
-  x: number;
-  y: number;
-};
+// On-screen diagnostics (FPS, layer drift, raw video state) shown only when the
+// page is opened with ?debug=1. Self-contained: it polls the DOM/video elements
+// directly so it adds no coupling to the render loop. Used to debug Safari, which
+// can't be driven from the dev tooling here.
+function DebugHud() {
+  const [lines, setLines] = useState<string[]>(["debug: starting…"]);
+
+  useEffect(() => {
+    let frames = 0;
+    let rafId = 0;
+    // Per-video: how many distinct currentTime values we saw (= delivered video
+    // frames) and the last value, so we can report the *effective* playback fps
+    // separately from the render fps. A low video fps while render fps stays high
+    // is the signature of decode stutter (the canvas redraws fine, but it's
+    // showing the same decoded frame repeatedly).
+    const vstate = new Map<HTMLVideoElement, { last: number; count: number }>();
+    const tick = () => {
+      frames += 1;
+      for (const v of document.querySelectorAll<HTMLVideoElement>(
+        ".source-video",
+      )) {
+        const s = vstate.get(v);
+        if (!s) {
+          vstate.set(v, { last: v.currentTime, count: 0 });
+        } else if (v.currentTime !== s.last) {
+          s.last = v.currentTime;
+          s.count += 1;
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+
+    let last = performance.now();
+    let peakHeap = 0;
+    const intervalId = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = Math.max(1, now - last);
+      const fps = Math.round((frames * 1000) / elapsed);
+      frames = 0;
+      last = now;
+
+      const vids = Array.from(
+        document.querySelectorAll<HTMLVideoElement>(".source-video"),
+      );
+      const [bottom, foreground] = vids;
+      const out: string[] = [`render ${fps}fps`];
+
+      // JS heap usage. performance.memory is non-standard (Chromium only) but
+      // works on plain http/localhost — unlike measureUserAgentSpecificMemory,
+      // which needs cross-origin isolation. Safari exposes neither, so we note
+      // it as unavailable there.
+      const mem = (
+        performance as Performance & {
+          memory?: {
+            usedJSHeapSize: number;
+            totalJSHeapSize: number;
+            jsHeapSizeLimit: number;
+          };
+        }
+      ).memory;
+      const mb = (n: number) => (n / 1048576).toFixed(1);
+      if (mem) {
+        // Show one decimal + running peak so small allocations are visible; the
+        // whole-MB rounding before made it look frozen. NOTE: this is only the JS
+        // heap — GPU textures and video decode buffers (what actually grows while
+        // scratching) live outside it, so use Chrome's Task Manager for true RAM.
+        if (mem.usedJSHeapSize > peakHeap) peakHeap = mem.usedJSHeapSize;
+        out.push(
+          `heap ${mb(mem.usedJSHeapSize)}MB peak ${mb(peakHeap)} (lim ${mb(mem.jsHeapSizeLimit)})`,
+        );
+      } else {
+        out.push("heap n/a (no perf.memory)");
+      }
+      const deviceMemory = (navigator as Navigator & { deviceMemory?: number })
+        .deviceMemory;
+      if (deviceMemory) out.push(`devMem ~${deviceMemory}GB`);
+
+      if (bottom && foreground) {
+        const drift = bottom.currentTime - foreground.currentTime;
+        out.push(
+          `drift ${drift.toFixed(3)}s  fgRate ${foreground.playbackRate.toFixed(3)}`,
+        );
+      }
+      vids.forEach((v, i) => {
+        const tag = i === 0 ? "btm" : "fg ";
+        const s = vstate.get(v);
+        const vfps = s ? Math.round((s.count * 1000) / elapsed) : 0;
+        if (s) s.count = 0;
+        out.push(
+          `${tag} ${vfps}vfps rs${v.readyState} ${v.paused ? "PAUSED" : "play"}${v.seeking ? " SEEK" : ""} t${v.currentTime.toFixed(2)}${v.error ? ` ERR${v.error.code}` : ""}`,
+        );
+      });
+      setLines(out);
+    }, 500);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 6,
+        left: 6,
+        zIndex: 50,
+        padding: "6px 8px",
+        background: "rgba(0,0,0,0.72)",
+        color: "#7CFC00",
+        font: "11px/1.35 ui-monospace, Menlo, monospace",
+        whiteSpace: "pre",
+        borderRadius: 6,
+        pointerEvents: "none",
+        maxWidth: "92%",
+      }}
+    >
+      {lines.join("\n")}
+    </div>
+  );
+}
 
 type ScratchMark = {
   u: number;
@@ -30,9 +163,6 @@ type FlyingCoin = {
 
 const COIN_FLIGHT_DURATION_MS = 620;
 const COIN_FLIGHT_STAGGER_MS = 80;
-
-const CANVAS_WIDTH = 390;
-const CANVAS_HEIGHT = 672;
 // A card pairs the reveal (bottom) video, the green-screen foreground video, and
 // the tracked mesh generated from that foreground. Switching cards swaps all
 // three together so the scratch holes line up with the right clip.
@@ -42,15 +172,22 @@ type Card = {
   bottom: string;
   foreground: string;
   mesh: string;
+  chromaKey: boolean;
+  model_id?: string;
+  sort_order?: number;
+  photos?: Array<{ id: string; src: string }>;
 };
 
-const CARDS: Card[] = [
+const CARDS_INDEX_SRC = "/cards/index.json";
+
+const DEFAULT_CARDS: Card[] = [
   {
     id: "original",
     label: "Original",
     bottom: "/cards/ai%20girl%202.mp4",
     foreground: "/cards/Green%20bg%20sample%202%20swap.mp4",
     mesh: "tracked-mesh.json",
+    chromaKey: true,
   },
   {
     id: "girl_1",
@@ -58,6 +195,7 @@ const CARDS: Card[] = [
     bottom: "/cards/girl_1/background.mp4",
     foreground: "/cards/girl_1/foreground.mp4",
     mesh: "girl_1.json",
+    chromaKey: false,
   },
   {
     id: "girl_2",
@@ -65,6 +203,7 @@ const CARDS: Card[] = [
     bottom: "/cards/girl_2/background.mp4",
     foreground: "/cards/girl_2/foreground.mp4",
     mesh: "girl_2.json",
+    chromaKey: false,
   },
   {
     id: "juliana_1",
@@ -72,6 +211,7 @@ const CARDS: Card[] = [
     bottom: "/cards/juliana_1/background.mp4",
     foreground: "/cards/juliana_1/foreground.mp4",
     mesh: "juliana_1.json",
+    chromaKey: false,
   },
   {
     id: "juliana_2",
@@ -79,6 +219,7 @@ const CARDS: Card[] = [
     bottom: "/cards/juliana_2/background.mp4",
     foreground: "/cards/juliana_2/foreground.mp4",
     mesh: "juliana_2.json",
+    chromaKey: false,
   },
   {
     id: "chinese_1",
@@ -86,14 +227,84 @@ const CARDS: Card[] = [
     bottom: "/cards/chinese_1/background.mp4",
     foreground: "/cards/chinese_1/foreground.mp4",
     mesh: "chinese_1.json",
+    chromaKey: false,
   },
 ];
+
+type CardsIndexResponse = {
+  cards?: Array<{
+    id: string;
+    label: string;
+    bottom: string;
+    foreground: string;
+    mesh: string;
+    chroma_key?: boolean;
+    model_id?: string;
+    sort_order?: number;
+    photos?: Array<{ id: string; src: string }>;
+  }>;
+};
+
+function cardUsesChromaKey(id: string, chromaKey: boolean | undefined): boolean {
+  if (typeof chromaKey === "boolean") return chromaKey;
+  return id === "original";
+}
+
+function parseCardsIndex(data: CardsIndexResponse): Card[] | null {
+  if (!Array.isArray(data.cards) || data.cards.length === 0) return null;
+  const cards: Card[] = [];
+  for (const entry of data.cards) {
+    if (
+      typeof entry.id !== "string" ||
+      typeof entry.label !== "string" ||
+      typeof entry.bottom !== "string" ||
+      typeof entry.foreground !== "string" ||
+      typeof entry.mesh !== "string"
+    ) {
+      continue;
+    }
+    cards.push({
+      id: entry.id,
+      label: entry.label,
+      bottom: entry.bottom,
+      foreground: entry.foreground,
+      mesh: entry.mesh,
+      chromaKey: cardUsesChromaKey(entry.id, entry.chroma_key),
+      model_id: entry.model_id,
+      sort_order: typeof entry.sort_order === "number" ? entry.sort_order : 0,
+      photos: entry.photos,
+    });
+  }
+  return cards.length > 0 ? cards : null;
+}
+
+function playlistCardsForModel(cards: Card[], modelId: string): Card[] {
+  return cards
+    .filter((entry) => entry.model_id === modelId)
+    .sort((a, b) => {
+      const orderA = a.sort_order ?? 0;
+      const orderB = b.sort_order ?? 0;
+      if (orderA !== orderB) return orderA - orderB;
+      return a.id.localeCompare(b.id);
+    });
+}
+
+async function loadCards(): Promise<Card[]> {
+  try {
+    const response = await fetch(CARDS_INDEX_SRC, { cache: "no-store" });
+    if (!response.ok) return DEFAULT_CARDS;
+    const data = (await response.json()) as CardsIndexResponse;
+    return parseCardsIndex(data) ?? DEFAULT_CARDS;
+  } catch {
+    return DEFAULT_CARDS;
+  }
+}
 
 const MESH_INDEX_SRC = "/mesh/index.json";
 const MESH_DIRECTORY_SRC = "/mesh";
 const DEFAULT_MESH_FILE = "tracked-mesh.json";
-const SYMBOL_TYPE_COUNT = 8;
-const SYMBOL_SLOT_COUNT = 12;
+const SYMBOL_TYPE_COUNT = 12;
+const SYMBOL_SLOT_COUNT = SYMBOL_POINT_COUNT;
 const SYMBOL_REVEAL_STEP_MANUAL = 0.056;
 const SYMBOL_REVEAL_STEP_AUTO = 0.083;
 const FULL_REVEAL_MANUAL_THRESHOLD = 0.7;
@@ -103,6 +314,8 @@ const GAME_OUTCOME_SILENT_DELAY_MS = 1500;
 const UI_STATE_UPDATE_INTERVAL_MS = 250;
 const SCRATCH_ZOOM_STORAGE_KEY = "sugar-scratchie:scratch-zoom";
 const SOUND_STORAGE_KEY = "sugar-scratchie:sound";
+// Slightly larger than the manual brush so a scratch that covers the mark counts.
+const SYMBOL_REVEAL_UV_RADIUS = 0.06;
 
 type ScratchZoomSettings = {
   enabled: boolean;
@@ -118,19 +331,25 @@ const SCRATCH_ZOOM_DEFAULTS: ScratchZoomSettings = {
   bounce: false,
 };
 
-const SYMBOL_TYPES: { icon: LucideIcon; label: string; color: string }[] = [
-  { icon: Star, label: "Star", color: "#ffd54a" },
-  { icon: Coins, label: "Coin", color: "#ffb74a" },
-  { icon: Gem, label: "Gem", color: "#7ec8ff" },
-  { icon: Clover, label: "Lucky", color: "#6ddf8a" },
-  { icon: Award, label: "Badge", color: "#c9a0ff" },
-  { icon: Ticket, label: "Ticket", color: "#ff9eb8" },
-  { icon: Heart, label: "Heart", color: "#ff6b8a" },
-  { icon: Sparkles, label: "Sparkle", color: "#fff4a8" },
+const SYMBOL_TYPES: { src: string; label: string }[] = [
+  { src: "/lotties/01-Heart.lottie", label: "Heart" },
+  { src: "/lotties/02-Lock.lottie", label: "Lock" },
+  { src: "/lotties/03-GemDiamond.lottie", label: "Gem" },
+  { src: "/lotties/04-Star.lottie", label: "Star" },
+  { src: "/lotties/05-Diamond.lottie", label: "Diamond" },
+  { src: "/lotties/06-Magnet.lottie", label: "Magnet" },
+  { src: "/lotties/07-Crown.lottie", label: "Crown" },
+  { src: "/lotties/08-Gold%20Coins.lottie", label: "Gold Coins" },
+  { src: "/lotties/09-Key.lottie", label: "Key" },
+  { src: "/lotties/10-Treasure%20Chest.lottie", label: "Treasure Chest" },
+  { src: "/lotties/11-Diamond%20Cards.lottie", label: "Diamond Cards" },
+  { src: "/lotties/12-WinnerTrophy.lottie", label: "Trophy" },
 ];
 
 function buildSessionSymbols(): number[] {
-  return Array.from({ length: SYMBOL_SLOT_COUNT }, () => Math.floor(Math.random() * SYMBOL_TYPE_COUNT));
+  return Array.from({ length: SYMBOL_SLOT_COUNT }, () =>
+    Math.floor(Math.random() * SYMBOL_TYPE_COUNT),
+  );
 }
 
 function revealedSymbolCount(progress: number, autoMode: boolean) {
@@ -149,8 +368,8 @@ function isGarmentFullyRevealed(
     return revealedCount >= sampleCount;
   }
   return (
-    progress >= FULL_REVEAL_MANUAL_THRESHOLD
-    || revealedCount >= Math.ceil(sampleCount * FULL_REVEAL_MANUAL_THRESHOLD)
+    progress >= FULL_REVEAL_MANUAL_THRESHOLD ||
+    revealedCount >= Math.ceil(sampleCount * FULL_REVEAL_MANUAL_THRESHOLD)
   );
 }
 
@@ -185,8 +404,9 @@ function ensureSymbolAudio(state: SymbolAudioState) {
   if (typeof window === "undefined") return null;
   if (!state.ctx) {
     const AudioCtor =
-      window.AudioContext
-      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
     if (!AudioCtor) return null;
     state.ctx = new AudioCtor();
   }
@@ -261,7 +481,10 @@ function scheduleSlide(
   const gain = ctx.createGain();
   osc.type = type;
   osc.frequency.setValueAtTime(fromHz, startAt);
-  osc.frequency.exponentialRampToValueAtTime(Math.max(toHz, 1), startAt + durationS);
+  osc.frequency.exponentialRampToValueAtTime(
+    Math.max(toHz, 1),
+    startAt + durationS,
+  );
   gain.gain.setValueAtTime(0.0001, startAt);
   gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.02);
   gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationS);
@@ -271,7 +494,11 @@ function scheduleSlide(
   osc.stop(startAt + durationS + 0.02);
 }
 
-function playGameOutcomeSound(state: SymbolAudioState, outcome: GameResult, enabled: boolean): number {
+function playGameOutcomeSound(
+  state: SymbolAudioState,
+  outcome: GameResult,
+  enabled: boolean,
+): number {
   if (!enabled) return GAME_OUTCOME_SILENT_DELAY_MS;
 
   const ctx = ensureSymbolAudio(state);
@@ -281,13 +508,21 @@ function playGameOutcomeSound(state: SymbolAudioState, outcome: GameResult, enab
 
   if (outcome === "win") {
     const sparkle = [
-      523.25, 587.33, 659.25, 698.46, 783.99, 880, 987.77, 1174.66, 1318.51, 1567.98, 1760, 2093,
+      523.25, 587.33, 659.25, 698.46, 783.99, 880, 987.77, 1174.66, 1318.51,
+      1567.98, 1760, 2093,
     ];
     const sparkleStep = 0.048;
     sparkle.forEach((freq, index) => {
       scheduleTone(ctx, now + index * sparkleStep, freq, 0.09, 0.17, "sine");
       if (index % 2 === 0) {
-        scheduleTone(ctx, now + index * sparkleStep + 0.012, freq * 2, 0.055, 0.09, "triangle");
+        scheduleTone(
+          ctx,
+          now + index * sparkleStep + 0.012,
+          freq * 2,
+          0.055,
+          0.09,
+          "triangle",
+        );
       }
     });
 
@@ -315,7 +550,14 @@ function playGameOutcomeSound(state: SymbolAudioState, outcome: GameResult, enab
 
     const shimmerStart = glitterStart + glitter.length * 0.045 + 0.08;
     for (let i = 0; i < 6; i += 1) {
-      scheduleTone(ctx, shimmerStart + i * 0.06, 1760 + i * 110, 0.07, 0.09, "sine");
+      scheduleTone(
+        ctx,
+        shimmerStart + i * 0.06,
+        1760 + i * 110,
+        0.07,
+        0.09,
+        "sine",
+      );
     }
 
     const endTime = shimmerStart + 6 * 0.06 + 0.35;
@@ -329,10 +571,20 @@ function playGameOutcomeSound(state: SymbolAudioState, outcome: GameResult, enab
   return 2.05 * 1000 + GAME_OUTCOME_OVERLAY_PAD_MS;
 }
 
-function GameSymbolIcon({ typeId }: { typeId: number }) {
+function GameSymbolIcon({ typeId, size = 24 }: { typeId: number; size?: number }) {
   const entry = SYMBOL_TYPES[typeId] ?? SYMBOL_TYPES[0];
-  const Icon = entry.icon;
-  return <Icon aria-hidden="true" color={entry.color} size={16} strokeWidth={2.2} />;
+  return (
+    <DotLottieReact
+      src={entry.src}
+      autoplay
+      loop
+      aria-hidden="true"
+      width={size}
+      height={size}
+      style={{ width: size, height: size }}
+      className="game-symbol-lottie"
+    />
+  );
 }
 
 function scratchZoomEasing(bounce: boolean) {
@@ -351,6 +603,26 @@ function loadSoundEnabled(): boolean {
   }
 }
 
+function worldPointToStage(
+  worldPoint: Vec2,
+  canvas: HTMLCanvasElement,
+  stage: HTMLElement,
+  camera: { x: number; y: number },
+): Vec2 {
+  const canvasRect = canvas.getBoundingClientRect();
+  const stageRect = stage.getBoundingClientRect();
+  const refClipX = (worldPoint.x / CANVAS_WIDTH) * 2 - 1;
+  const refClipY = 1 - (worldPoint.y / CANVAS_HEIGHT) * 2;
+  const presentX = ((refClipX * PRESENT_ZOOM + camera.x + 1) / 2) * CANVAS_WIDTH;
+  const presentY =
+    ((1 - (refClipY * PRESENT_ZOOM + camera.y)) / 2) * CANVAS_HEIGHT;
+  const clientX =
+    canvasRect.left + (presentX / CANVAS_WIDTH) * canvasRect.width;
+  const clientY =
+    canvasRect.top + (presentY / CANVAS_HEIGHT) * canvasRect.height;
+  return { x: clientX - stageRect.left, y: clientY - stageRect.top };
+}
+
 function loadScratchZoomSettings(): ScratchZoomSettings {
   if (typeof window === "undefined") return SCRATCH_ZOOM_DEFAULTS;
   try {
@@ -359,8 +631,16 @@ function loadScratchZoomSettings(): ScratchZoomSettings {
     const parsed = JSON.parse(raw) as Partial<ScratchZoomSettings>;
     return {
       enabled: parsed.enabled ?? SCRATCH_ZOOM_DEFAULTS.enabled,
-      scale: clampValue(Number(parsed.scale) || SCRATCH_ZOOM_DEFAULTS.scale, 1, 2),
-      durationMs: clampValue(Number(parsed.durationMs) || SCRATCH_ZOOM_DEFAULTS.durationMs, 50, 800),
+      scale: clampValue(
+        Number(parsed.scale) || SCRATCH_ZOOM_DEFAULTS.scale,
+        1,
+        2,
+      ),
+      durationMs: clampValue(
+        Number(parsed.durationMs) || SCRATCH_ZOOM_DEFAULTS.durationMs,
+        50,
+        800,
+      ),
       bounce: parsed.bounce ?? SCRATCH_ZOOM_DEFAULTS.bounce,
     };
   } catch {
@@ -370,6 +650,9 @@ function loadScratchZoomSettings(): ScratchZoomSettings {
 
 const AUTO_SCRATCH_STORAGE_KEY = "sugar-scratchie:auto-scratch";
 const SCRATCH_RADIUS = 0.045;
+// Max canvas-space step between manual scratch stamps so fast swipes stay continuous.
+const MANUAL_SCRATCH_PATH_STEP = SCRATCH_RADIUS * 0.65 * CANVAS_HEIGHT;
+const MANUAL_SCRATCH_MAX_POINTS = 40;
 const AUTO_SCRATCH_RADIUS = 0.092;
 const AUTO_SCRATCH_DIAGONAL_LINES = 18;
 // Step along each ↘ stroke (top-left → bottom-right) so brush circles overlap.
@@ -397,7 +680,11 @@ function loadAutoScratchSettings(): AutoScratchSettings {
     const parsed = JSON.parse(raw) as Partial<AutoScratchSettings>;
     return {
       enabled: parsed.enabled ?? AUTO_SCRATCH_DEFAULTS.enabled,
-      speed: clampValue(Number(parsed.speed) || AUTO_SCRATCH_DEFAULTS.speed, 1, 120),
+      speed: clampValue(
+        Number(parsed.speed) || AUTO_SCRATCH_DEFAULTS.speed,
+        1,
+        120,
+      ),
       flakes: parsed.flakes ?? AUTO_SCRATCH_DEFAULTS.flakes,
     };
   } catch {
@@ -409,12 +696,20 @@ function clampValue(value: number, lo: number, hi: number) {
   return value < lo ? lo : value > hi ? hi : value;
 }
 
-function foregroundTimeFromBottom(source: HTMLVideoElement, target: HTMLVideoElement) {
+function foregroundTimeFromBottom(
+  source: HTMLVideoElement,
+  target: HTMLVideoElement,
+) {
   const srcT = source.currentTime;
   const srcDur = source.duration;
   const tgtDur = target.duration;
-  if (!Number.isFinite(srcT) || !Number.isFinite(tgtDur) || tgtDur <= 0) return srcT;
-  if (Number.isFinite(srcDur) && srcDur > 0 && Math.abs(srcDur - tgtDur) <= 0.25) {
+  if (!Number.isFinite(srcT) || !Number.isFinite(tgtDur) || tgtDur <= 0)
+    return srcT;
+  if (
+    Number.isFinite(srcDur) &&
+    srcDur > 0 &&
+    Math.abs(srcDur - tgtDur) <= 0.25
+  ) {
     return Math.min(Math.max(0, srcT), tgtDur - 0.001);
   }
   return srcT % tgtDur;
@@ -433,35 +728,15 @@ const CHEST_SMOOTH = 0.08;
 
 // Bilinearly interpolate the deformed mesh at a fractional UV grid position to
 // get its current canvas-pixel location (the mesh UV grid is regular 0..1).
-function sampleMeshUvToWorld(sample: TrackedMeshSample, u: number, v: number): Vec2 {
-  const { cols, rows, verts } = sample;
-  const gx = clampValue(u * (cols - 1), 0, cols - 1);
-  const gy = clampValue(v * (rows - 1), 0, rows - 1);
-  const x0 = Math.floor(gx);
-  const y0 = Math.floor(gy);
-  const x1 = Math.min(cols - 1, x0 + 1);
-  const y1 = Math.min(rows - 1, y0 + 1);
-  const fx = gx - x0;
-  const fy = gy - y0;
-  const v00 = verts[y0 * cols + x0];
-  const v10 = verts[y0 * cols + x1];
-  const v01 = verts[y1 * cols + x0];
-  const v11 = verts[y1 * cols + x1];
-  const topX = v00.x + (v10.x - v00.x) * fx;
-  const topY = v00.y + (v10.y - v00.y) * fx;
-  const botX = v01.x + (v11.x - v01.x) * fx;
-  const botY = v01.y + (v11.y - v01.y) * fx;
-  return { x: topX + (botX - topX) * fy, y: topY + (botY - topY) * fy };
-}
+// sampleMeshUvToWorld lives in meshGeometry.ts
 
-// Drift past this (seconds) is treated as a discontinuity (e.g. a loop wrap) and
-// corrected with a hard seek. Below it we steer with playbackRate instead.
-const HARD_SEEK_DRIFT = 0.5;
-// Below this drift we consider the clips synced and run at 1×.
-const SOFT_SYNC_DEADBAND = 0.02;
-// How hard playbackRate bends to close small drift (clamped to ±12%).
-const SYNC_RATE_GAIN = 0.5;
-const SYNC_RATE_MAX = 0.12;
+// Drift past this (seconds) is a genuine discontinuity (loop wrap) and is the
+// only case we correct with a hard seek — seeks stall the decoder, and on
+// Safari, whose currentTime is coarse, a low threshold makes us seek constantly
+// (every stale reading crosses it) which reads as continuous lag. Keep it high:
+// a normal startup offset is closed smoothly by the gentle rate steering below,
+// not by seeking.
+const HARD_SEEK_DRIFT = 0.45;
 
 function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
   if (source.paused && !target.paused) {
@@ -472,42 +747,51 @@ function syncVideoTime(source: HTMLVideoElement, target: HTMLVideoElement) {
     void target.play().catch(() => undefined);
   }
 
-  if (!Number.isFinite(source.currentTime) || !Number.isFinite(target.duration) || target.duration <= 0) {
+  if (
+    !Number.isFinite(source.currentTime) ||
+    !Number.isFinite(target.duration) ||
+    target.duration <= 0
+  ) {
     return;
   }
+
+  // A seek hasn't landed yet (Safari resolves seeks asynchronously, and its
+  // currentTime lags during one). Acting now would compare against a stale time
+  // and pile on more seeks — a seek storm that looks like a hard stutter.
+  if (target.seeking) return;
+
+  // Let the foreground free-run at 1×. The two clips are near-identical length,
+  // so left alone they stay visually locked. Actively steering the foreground
+  // (changing playbackRate / seeking it) knocks Safari's video decoder off its
+  // smooth-decode path, which starves the foreground to a few fps and makes it
+  // fall behind — the opposite of what the steering is trying to do.
+  if (target.playbackRate !== 1) target.playbackRate = 1;
 
   const targetTime = foregroundTimeFromBottom(source, target);
   const drift = targetTime - target.currentTime;
-  const absDrift = Math.abs(drift);
 
-  // Large jump (loop wrap / seek): snap once. Frequent hard seeks stall the
-  // mobile decoder, so we reserve them for genuine discontinuities.
-  if (absDrift > HARD_SEEK_DRIFT) {
+  // Only correct a genuine discontinuity (a loop wrap), with a single snap.
+  if (Math.abs(drift) > HARD_SEEK_DRIFT) {
     target.currentTime = targetTime;
-    target.playbackRate = 1;
-    return;
   }
-
-  // Small drift: steer with playbackRate so the foreground smoothly catches up
-  // or eases off without a single seek — this is what keeps the two clips
-  // visually locked on a phone.
-  if (target.paused) return;
-  if (absDrift <= SOFT_SYNC_DEADBAND) {
-    if (target.playbackRate !== 1) target.playbackRate = 1;
-    return;
-  }
-  const correction = clampValue(drift * SYNC_RATE_GAIN, -SYNC_RATE_MAX, SYNC_RATE_MAX);
-  target.playbackRate = 1 + correction;
 }
 
 function parseMeshIndex(value: unknown) {
-  if (!value || typeof value !== "object" || !Array.isArray((value as { files?: unknown }).files)) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Array.isArray((value as { files?: unknown }).files)
+  ) {
     return [];
   }
 
   return (value as { files: unknown[] }).files
     .filter((file): file is string => {
-      return typeof file === "string" && file.toLowerCase().endsWith(".json") && !file.includes("/");
+      return (
+        typeof file === "string" &&
+        file.toLowerCase().endsWith(".json") &&
+        !file.includes("/")
+      );
     })
     .sort((a, b) => a.localeCompare(b));
 }
@@ -561,6 +845,24 @@ function densifyScratchPath(points: Vec2[], maxStep: number): Vec2[] {
   return out;
 }
 
+function densifyStrokeSegment(
+  from: Vec2,
+  to: Vec2,
+  maxStep: number,
+  maxPoints: number,
+): Vec2[] {
+  const points = densifyScratchPath([from, to], maxStep);
+  if (points.length <= maxPoints) return points;
+  const kept: Vec2[] = [points[0]];
+  const lastIndex = points.length - 1;
+  for (let i = 1; i < maxPoints - 1; i += 1) {
+    const idx = Math.round((i / (maxPoints - 1)) * lastIndex);
+    kept.push(points[idx]);
+  }
+  kept.push(points[lastIndex]);
+  return kept;
+}
+
 function isGarmentUv(mesh: TrackedMesh | null, u: number, v: number) {
   const garment = mesh?.garment ?? null;
   const cols = mesh?.cols ?? 0;
@@ -600,7 +902,10 @@ function buildAutoScratchPath(mesh: TrackedMesh | null): Vec2[] {
     if (span < 1e-6) continue;
 
     const linePoints: Vec2[] = [];
-    const stepsAlong = Math.max(2, Math.ceil(span / (AUTO_SCRATCH_PATH_STEP_UV * 1.8)));
+    const stepsAlong = Math.max(
+      2,
+      Math.ceil(span / (AUTO_SCRATCH_PATH_STEP_UV * 1.8)),
+    );
     for (let j = 0; j <= stepsAlong; j += 1) {
       const f = j / stepsAlong;
       const u = startU + (endU - startU) * f;
@@ -609,7 +914,11 @@ function buildAutoScratchPath(mesh: TrackedMesh | null): Vec2[] {
       linePoints.push({ x: u, y: v });
     }
     if (linePoints.length === 0) continue;
-    lines.push({ startU: linePoints[0].x, startV: linePoints[0].y, points: linePoints });
+    lines.push({
+      startU: linePoints[0].x,
+      startV: linePoints[0].y,
+      points: linePoints,
+    });
   }
 
   lines.sort((a, b) => {
@@ -622,187 +931,6 @@ function buildAutoScratchPath(mesh: TrackedMesh | null): Vec2[] {
     sparse.push(...densifyScratchPath(line.points, AUTO_SCRATCH_PATH_STEP_UV));
   }
   return sparse;
-}
-
-type TrackedMeshFrame = {
-  t: number;
-  verts: Vec2[];
-  vis: number[];
-};
-
-type TrackedMesh = {
-  cols: number;
-  rows: number;
-  fps: number;
-  uv: Vec2[];
-  frames: TrackedMeshFrame[];
-  // Static per-vertex clothing mask (1 = garment), or null when the mesh has no
-  // garment data (then the whole screen is scratchable, legacy behavior).
-  garment: number[] | null;
-};
-
-// A live mesh sampled at the current video time: per-vertex canvas positions
-// plus visibility, sharing the static UV grid from the source TrackedMesh.
-type TrackedMeshSample = {
-  cols: number;
-  rows: number;
-  uv: Vec2[];
-  verts: Vec2[];
-  vis: number[];
-};
-
-function parseTrackedMesh(value: unknown): TrackedMesh | null {
-  if (!value || typeof value !== "object") return null;
-  const data = value as {
-    mesh?: { cols?: unknown; rows?: unknown };
-    fps?: unknown;
-    uv?: unknown;
-    frames?: unknown;
-    garment?: unknown;
-  };
-  const cols = Number(data.mesh?.cols);
-  const rows = Number(data.mesh?.rows);
-  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 2 || rows < 2) return null;
-  if (!Array.isArray(data.uv) || !Array.isArray(data.frames) || data.frames.length === 0) return null;
-
-  const expected = cols * rows;
-  const uv = data.uv as unknown[];
-  if (uv.length !== expected) return null;
-
-  // Optional static per-vertex garment mask (1 = clothing). When present we fold
-  // it into per-frame visibility so scratching, hole-punching, and the mesh
-  // overlay are all confined to clothes (the gate is `cellVisible`). Scratches
-  // live in UV space and the garment occupies a stable UV region, so a single
-  // static mask is correct and flicker-free.
-  const garmentSource = Array.isArray(data.garment) ? (data.garment as unknown[]) : null;
-  const garment =
-    garmentSource && garmentSource.length === expected
-      ? garmentSource.map((flag) => (Number(flag) ? 1 : 0))
-      : null;
-  const parsedUv = uv.map((pair) => {
-    const point = pair as number[];
-    return { x: Number(point?.[0]), y: Number(point?.[1]) };
-  });
-  if (parsedUv.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
-
-  const frames: TrackedMeshFrame[] = [];
-  for (const rawFrame of data.frames as unknown[]) {
-    const frame = rawFrame as { t?: unknown; verts?: unknown; vis?: unknown };
-    if (typeof frame.t !== "number" || !Array.isArray(frame.verts) || frame.verts.length !== expected) {
-      return null;
-    }
-    const verts = (frame.verts as unknown[]).map((pair) => {
-      const point = pair as number[];
-      return { x: Number(point?.[0]), y: Number(point?.[1]) };
-    });
-    if (verts.some((point) => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
-    const visSource = Array.isArray(frame.vis) ? (frame.vis as unknown[]) : [];
-    const vis = verts.map((_, index) => {
-      if (garment && !garment[index]) return 0;
-      return Number(visSource[index]) ? 1 : 0;
-    });
-    frames.push({ t: frame.t, verts, vis });
-  }
-
-  return {
-    cols,
-    rows,
-    fps: Number(data.fps) || 10,
-    uv: parsedUv,
-    frames: frames.sort((a, b) => a.t - b.t),
-    garment,
-  };
-}
-
-// Interpolate vertex positions between the two source frames bracketing `time`.
-function sampleTrackedMesh(mesh: TrackedMesh, time: number): TrackedMeshSample {
-  const frames = mesh.frames;
-  const loopTime = frames.length > 1 ? time % (frames[frames.length - 1].t || 1) : time;
-  let previous = frames[0];
-  let next = frames[frames.length - 1];
-  for (let index = 0; index < frames.length; index += 1) {
-    if (frames[index].t <= loopTime) previous = frames[index];
-    if (frames[index].t >= loopTime) {
-      next = frames[index];
-      break;
-    }
-  }
-
-  const span = next.t - previous.t;
-  const blend = span > 0 ? (loopTime - previous.t) / span : 0;
-  const verts = previous.verts.map((point, index) => {
-    const target = next.verts[index] ?? point;
-    return { x: point.x + (target.x - point.x) * blend, y: point.y + (target.y - point.y) * blend };
-  });
-  const vis = previous.vis.map((value, index) => (value && next.vis[index] ? 1 : 0));
-
-  return { cols: mesh.cols, rows: mesh.rows, uv: mesh.uv, verts, vis };
-}
-
-function meshVertexAt(sample: TrackedMeshSample, col: number, row: number) {
-  return sample.verts[row * sample.cols + col];
-}
-
-// A cell is usable only if all four corners are visible this frame — this skips
-// off-body cells (never seeded) and occluded ones (e.g. an arm crossing).
-function cellVisible(sample: TrackedMeshSample, col: number, row: number) {
-  const { cols, vis } = sample;
-  return Boolean(
-    vis[row * cols + col] &&
-      vis[row * cols + col + 1] &&
-      vis[(row + 1) * cols + col] &&
-      vis[(row + 1) * cols + col + 1],
-  );
-}
-
-function barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) {
-  const v0x = b.x - a.x;
-  const v0y = b.y - a.y;
-  const v1x = c.x - a.x;
-  const v1y = c.y - a.y;
-  const v2x = point.x - a.x;
-  const v2y = point.y - a.y;
-  const denominator = v0x * v1y - v1x * v0y;
-  if (Math.abs(denominator) < 1e-6) return null;
-  const v = (v2x * v1y - v1x * v2y) / denominator;
-  const w = (v0x * v2y - v2x * v0y) / denominator;
-  const u = 1 - v - w;
-  if (u < -0.001 || v < -0.001 || w < -0.001) return null;
-  return { u, v, w };
-}
-
-// Map a canvas point to mesh-UV: find which deformed cell holds `point` and
-// return its UV via barycentric interpolation across the cell triangles.
-function trackedWorldToUv(sample: TrackedMeshSample, point: Vec2): Vec2 | null {
-  for (let row = 0; row < sample.rows - 1; row += 1) {
-    for (let col = 0; col < sample.cols - 1; col += 1) {
-      if (!cellVisible(sample, col, row)) continue;
-      const topLeft = meshVertexAt(sample, col, row);
-      const topRight = meshVertexAt(sample, col + 1, row);
-      const bottomLeft = meshVertexAt(sample, col, row + 1);
-      const bottomRight = meshVertexAt(sample, col + 1, row + 1);
-      const uvTL = sample.uv[row * sample.cols + col];
-      const uvTR = sample.uv[row * sample.cols + col + 1];
-      const uvBL = sample.uv[(row + 1) * sample.cols + col];
-      const uvBR = sample.uv[(row + 1) * sample.cols + col + 1];
-
-      const first = barycentric(point, topLeft, topRight, bottomRight);
-      if (first) {
-        return {
-          x: uvTL.x * first.u + uvTR.x * first.v + uvBR.x * first.w,
-          y: uvTL.y * first.u + uvTR.y * first.v + uvBR.y * first.w,
-        };
-      }
-      const second = barycentric(point, topLeft, bottomRight, bottomLeft);
-      if (second) {
-        return {
-          x: uvTL.x * second.u + uvBR.x * second.v + uvBL.x * second.w,
-          y: uvTL.y * second.u + uvBR.y * second.v + uvBL.y * second.w,
-        };
-      }
-    }
-  }
-  return null;
 }
 
 export function ScratchPrototype() {
@@ -819,6 +947,7 @@ export function ScratchPrototype() {
   const glRendererRef = useRef<GarmentGLRenderer | null>(null);
   const marksRef = useRef<ScratchMark[]>([]);
   const hoverPointRef = useRef<Vec2 | null>(null);
+  const lastScratchWorldRef = useRef<Vec2 | null>(null);
   const drawingRef = useRef(false);
   // Reveal progress is measured against a fixed UV sample grid. We track which
   // samples have *ever* been scratched (monotonic), so the percentage matches
@@ -835,17 +964,58 @@ export function ScratchPrototype() {
   // to invert the pan when mapping a tap back to fabric UV.
   const cameraRef = useRef({ x: 0, y: 0 });
   const [meshFiles, setMeshFiles] = useState<string[]>([]);
-  const [selectedMeshFile, setSelectedMeshFile] = useState(CARDS[1].mesh);
+  const [cards, setCards] = useState<Card[]>(DEFAULT_CARDS);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [cardsReady, setCardsReady] = useState(false);
+  const [selectedMeshFile, setSelectedMeshFile] = useState(DEFAULT_CARDS[1].mesh);
   const [meshReloadToken, setMeshReloadToken] = useState(0);
-  const [selectedCardId, setSelectedCardId] = useState(CARDS[1].id);
-  const card = CARDS.find((entry) => entry.id === selectedCardId) ?? CARDS[1];
-  // The mesh lattice is a dev overlay — default it off on phones (where the
-  // toggle is hidden).
-  const [showMesh, setShowMesh] = useState(
-    () => !(typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches),
+  const [activeModelId, setActiveModelId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("model")?.trim() || "";
+  });
+  const [selectedCardId, setSelectedCardId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("card")?.trim() || "";
+  });
+  const modelCards = useMemo(
+    () => (activeModelId ? playlistCardsForModel(cards, activeModelId) : []),
+    [cards, activeModelId],
   );
+  const [completedCardIds, setCompletedCardIds] = useState<string[]>([]);
+  const completedCardIdsRef = useRef<string[]>([]);
+  completedCardIdsRef.current = completedCardIds;
+  const remainingCards = useMemo(
+    () => modelCards.filter((entry) => !completedCardIds.includes(entry.id)),
+    [modelCards, completedCardIds],
+  );
+  const activeModel = models.find((entry) => entry.id === activeModelId) ?? null;
+  // Never fall back to another girl's card — only play cards owned by the active model.
+  const card = useMemo(() => {
+    if (!activeModelId || modelCards.length === 0) return null;
+    return (
+      remainingCards.find((entry) => entry.id === selectedCardId) ??
+      remainingCards[0] ??
+      null
+    );
+  }, [activeModelId, modelCards.length, remainingCards, selectedCardId]);
+  const showModelPicker = !cardsReady || !activeModelId || modelCards.length === 0;
+  const playlistFinished =
+    Boolean(activeModelId) && modelCards.length > 0 && remainingCards.length === 0;
+  const chromaKeyRef = useRef(card?.chromaKey ?? false);
+  chromaKeyRef.current = card?.chromaKey ?? false;
+  const advanceAfterScratchRef = useRef<() => void>(() => undefined);
+  // Mesh lattice is a dev overlay — start hidden; toggle with "Show mesh".
+  const [showMesh, setShowMesh] = useState(false);
   const showMeshRef = useRef(showMesh);
   showMeshRef.current = showMesh;
+  const bodyMarkerRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const useBodySymbolsRef = useRef(false);
+  const revealedPointsRef = useRef<boolean[]>(
+    Array.from({ length: SYMBOL_SLOT_COUNT }, () => false),
+  );
+  const useBodySymbols =
+    trackedMesh?.symbolPoints?.length === SYMBOL_SLOT_COUNT;
+  useBodySymbolsRef.current = useBodySymbols;
   const [progress, setProgress] = useState(0);
   const [claimed, setClaimed] = useState(false);
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
@@ -870,10 +1040,14 @@ export function ScratchPrototype() {
     isPaused,
     lastUpdatedAt: 0,
   });
-  const [scratchZoom, setScratchZoom] = useState<ScratchZoomSettings>(loadScratchZoomSettings);
+  const [scratchZoom, setScratchZoom] = useState<ScratchZoomSettings>(
+    loadScratchZoomSettings,
+  );
   const scratchZoomRef = useRef(scratchZoom);
   scratchZoomRef.current = scratchZoom;
-  const [autoScratch, setAutoScratch] = useState<AutoScratchSettings>(loadAutoScratchSettings);
+  const [autoScratch, setAutoScratch] = useState<AutoScratchSettings>(
+    loadAutoScratchSettings,
+  );
   const autoScratchRef = useRef(autoScratch);
   autoScratchRef.current = autoScratch;
   const [soundEnabled, setSoundEnabled] = useState(loadSoundEnabled);
@@ -882,7 +1056,9 @@ export function ScratchPrototype() {
   const autoPathRef = useRef<Vec2[]>([]);
   const autoPathIndexRef = useRef(0);
   const autoPathProgressRef = useRef(0);
-  const applyScratchAtUvRef = useRef<(u: number, v: number, radius: number, worldPoint?: Vec2 | null) => void>(() => undefined);
+  const applyScratchAtUvRef = useRef<
+    (u: number, v: number, radius: number, worldPoint?: Vec2 | null) => void
+  >(() => undefined);
   const tryResolveGameRef = useRef<() => void>(() => undefined);
   const resetScratchRef = useRef<() => void>(() => undefined);
   const symbolAudioRef = useRef<SymbolAudioState>({ ctx: null });
@@ -890,7 +1066,8 @@ export function ScratchPrototype() {
   // button that opens this sheet.
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
-  const [desktopSettingsTab, setDesktopSettingsTab] = useState<DesktopSettingsTab>("scratch-zoom");
+  const [desktopSettingsTab, setDesktopSettingsTab] =
+    useState<DesktopSettingsTab>("scratch-zoom");
 
   function clearGameResultTimer() {
     if (gameResultTimerRef.current !== null) {
@@ -933,9 +1110,19 @@ export function ScratchPrototype() {
       const bottomVideo = bottomVideoRef.current;
       const foregroundVideo = foregroundVideoRef.current;
       const trackedMeshNow = trackedMeshRef.current;
-      const videoTime = bottomVideo?.currentTime ?? time;
-      const trackedSample = trackedMeshNow ? sampleTrackedMesh(trackedMeshNow, videoTime) : null;
+      // Sample the mesh on the FOREGROUND clock — the mesh was tracked from the
+      // foreground (performer) clip, so this keeps scratch holes glued to the
+      // body regardless of any residual drift between the two free-running
+      // videos. The bottom video is just the revealed image underneath, where a
+      // few frames of offset is invisible. Fall back to the bottom clock, then
+      // wall-clock, before either video has a valid currentTime.
+      const meshTime =
+        foregroundVideo?.currentTime ?? bottomVideo?.currentTime ?? time;
+      const trackedSample = trackedMeshNow
+        ? sampleTrackedMesh(trackedMeshNow, meshTime)
+        : null;
       trackedSampleRef.current = trackedSample;
+      const videoTime = bottomVideo?.currentTime ?? time;
 
       // Subtle chest-follow camera: pan toward keeping the chest anchor at its
       // target framing point, clamped + smoothed.
@@ -943,38 +1130,60 @@ export function ScratchPrototype() {
       let targetCamX = 0;
       let targetCamY = 0;
       if (trackedSample) {
-        const chest = sampleMeshUvToWorld(trackedSample, CHEST_ANCHOR_UV.x, CHEST_ANCHOR_UV.y);
+        const chest = sampleMeshUvToWorld(
+          trackedSample,
+          CHEST_ANCHOR_UV.x,
+          CHEST_ANCHOR_UV.y,
+        );
         const targetPx = CANVAS_WIDTH * CHEST_TARGET_UV.x;
         const targetPy = CANVAS_HEIGHT * CHEST_TARGET_UV.y;
         const shiftX = (targetPx - chest.x) * CHEST_FOLLOW_STRENGTH;
         const shiftY = (targetPy - chest.y) * CHEST_FOLLOW_STRENGTH;
-        targetCamX = clampValue(shiftX / (CANVAS_WIDTH / 2), -CHEST_CAM_MAX, CHEST_CAM_MAX);
-        targetCamY = clampValue(-shiftY / (CANVAS_HEIGHT / 2), -CHEST_CAM_MAX, CHEST_CAM_MAX);
+        targetCamX = clampValue(
+          shiftX / (CANVAS_WIDTH / 2),
+          -CHEST_CAM_MAX,
+          CHEST_CAM_MAX,
+        );
+        targetCamY = clampValue(
+          -shiftY / (CANVAS_HEIGHT / 2),
+          -CHEST_CAM_MAX,
+          CHEST_CAM_MAX,
+        );
       }
       camera.x += (targetCamX - camera.x) * CHEST_SMOOTH;
       camera.y += (targetCamY - camera.y) * CHEST_SMOOTH;
 
       const autoSettings = autoScratchRef.current;
-      if (autoSettings.enabled && trackedSample && gameResultPendingRef.current === null) {
+      if (
+        autoSettings.enabled &&
+        trackedSample &&
+        gameResultPendingRef.current === null
+      ) {
         const path = autoPathRef.current;
         if (path.length > 0 && autoPathIndexRef.current < path.length) {
           autoPathProgressRef.current += autoSettings.speed * dt;
           let scratched = 0;
           while (
-            autoPathProgressRef.current >= 1
-            && autoPathIndexRef.current < path.length
-            && scratched < AUTO_SCRATCH_MAX_PER_FRAME
+            autoPathProgressRef.current >= 1 &&
+            autoPathIndexRef.current < path.length &&
+            scratched < AUTO_SCRATCH_MAX_PER_FRAME
           ) {
             autoPathProgressRef.current -= 1;
             const pt = path[autoPathIndexRef.current];
             const worldPos = sampleMeshUvToWorld(trackedSample, pt.x, pt.y);
-            applyScratchAtUvRef.current(pt.x, pt.y, AUTO_SCRATCH_RADIUS, worldPos);
+            applyScratchAtUvRef.current(
+              pt.x,
+              pt.y,
+              AUTO_SCRATCH_RADIUS,
+              worldPos,
+            );
             autoPathIndexRef.current += 1;
             scratched += 1;
           }
         }
 
-        const pathDone = path.length === 0 || autoPathIndexRef.current >= path.length;
+        const pathDone =
+          path.length === 0 || autoPathIndexRef.current >= path.length;
         const sampleCount = revealSamplesRef.current.length;
         const garmentComplete = isGarmentFullyRevealed(
           progressRef.current,
@@ -986,26 +1195,42 @@ export function ScratchPrototype() {
           const samples = revealSamplesRef.current;
           const revealed = revealedRef.current;
           let filled = 0;
-          for (let i = 0; i < samples.length && filled < AUTO_SCRATCH_FILL_BATCH; i += 1) {
+          for (
+            let i = 0;
+            i < samples.length && filled < AUTO_SCRATCH_FILL_BATCH;
+            i += 1
+          ) {
             if (revealed[i]) continue;
             const pt = samples[i];
             const worldPos = sampleMeshUvToWorld(trackedSample, pt.x, pt.y);
-            applyScratchAtUvRef.current(pt.x, pt.y, AUTO_SCRATCH_RADIUS, worldPos);
+            applyScratchAtUvRef.current(
+              pt.x,
+              pt.y,
+              AUTO_SCRATCH_RADIUS,
+              worldPos,
+            );
             filled += 1;
           }
         }
       }
 
-      if (bottomVideo && foregroundVideo && bottomVideo.readyState >= 2 && foregroundVideo.readyState >= 1) {
+      if (
+        bottomVideo &&
+        foregroundVideo &&
+        bottomVideo.readyState >= 2 &&
+        foregroundVideo.readyState >= 1
+      ) {
         syncVideoTime(bottomVideo, foregroundVideo);
       }
 
       if (bottomVideo) {
         const now = performance.now();
-        const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
+        const nextDuration =
+          bottomVideo.duration || uiStateRef.current.duration;
         const nextPaused = bottomVideo.paused;
         const shouldUpdateUi =
-          now - uiStateRef.current.lastUpdatedAt >= UI_STATE_UPDATE_INTERVAL_MS ||
+          now - uiStateRef.current.lastUpdatedAt >=
+            UI_STATE_UPDATE_INTERVAL_MS ||
           nextPaused !== uiStateRef.current.isPaused ||
           Math.abs(videoTime - uiStateRef.current.currentTime) > 1;
 
@@ -1024,12 +1249,14 @@ export function ScratchPrototype() {
 
       const sampleCount = revealSamplesRef.current.length;
       const autoMode = autoScratchRef.current.enabled;
-      const hideForeground = claimedRef.current || isGarmentFullyRevealed(
-        progressRef.current,
-        revealedCountRef.current,
-        sampleCount,
-        autoMode,
-      );
+      const hideForeground =
+        claimedRef.current ||
+        isGarmentFullyRevealed(
+          progressRef.current,
+          revealedCountRef.current,
+          sampleCount,
+          autoMode,
+        );
       if (hideForeground && !claimedRef.current) {
         claimedRef.current = true;
         setClaimed(true);
@@ -1043,7 +1270,35 @@ export function ScratchPrototype() {
         showMeshRef.current,
         camera,
         hideForeground,
+        chromaKeyRef.current,
       );
+
+      const bodyPoints = trackedMeshNow?.symbolPoints;
+      const stage = stageRef.current;
+      const canvas = canvasRef.current;
+      if (
+        bodyPoints &&
+        bodyPoints.length === SYMBOL_SLOT_COUNT &&
+        trackedSample &&
+        stage &&
+        canvas
+      ) {
+        for (let index = 0; index < SYMBOL_SLOT_COUNT; index += 1) {
+          const marker = bodyMarkerRefs.current[index];
+          if (!marker) continue;
+          const revealed = revealedPointsRef.current[index];
+          const world = sampleMeshUvToWorld(
+            trackedSample,
+            bodyPoints[index].u,
+            bodyPoints[index].v,
+          );
+          const stagePos = worldPointToStage(world, canvas, stage, camera);
+          marker.style.display = revealed ? "flex" : "none";
+          marker.style.transform = `translate(${stagePos.x}px, ${stagePos.y}px)`;
+          marker.classList.toggle("is-revealed", revealed);
+        }
+      }
+
       animationId = requestAnimationFrame(render);
     };
 
@@ -1052,7 +1307,88 @@ export function ScratchPrototype() {
       cancelAnimationFrame(animationId);
       glRendererRef.current = null;
     };
+    // Re-init when the player stage mounts after the girl picker (canvas is absent until then).
+  }, [showModelPicker]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    Promise.all([loadCards(), fetchModels()])
+      .then(([loaded, loadedModels]) => {
+        if (isCancelled) return;
+        setCards(loaded);
+        setModels(loadedModels);
+        setCardsReady(true);
+        const params = new URLSearchParams(window.location.search);
+        const fromUrl = params.get("card")?.trim() || "";
+        let modelFromUrl = params.get("model")?.trim() || "";
+        if (fromUrl) {
+          const cardModel = loaded.find((entry) => entry.id === fromUrl)?.model_id?.trim() || "";
+          // Card wins over a stale ?model= so Shine never opens Brazilian.
+          if (cardModel) modelFromUrl = cardModel;
+        }
+        if (!modelFromUrl) {
+          setActiveModelId("");
+          setSelectedCardId("");
+          return;
+        }
+        const ordered = playlistCardsForModel(loaded, modelFromUrl);
+        setActiveModelId(modelFromUrl);
+        if (ordered.length === 0) {
+          setSelectedCardId("");
+          return;
+        }
+        const startId =
+          fromUrl && ordered.some((entry) => entry.id === fromUrl)
+            ? fromUrl
+            : ordered[0]!.id;
+        setSelectedCardId(startId);
+      })
+      .catch(() => undefined);
+    return () => {
+      isCancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !cardsReady) return;
+    const url = new URL(window.location.href);
+    if (activeModelId) url.searchParams.set("model", activeModelId);
+    else url.searchParams.delete("model");
+    if (selectedCardId && modelCards.some((entry) => entry.id === selectedCardId)) {
+      url.searchParams.set("card", selectedCardId);
+    } else {
+      url.searchParams.delete("card");
+    }
+    url.searchParams.delete("playlist");
+    const next = `${url.pathname}${url.searchParams.toString() ? `?${url.searchParams}` : ""}`;
+    window.history.replaceState(null, "", next);
+  }, [activeModelId, cardsReady, modelCards, selectedCardId]);
+
+  useEffect(() => {
+    setCompletedCardIds([]);
+    completedCardIdsRef.current = [];
+  }, [activeModelId]);
+
+  useEffect(() => {
+    if (!cardsReady || !activeModelId) return;
+    if (modelCards.length === 0) {
+      if (selectedCardId) setSelectedCardId("");
+      return;
+    }
+    const belongs =
+      Boolean(selectedCardId) &&
+      modelCards.some((entry) => entry.id === selectedCardId) &&
+      !completedCardIds.includes(selectedCardId);
+    if (belongs) return;
+    setSelectedCardId(remainingCards[0]?.id ?? modelCards[0]?.id ?? "");
+  }, [
+    activeModelId,
+    cardsReady,
+    completedCardIds,
+    modelCards,
+    remainingCards,
+    selectedCardId,
+  ]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1063,7 +1399,14 @@ export function ScratchPrototype() {
         if (isCancelled || !data) return;
         const files = parseMeshIndex(data);
         setMeshFiles(files);
-        setSelectedMeshFile((currentFile) => currentFile || (files.includes(DEFAULT_MESH_FILE) ? DEFAULT_MESH_FILE : files[0]) || "");
+        setSelectedMeshFile(
+          (currentFile) =>
+            currentFile ||
+            (files.includes(DEFAULT_MESH_FILE)
+              ? DEFAULT_MESH_FILE
+              : files[0]) ||
+            "",
+        );
       })
       .catch(() => undefined);
 
@@ -1080,7 +1423,10 @@ export function ScratchPrototype() {
 
     let isCancelled = false;
 
-    fetch(`${MESH_DIRECTORY_SRC}/${encodeURIComponent(selectedMeshFile)}?v=${meshReloadToken}`, { cache: "no-store" })
+    fetch(
+      `${MESH_DIRECTORY_SRC}/${encodeURIComponent(selectedMeshFile)}?v=${meshReloadToken}`,
+      { cache: "no-store" },
+    )
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (isCancelled || !data) return;
@@ -1096,21 +1442,37 @@ export function ScratchPrototype() {
   // Switching cards: load that card's mesh and clear scratches/progress so holes
   // from the previous clip don't carry over onto the new fabric.
   useEffect(() => {
+    if (!card) {
+      setSelectedMeshFile("");
+      return;
+    }
     setSelectedMeshFile(card.mesh);
     marksRef.current = [];
     glRendererRef.current?.clearScratch();
+    glRendererRef.current?.clearFlakes();
     glRendererRef.current?.resetForeground();
+    revealSamplesRef.current = [];
+    revealedRef.current = [];
+    revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
     resetGameOutcome();
     revealedSymbolsRef.current = 0;
+    revealedPointsRef.current = Array.from(
+      { length: SYMBOL_SLOT_COUNT },
+      () => false,
+    );
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
     setSessionSymbols(buildSessionSymbols());
     setProgress(0);
     setClaimed(false);
     setRevealedSymbols(0);
     setFlyingCoins([]);
+    setGameResult(null);
+    setAutoScratch((current) => ({ ...current, enabled: false }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCardId]);
+  }, [selectedCardId, card?.id, card?.mesh]);
 
   // Rebuild the reveal sample grid whenever the mesh changes, recomputing which
   // samples are already revealed from the current marks (usually empty after a
@@ -1128,15 +1490,25 @@ export function ScratchPrototype() {
     const next = samples.length ? revealedCountRef.current / samples.length : 0;
     progressRef.current = next;
     setProgress(next);
-    const nextSymbolCount = revealedSymbolCount(next, autoScratchRef.current.enabled);
+    const hasBodySymbols = trackedMesh?.symbolPoints?.length === SYMBOL_SLOT_COUNT;
+    const nextSymbolCount = hasBodySymbols
+      ? revealedPointsRef.current.filter(Boolean).length
+      : revealedSymbolCount(next, autoScratchRef.current.enabled);
     revealedSymbolsRef.current = nextSymbolCount;
     setRevealedSymbols(nextSymbolCount);
-    const nextClaimed = isGarmentFullyRevealed(
-      next,
-      revealedCountRef.current,
-      samples.length,
-      autoScratchRef.current.enabled,
-    );
+    if (hasBodySymbols && nextSymbolCount < SYMBOL_SLOT_COUNT) {
+      setAutoScratch((current) =>
+        current.enabled ? { ...current, enabled: false } : current,
+      );
+    }
+    const nextClaimed = hasBodySymbols
+      ? false
+      : isGarmentFullyRevealed(
+          next,
+          revealedCountRef.current,
+          samples.length,
+          autoScratchRef.current.enabled,
+        );
     claimedRef.current = nextClaimed;
     setClaimed(nextClaimed);
     if (nextClaimed) tryResolveGameRef.current();
@@ -1151,30 +1523,38 @@ export function ScratchPrototype() {
   useEffect(() => {
     const bottomVideo = bottomVideoRef.current;
     const foregroundVideo = foregroundVideoRef.current;
-    if (!bottomVideo || !foregroundVideo) return;
+    if (!bottomVideo || !foregroundVideo || !card) return;
 
-    const onBottomCanPlay = () => {
+    // New card always starts playing — don't inherit a paused flag from the
+    // previous clip (canplay often fires while the new src is still paused).
+    uiStateRef.current = { ...uiStateRef.current, isPaused: false };
+    setIsPaused(false);
+    bottomVideo.currentTime = 0;
+    foregroundVideo.currentTime = 0;
+
+    const kickPlayback = () => {
       const nextDuration = bottomVideo.duration || uiStateRef.current.duration;
       uiStateRef.current = {
         ...uiStateRef.current,
         duration: nextDuration,
-        isPaused: bottomVideo.paused,
+        isPaused: false,
       };
       setDuration(nextDuration);
       void bottomVideo.play().catch(() => undefined);
-    };
-    const onForegroundCanPlay = () => {
       void foregroundVideo.play().catch(() => undefined);
     };
 
-    bottomVideo.addEventListener("canplay", onBottomCanPlay);
-    foregroundVideo.addEventListener("canplay", onForegroundCanPlay);
+    bottomVideo.addEventListener("canplay", kickPlayback);
+    foregroundVideo.addEventListener("canplay", kickPlayback);
+    if (bottomVideo.readyState >= 2 || foregroundVideo.readyState >= 2) {
+      kickPlayback();
+    }
 
     return () => {
-      bottomVideo.removeEventListener("canplay", onBottomCanPlay);
-      foregroundVideo.removeEventListener("canplay", onForegroundCanPlay);
+      bottomVideo.removeEventListener("canplay", kickPlayback);
+      foregroundVideo.removeEventListener("canplay", kickPlayback);
     };
-  }, []);
+  }, [card?.id]);
 
   // Mobile browsers (notably iOS Safari) will suspend a second, simultaneously
   // playing <video> after a few seconds to save power — which here drops the
@@ -1187,7 +1567,8 @@ export function ScratchPrototype() {
       const bottomVideo = bottomVideoRef.current;
       const foregroundVideo = foregroundVideoRef.current;
       if (bottomVideo?.paused) void bottomVideo.play().catch(() => undefined);
-      if (foregroundVideo?.paused) void foregroundVideo.play().catch(() => undefined);
+      if (foregroundVideo?.paused)
+        void foregroundVideo.play().catch(() => undefined);
     };
 
     const intervalId = window.setInterval(keepPlaying, 1000);
@@ -1210,12 +1591,24 @@ export function ScratchPrototype() {
   }, [autoScratch]);
 
   useEffect(() => {
-    localStorage.setItem(SOUND_STORAGE_KEY, JSON.stringify({ enabled: soundEnabled }));
+    localStorage.setItem(
+      SOUND_STORAGE_KEY,
+      JSON.stringify({ enabled: soundEnabled }),
+    );
   }, [soundEnabled]);
 
-  function syncScratchZoomTransition(canvas: HTMLCanvasElement, settings = scratchZoomRef.current) {
-    canvas.style.setProperty("--scratch-zoom-duration", `${settings.durationMs}ms`);
-    canvas.style.setProperty("--scratch-zoom-easing", scratchZoomEasing(settings.bounce));
+  function syncScratchZoomTransition(
+    canvas: HTMLCanvasElement,
+    settings = scratchZoomRef.current,
+  ) {
+    canvas.style.setProperty(
+      "--scratch-zoom-duration",
+      `${settings.durationMs}ms`,
+    );
+    canvas.style.setProperty(
+      "--scratch-zoom-easing",
+      scratchZoomEasing(settings.bounce),
+    );
   }
 
   useEffect(() => {
@@ -1228,9 +1621,32 @@ export function ScratchPrototype() {
   }
 
   function updateAutoScratch(patch: Partial<AutoScratchSettings>) {
-    if (patch.enabled && soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
+    if (
+      patch.enabled &&
+      useBodySymbolsRef.current &&
+      revealedSymbolsRef.current < SYMBOL_SLOT_COUNT
+    ) {
+      return;
+    }
+    if (patch.enabled && soundEnabledRef.current)
+      ensureSymbolAudio(symbolAudioRef.current);
     setAutoScratch((current) => ({ ...current, ...patch }));
   }
+
+  function beginFinishAutoScratch() {
+    autoPathIndexRef.current = 0;
+    autoPathProgressRef.current = 0;
+    if (soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
+    // Sync the ref immediately — setState alone would leave this frame's auto path off.
+    autoScratchRef.current = { ...autoScratchRef.current, enabled: true };
+    setAutoScratch((current) =>
+      current.enabled ? current : { ...current, enabled: true },
+    );
+  }
+
+  const symbolsHuntComplete =
+    useBodySymbols && revealedSymbols >= SYMBOL_SLOT_COUNT;
+  const autoScratchLocked = useBodySymbols && !symbolsHuntComplete;
 
   function updateSoundEnabled(enabled: boolean) {
     if (enabled) ensureSymbolAudio(symbolAudioRef.current);
@@ -1238,19 +1654,29 @@ export function ScratchPrototype() {
   }
 
   function isPhoneLayout() {
-    return typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
+    return (
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 700px)").matches
+    );
   }
 
   function resetScratch() {
     marksRef.current = [];
+    lastScratchWorldRef.current = null;
     glRendererRef.current?.clearScratch();
     glRendererRef.current?.clearFlakes();
-    revealedRef.current = new Array(revealSamplesRef.current.length).fill(false);
+    revealedRef.current = new Array(revealSamplesRef.current.length).fill(
+      false,
+    );
     revealedCountRef.current = 0;
     progressRef.current = 0;
     claimedRef.current = false;
     resetGameOutcome();
     revealedSymbolsRef.current = 0;
+    revealedPointsRef.current = Array.from(
+      { length: SYMBOL_SLOT_COUNT },
+      () => false,
+    );
     autoPathIndexRef.current = 0;
     autoPathProgressRef.current = 0;
     setSessionSymbols(buildSessionSymbols());
@@ -1258,20 +1684,58 @@ export function ScratchPrototype() {
     setClaimed(false);
     setRevealedSymbols(0);
     setFlyingCoins([]);
+    setAutoScratch((current) => ({ ...current, enabled: false }));
   }
   resetScratchRef.current = resetScratch;
 
-  function tryResolveGame() {
-    if (gameResultPendingRef.current !== null) return;
-    if (revealedSymbolsRef.current < SYMBOL_SLOT_COUNT) return;
-    const autoMode = autoScratchRef.current.enabled;
-    const sampleCount = revealSamplesRef.current.length;
-    if (!isGarmentFullyRevealed(progressRef.current, revealedCountRef.current, sampleCount, autoMode)) {
+  function advanceAfterScratch() {
+    const finishedId = selectedCardId;
+    if (!finishedId || completedCardIdsRef.current.includes(finishedId)) return;
+    const nextCompleted = [...completedCardIdsRef.current, finishedId];
+    completedCardIdsRef.current = nextCompleted;
+    setCompletedCardIds(nextCompleted);
+    resetGameOutcome();
+    setClaimed(false);
+    claimedRef.current = false;
+    const nextCard = modelCards.find(
+      (entry) => entry.id !== finishedId && !nextCompleted.includes(entry.id),
+    );
+    if (nextCard) {
+      setSelectedCardId(nextCard.id);
       return;
     }
-    const outcome: GameResult = evaluateSessionWin(sessionSymbolsRef.current) ? "win" : "lose";
+    setSelectedCardId("");
+  }
+  advanceAfterScratchRef.current = advanceAfterScratch;
+
+  function tryResolveGame() {
+    if (gameResultPendingRef.current !== null) return;
+    const autoMode = autoScratchRef.current.enabled;
+    const sampleCount = revealSamplesRef.current.length;
+    if (
+      !isGarmentFullyRevealed(
+        progressRef.current,
+        revealedCountRef.current,
+        sampleCount,
+        autoMode,
+      )
+    ) {
+      return;
+    }
+    // Symbol hunt cards wait for all symbols; plain scratch cards advance on full reveal.
+    if (
+      useBodySymbolsRef.current &&
+      revealedSymbolsRef.current < SYMBOL_SLOT_COUNT
+    ) {
+      return;
+    }
+    const outcome: GameResult = evaluateSessionWin(sessionSymbolsRef.current)
+      ? "win"
+      : "lose";
     gameResultPendingRef.current = outcome;
-    setAutoScratch((current) => (current.enabled ? { ...current, enabled: false } : current));
+    setAutoScratch((current) =>
+      current.enabled ? { ...current, enabled: false } : current,
+    );
     const overlayDelayMs = playGameOutcomeSound(
       symbolAudioRef.current,
       outcome,
@@ -1288,7 +1752,8 @@ export function ScratchPrototype() {
 
   // On phones the canvas is centered with a translate that fills the screen, so
   // the magnify scale has to be composed on top of it rather than replacing it.
-  const canvasBaseTransform = () => (isPhoneLayout() ? "translate(-50%, -50%) " : "");
+  const canvasBaseTransform = () =>
+    isPhoneLayout() ? "translate(-50%, -50%) " : "";
 
   function applyScratchZoom(point: Vec2) {
     const settings = scratchZoomRef.current;
@@ -1322,11 +1787,12 @@ export function ScratchPrototype() {
     // Invert the chest-follow camera (overscan + clip-space pan) so a tap maps to
     // the reference-frame fabric coordinate the mesh/holes live in.
     const cam = cameraRef.current;
-    const refClipX = (presentX / CANVAS_WIDTH * 2 - 1 - cam.x) / PRESENT_ZOOM;
-    const refClipY = (1 - presentY / CANVAS_HEIGHT * 2 - cam.y) / PRESENT_ZOOM;
+    const refClipX = ((presentX / CANVAS_WIDTH) * 2 - 1 - cam.x) / PRESENT_ZOOM;
+    const refClipY =
+      (1 - (presentY / CANVAS_HEIGHT) * 2 - cam.y) / PRESENT_ZOOM;
     return {
-      x: (refClipX + 1) / 2 * CANVAS_WIDTH,
-      y: (1 - refClipY) / 2 * CANVAS_HEIGHT,
+      x: ((refClipX + 1) / 2) * CANVAS_WIDTH,
+      y: ((1 - refClipY) / 2) * CANVAS_HEIGHT,
     };
   }
 
@@ -1342,19 +1808,14 @@ export function ScratchPrototype() {
     const canvas = canvasRef.current;
     const stage = stageRef.current;
     if (!canvas || !stage) return null;
-    const canvasRect = canvas.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
-    const cam = cameraRef.current;
-    const refClipX = (worldPoint.x / CANVAS_WIDTH) * 2 - 1;
-    const refClipY = 1 - (worldPoint.y / CANVAS_HEIGHT) * 2;
-    const presentX = ((refClipX * PRESENT_ZOOM + cam.x) + 1) / 2 * CANVAS_WIDTH;
-    const presentY = (1 - (refClipY * PRESENT_ZOOM + cam.y)) / 2 * CANVAS_HEIGHT;
-    const clientX = canvasRect.left + (presentX / CANVAS_WIDTH) * canvasRect.width;
-    const clientY = canvasRect.top + (presentY / CANVAS_HEIGHT) * canvasRect.height;
-    return { x: clientX - stageRect.left, y: clientY - stageRect.top };
+    return worldPointToStage(worldPoint, canvas, stage, cameraRef.current);
   }
 
-  function spawnSymbolCoins(prevCount: number, nextCount: number, worldPoint?: Vec2 | null) {
+  function spawnSymbolCoins(
+    prevCount: number,
+    nextCount: number,
+    worldPoint?: Vec2 | null,
+  ) {
     const stage = stageRef.current;
     if (!stage || nextCount <= prevCount) return;
     const stageRect = stage.getBoundingClientRect();
@@ -1362,7 +1823,8 @@ export function ScratchPrototype() {
     const autoMode = autoScratchRef.current.enabled;
     let originX: number;
     let originY: number;
-    const autoOrigin = autoMode && worldPoint ? worldToStagePoint(worldPoint) : null;
+    const autoOrigin =
+      autoMode && worldPoint ? worldToStagePoint(worldPoint) : null;
     if (autoOrigin) {
       originX = autoOrigin.x;
       originY = autoOrigin.y;
@@ -1406,39 +1868,99 @@ export function ScratchPrototype() {
     setFlyingCoins((current) => current.filter((coin) => coin.id !== id));
   }
 
-  function applyScratchAtUv(u: number, v: number, radius: number, worldPoint?: Vec2 | null) {
+  function applyScratchAtUv(
+    u: number,
+    v: number,
+    radius: number,
+    worldPoint?: Vec2 | null,
+    finalize = true,
+  ) {
     if (gameResultPendingRef.current !== null) return;
 
     marksRef.current = [...marksRef.current, { u, v, radius }].slice(-180);
     glRendererRef.current?.paintScratch(u, v, radius);
 
-    if (autoScratchRef.current.flakes && worldPoint) {
-      glRendererRef.current?.spawnFlakes(worldPoint.x, worldPoint.y);
-    }
-
     const samples = revealSamplesRef.current;
     const revealed = revealedRef.current;
     for (let i = 0; i < samples.length; i += 1) {
       if (revealed[i]) continue;
-      const distance = Math.hypot((u - samples[i].x) / radius, (v - samples[i].y) / radius);
+      const distance = Math.hypot(
+        (u - samples[i].x) / radius,
+        (v - samples[i].y) / radius,
+      );
       if (distance <= 1) {
         revealed[i] = true;
         revealedCountRef.current += 1;
       }
     }
-    const nextProgress = samples.length ? revealedCountRef.current / samples.length : 0;
+    if (!finalize) return;
+
+    if (autoScratchRef.current.flakes && worldPoint) {
+      glRendererRef.current?.spawnFlakes(worldPoint.x, worldPoint.y);
+    }
+
+    const nextProgress = samples.length
+      ? revealedCountRef.current / samples.length
+      : 0;
     progressRef.current = nextProgress;
     setProgress(nextProgress);
     const autoMode = autoScratchRef.current.enabled;
-    const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
-    if (nextSymbolCount !== revealedSymbolsRef.current) {
-      const prevCount = revealedSymbolsRef.current;
-      revealedSymbolsRef.current = nextSymbolCount;
-      setRevealedSymbols(nextSymbolCount);
-      playNewSymbolNotes(symbolAudioRef.current, prevCount, nextSymbolCount, soundEnabledRef.current);
-      spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
+    if (useBodySymbolsRef.current && trackedMeshRef.current?.symbolPoints) {
+      const bodyPoints = trackedMeshRef.current.symbolPoints;
+      let changed = false;
+      for (let index = 0; index < bodyPoints.length; index += 1) {
+        if (revealedPointsRef.current[index]) continue;
+        const distance = Math.hypot(
+          u - bodyPoints[index].u,
+          v - bodyPoints[index].v,
+        );
+        if (distance <= SYMBOL_REVEAL_UV_RADIUS) {
+          revealedPointsRef.current[index] = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        const nextSymbolCount = revealedPointsRef.current.filter(Boolean).length;
+        const prevCount = revealedSymbolsRef.current;
+        revealedSymbolsRef.current = nextSymbolCount;
+        setRevealedSymbols(nextSymbolCount);
+        playNewSymbolNotes(
+          symbolAudioRef.current,
+          prevCount,
+          nextSymbolCount,
+          soundEnabledRef.current,
+        );
+        if (nextSymbolCount >= SYMBOL_SLOT_COUNT) {
+          beginFinishAutoScratch();
+        }
+      }
+    } else {
+      const nextSymbolCount = revealedSymbolCount(nextProgress, autoMode);
+      if (nextSymbolCount !== revealedSymbolsRef.current) {
+        const prevCount = revealedSymbolsRef.current;
+        revealedSymbolsRef.current = nextSymbolCount;
+        setRevealedSymbols(nextSymbolCount);
+        playNewSymbolNotes(
+          symbolAudioRef.current,
+          prevCount,
+          nextSymbolCount,
+          soundEnabledRef.current,
+        );
+        spawnSymbolCoins(prevCount, nextSymbolCount, worldPoint);
+      }
     }
-    if (isGarmentFullyRevealed(nextProgress, revealedCountRef.current, samples.length, autoMode)) {
+    const canClaimGarment =
+      !useBodySymbolsRef.current ||
+      revealedSymbolsRef.current >= SYMBOL_SLOT_COUNT;
+    if (
+      canClaimGarment &&
+      isGarmentFullyRevealed(
+        nextProgress,
+        revealedCountRef.current,
+        samples.length,
+        autoMode,
+      )
+    ) {
       claimedRef.current = true;
       setClaimed(true);
     }
@@ -1452,10 +1974,35 @@ export function ScratchPrototype() {
 
     const trackedSample = trackedSampleRef.current;
     if (!trackedSample) return;
-    const uv = trackedWorldToUv(trackedSample, point);
-    if (!uv) return;
 
-    applyScratchAtUv(uv.x, uv.y, SCRATCH_RADIUS, point);
+    const last = lastScratchWorldRef.current;
+    const strokePoints =
+      last !== null
+        ? densifyStrokeSegment(
+            last,
+            point,
+            MANUAL_SCRATCH_PATH_STEP,
+            MANUAL_SCRATCH_MAX_POINTS,
+          )
+        : [point];
+
+    let applied = false;
+    for (let i = 0; i < strokePoints.length; i += 1) {
+      const strokePoint = strokePoints[i];
+      const uv = trackedWorldToUv(trackedSample, strokePoint);
+      if (!uv) continue;
+      const isLast = i === strokePoints.length - 1;
+      applyScratchAtUv(
+        uv.x,
+        uv.y,
+        SCRATCH_RADIUS,
+        isLast ? point : null,
+        isLast,
+      );
+      applied = true;
+    }
+
+    if (applied) lastScratchWorldRef.current = point;
   }
 
   function setVideoTime(time: number) {
@@ -1464,8 +2011,16 @@ export function ScratchPrototype() {
     const nextTime = Math.max(0, Math.min(duration || 0, time));
 
     if (bottomVideo) bottomVideo.currentTime = nextTime;
-    if (foregroundVideo && Number.isFinite(foregroundVideo.duration) && foregroundVideo.duration > 0 && bottomVideo) {
-      foregroundVideo.currentTime = foregroundTimeFromBottom(bottomVideo, foregroundVideo);
+    if (
+      foregroundVideo &&
+      Number.isFinite(foregroundVideo.duration) &&
+      foregroundVideo.duration > 0 &&
+      bottomVideo
+    ) {
+      foregroundVideo.currentTime = foregroundTimeFromBottom(
+        bottomVideo,
+        foregroundVideo,
+      );
     }
     uiStateRef.current = {
       ...uiStateRef.current,
@@ -1499,7 +2054,9 @@ export function ScratchPrototype() {
       <label className="checkbox-label">
         <input
           checked={scratchZoom.enabled}
-          onChange={(event) => updateScratchZoom({ enabled: event.currentTarget.checked })}
+          onChange={(event) =>
+            updateScratchZoom({ enabled: event.currentTarget.checked })
+          }
           type="checkbox"
         />
         Enable zoom while scratching
@@ -1510,7 +2067,9 @@ export function ScratchPrototype() {
           disabled={!scratchZoom.enabled}
           max={2}
           min={1}
-          onChange={(event) => updateScratchZoom({ scale: Number(event.currentTarget.value) })}
+          onChange={(event) =>
+            updateScratchZoom({ scale: Number(event.currentTarget.value) })
+          }
           step={0.05}
           type="range"
           value={scratchZoom.scale}
@@ -1522,7 +2081,9 @@ export function ScratchPrototype() {
           disabled={!scratchZoom.enabled}
           max={800}
           min={50}
-          onChange={(event) => updateScratchZoom({ durationMs: Number(event.currentTarget.value) })}
+          onChange={(event) =>
+            updateScratchZoom({ durationMs: Number(event.currentTarget.value) })
+          }
           step={10}
           type="range"
           value={scratchZoom.durationMs}
@@ -1532,7 +2093,9 @@ export function ScratchPrototype() {
         <input
           checked={scratchZoom.bounce}
           disabled={!scratchZoom.enabled}
-          onChange={(event) => updateScratchZoom({ bounce: event.currentTarget.checked })}
+          onChange={(event) =>
+            updateScratchZoom({ bounce: event.currentTarget.checked })
+          }
           type="checkbox"
         />
         Bounce easing
@@ -1557,10 +2120,19 @@ export function ScratchPrototype() {
   const autoScratchControls = (
     <fieldset className="scratch-zoom-settings">
       <legend>Auto scratch</legend>
+      {autoScratchLocked ? (
+        <p className="auto-scratch-hint">
+          Find all {SYMBOL_SLOT_COUNT} symbols on the dress first — auto scratch
+          finishes the reveal.
+        </p>
+      ) : null}
       <label className="checkbox-label">
         <input
           checked={autoScratch.enabled}
-          onChange={(event) => updateAutoScratch({ enabled: event.currentTarget.checked })}
+          disabled={autoScratchLocked}
+          onChange={(event) =>
+            updateAutoScratch({ enabled: event.currentTarget.checked })
+          }
           type="checkbox"
         />
         Enable auto scratch
@@ -1571,7 +2143,9 @@ export function ScratchPrototype() {
           disabled={!autoScratch.enabled}
           max={120}
           min={1}
-          onChange={(event) => updateAutoScratch({ speed: Number(event.currentTarget.value) })}
+          onChange={(event) =>
+            updateAutoScratch({ speed: Number(event.currentTarget.value) })
+          }
           step={1}
           type="range"
           value={autoScratch.speed}
@@ -1580,7 +2154,9 @@ export function ScratchPrototype() {
       <label className="checkbox-label">
         <input
           checked={autoScratch.flakes}
-          onChange={(event) => updateAutoScratch({ flakes: event.currentTarget.checked })}
+          onChange={(event) =>
+            updateAutoScratch({ flakes: event.currentTarget.checked })
+          }
           type="checkbox"
         />
         Flying flakes
@@ -1640,28 +2216,154 @@ export function ScratchPrototype() {
     </div>
   );
 
+  function openModel(modelId: string) {
+    const ordered = playlistCardsForModel(cards, modelId);
+    setCompletedCardIds([]);
+    completedCardIdsRef.current = [];
+    setSelectedCardId("");
+    setActiveModelId(modelId);
+    setSelectedCardId(ordered[0]?.id ?? "");
+  }
+
+  if (showModelPicker) {
+    const playableModels = models.filter(
+      (model) => playlistCardsForModel(cards, model.id).length > 0,
+    );
+    return (
+      <main className="app-shell home-picker">
+        <section className="home-picker-panel">
+          <p className="eyebrow">Sugar Scratchie</p>
+          <h1>Choose a girl</h1>
+          <p className="home-picker-copy">
+            Play only her motion cards, in the order you set on Models.
+          </p>
+          <div className="home-picker-grid">
+            {playableModels.map((model) => {
+              const count = playlistCardsForModel(cards, model.id).length;
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  className="home-picker-card"
+                  onClick={() => openModel(model.id)}
+                >
+                  <span className="home-picker-avatar">
+                    {model.avatar ? (
+                      <img alt="" src={model.avatar} />
+                    ) : (
+                      model.label.slice(0, 1)
+                    )}
+                  </span>
+                  <span className="home-picker-meta">
+                    <strong>{model.label}</strong>
+                    <span>
+                      {count} motion card{count === 1 ? "" : "s"}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {playableModels.length === 0 ? (
+            <p className="home-picker-empty">
+              No models with motion cards yet.{" "}
+              <a href="/dashboard/models">Go to Models</a>
+            </p>
+          ) : null}
+          <div className="home-picker-links">
+            <a href="/dashboard/models">Models</a>
+            <a href="/dashboard">Dashboard</a>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (!card) {
+    return (
+      <main className="app-shell home-picker">
+        <section className="home-picker-panel">
+          <p className="eyebrow">Sugar Scratchie</p>
+          <h1>{activeModel?.label ?? "No cards"}</h1>
+          <p className="home-picker-copy">
+            {playlistFinished
+              ? "All her motion cards are scratched — none left to repeat."
+              : "This girl has no motion cards yet."}
+          </p>
+          <div className="home-picker-links">
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                setActiveModelId("");
+                setSelectedCardId("");
+                setCompletedCardIds([]);
+                completedCardIdsRef.current = [];
+              }}
+            >
+              Choose another girl
+            </button>
+            <a href="/dashboard/models">Models</a>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <section className="prototype">
-        <div ref={stageRef} className={`stage${gameResult ? " is-game-over" : ""}`}>
-          <div
-            className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
-            aria-label="Game symbols"
-          >
-            {sessionSymbols.map((typeId, index) => (
-              <div
-                key={index}
-                ref={(el) => {
-                  symbolSlotRefs.current[index] = el;
-                }}
-                className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
-                title={index < revealedSymbols ? SYMBOL_TYPES[typeId]?.label : undefined}
-              >
-                {index < revealedSymbols ? <GameSymbolIcon typeId={typeId} /> : null}
-              </div>
-            ))}
-          </div>
-          {flyingCoins.map((coin) => (
+        <div
+          ref={stageRef}
+          className={`stage${gameResult ? " is-game-over" : ""}`}
+        >
+          {typeof window !== "undefined" &&
+          new URLSearchParams(window.location.search).has("debug") ? (
+            <DebugHud />
+          ) : null}
+          {!useBodySymbols ? (
+            <div
+              className={`symbol-bar${revealedSymbols >= SYMBOL_SLOT_COUNT ? " is-symbols-complete" : ""}${claimed ? " is-fully-revealed" : ""}`}
+              aria-label="Game symbols"
+            >
+              {sessionSymbols.map((typeId, index) => (
+                <div
+                  key={index}
+                  ref={(el) => {
+                    symbolSlotRefs.current[index] = el;
+                  }}
+                  className={`symbol-slot${index < revealedSymbols ? " is-revealed" : ""}`}
+                  title={
+                    index < revealedSymbols
+                      ? SYMBOL_TYPES[typeId]?.label
+                      : undefined
+                  }
+                >
+                  {index < revealedSymbols ? (
+                    <GameSymbolIcon typeId={typeId} />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {useBodySymbols
+            ? sessionSymbols.map((typeId, index) => (
+                <div
+                  key={`body-symbol-${index}`}
+                  ref={(el) => {
+                    bodyMarkerRefs.current[index] = el;
+                  }}
+                  className="body-symbol-marker"
+                  style={{ display: "none" }}
+                >
+                  <span className="body-symbol-icon">
+                    <GameSymbolIcon typeId={typeId} size={42} />
+                  </span>
+                </div>
+              ))
+            : null}
+          {!useBodySymbols
+            ? flyingCoins.map((coin) => (
             <div
               key={coin.id}
               className="flying-coin"
@@ -1682,8 +2384,10 @@ export function ScratchPrototype() {
             >
               <GameSymbolIcon typeId={coin.typeId} />
             </div>
-          ))}
+          ))
+            : null}
           <video
+            key={`bottom-${card.id}`}
             ref={bottomVideoRef}
             className="source-video"
             autoPlay
@@ -1694,6 +2398,7 @@ export function ScratchPrototype() {
             src={card.bottom}
           />
           <video
+            key={`foreground-${card.id}`}
             ref={foregroundVideoRef}
             className="source-video"
             autoPlay
@@ -1708,13 +2413,20 @@ export function ScratchPrototype() {
             width={CANVAS_WIDTH}
             height={CANVAS_HEIGHT}
             onPointerDown={(event) => {
-              if (soundEnabledRef.current) ensureSymbolAudio(symbolAudioRef.current);
+              if (soundEnabledRef.current)
+                ensureSymbolAudio(symbolAudioRef.current);
               const bottomVideo = bottomVideoRef.current;
               const foregroundVideo = foregroundVideoRef.current;
-              if (bottomVideo?.paused) void bottomVideo.play().catch(() => undefined);
-              if (foregroundVideo?.paused) void foregroundVideo.play().catch(() => undefined);
+              if (bottomVideo?.paused)
+                void bottomVideo.play().catch(() => undefined);
+              if (foregroundVideo?.paused)
+                void foregroundVideo.play().catch(() => undefined);
               drawingRef.current = true;
-              lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
+              lastScratchWorldRef.current = null;
+              lastPointerClientRef.current = {
+                x: event.clientX,
+                y: event.clientY,
+              };
               const point = getCanvasPoint(event.clientX, event.clientY);
               hoverPointRef.current = point;
               event.currentTarget.setPointerCapture(event.pointerId);
@@ -1722,22 +2434,31 @@ export function ScratchPrototype() {
               addScratch(event.clientX, event.clientY);
             }}
             onPointerMove={(event) => {
-              lastPointerClientRef.current = { x: event.clientX, y: event.clientY };
-              hoverPointRef.current = getCanvasPoint(event.clientX, event.clientY);
+              lastPointerClientRef.current = {
+                x: event.clientX,
+                y: event.clientY,
+              };
+              hoverPointRef.current = getCanvasPoint(
+                event.clientX,
+                event.clientY,
+              );
               if (!drawingRef.current) return;
               addScratch(event.clientX, event.clientY);
             }}
             onPointerUp={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               clearScratchZoom();
             }}
             onPointerLeave={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
             onPointerCancel={() => {
               drawingRef.current = false;
+              lastScratchWorldRef.current = null;
               hoverPointRef.current = null;
               clearScratchZoom();
             }}
@@ -1763,7 +2484,9 @@ export function ScratchPrototype() {
             <button
               type="button"
               className={`mobile-reset mobile-controls-toggle${mobileControlsOpen ? " is-open" : ""}`}
-              aria-label={mobileControlsOpen ? "Hide controls" : "Show controls"}
+              aria-label={
+                mobileControlsOpen ? "Hide controls" : "Show controls"
+              }
               aria-expanded={mobileControlsOpen}
               onClick={() => {
                 setMobileControlsOpen((current) => {
@@ -1792,15 +2515,14 @@ export function ScratchPrototype() {
                   <span className="visually-hidden">Card</span>
                   <select
                     aria-label="Card clip"
-                    onChange={(event) => setSelectedCardId(event.currentTarget.value)}
-                    value={selectedCardId}
+                    onChange={(event) =>
+                      setSelectedCardId(event.currentTarget.value)
+                    }
+                    value={card.id}
                   >
-                    {CARDS.map((entry) => (
-                      <option
-                        key={entry.id}
-                        value={entry.id}
-                      >
-                        {entry.label}
+                    {remainingCards.map((entry, index) => (
+                      <option key={entry.id} value={entry.id}>
+                        {index + 1}. {entry.label}
                       </option>
                     ))}
                   </select>
@@ -1828,10 +2550,19 @@ export function ScratchPrototype() {
                 </button>
                 <button
                   type="button"
-                  className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}`}
-                  aria-label={autoScratch.enabled ? "Disable auto scratch" : "Enable auto scratch"}
+                  className={`mobile-reset${autoScratch.enabled ? " is-active" : ""}${symbolsHuntComplete ? " is-symbols-complete" : ""}`}
+                  disabled={autoScratchLocked}
+                  aria-label={
+                    autoScratchLocked
+                      ? `Find all ${SYMBOL_SLOT_COUNT} symbols first`
+                      : autoScratch.enabled
+                        ? "Auto scratch running"
+                        : "Enable auto scratch"
+                  }
                   aria-pressed={autoScratch.enabled}
-                  onClick={() => updateAutoScratch({ enabled: !autoScratch.enabled })}
+                  onClick={() =>
+                    updateAutoScratch({ enabled: !autoScratch.enabled })
+                  }
                 >
                   <svg
                     width="20"
@@ -1896,30 +2627,54 @@ export function ScratchPrototype() {
                   ? "Three matching symbols — nice!"
                   : "No three-of-a-kind — try again."}
               </p>
-              <button type="button" className="game-result-button" onClick={resetScratch}>
-                Play again
+              <button
+                type="button"
+                className="game-result-button"
+                onClick={() => advanceAfterScratchRef.current()}
+              >
+                {remainingCards.length > 1 ? "Next card" : "Done"}
               </button>
             </div>
           ) : null}
         </div>
         <aside className="panel">
           <div>
-            <p className="eyebrow">Milestone 1</p>
-            <h1>Full Dress Scratch Test</h1>
+            <p className="eyebrow">{activeModel?.label ?? "Sugar Scratchie"}</p>
+            <h1>{card.label}</h1>
+            <p className="eyebrow">
+              Left {remainingCards.length}/{modelCards.length}
+              {completedCardIds.length > 0
+                ? ` · scratched ${completedCardIds.length}`
+                : ""}
+            </p>
+          </div>
+          <div className="button-row">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setActiveModelId("");
+                setSelectedCardId("");
+                setCompletedCardIds([]);
+                completedCardIdsRef.current = [];
+              }}
+            >
+              Girls
+            </button>
+            <a className="secondary-button" href="/dashboard/models">
+              Models
+            </a>
           </div>
           <label>
             Card
             <select
               aria-label="Card clip"
               onChange={(event) => setSelectedCardId(event.currentTarget.value)}
-              value={selectedCardId}
+              value={card.id}
             >
-              {CARDS.map((entry) => (
-                <option
-                  key={entry.id}
-                  value={entry.id}
-                >
-                  {entry.label}
+              {remainingCards.map((entry, index) => (
+                <option key={entry.id} value={entry.id}>
+                  {index + 1}. {entry.label}
                 </option>
               ))}
             </select>
@@ -1929,17 +2684,16 @@ export function ScratchPrototype() {
             <select
               aria-label="Mesh keyframe JSON"
               disabled={meshFiles.length === 0}
-              onChange={(event) => setSelectedMeshFile(event.currentTarget.value)}
+              onChange={(event) =>
+                setSelectedMeshFile(event.currentTarget.value)
+              }
               value={selectedMeshFile}
             >
               {meshFiles.length === 0 ? (
                 <option value="">No mesh JSON files</option>
               ) : (
                 meshFiles.map((file) => (
-                  <option
-                    key={file}
-                    value={file}
-                  >
+                  <option key={file} value={file}>
                     {file}
                   </option>
                 ))
@@ -1951,17 +2705,16 @@ export function ScratchPrototype() {
               aria-label="Video timeline"
               max={duration || 0}
               min={0}
-              onChange={(event) => setVideoTime(Number(event.currentTarget.value))}
+              onChange={(event) =>
+                setVideoTime(Number(event.currentTarget.value))
+              }
               step={0.05}
               type="range"
               value={Math.min(currentTime, duration || currentTime)}
             />
           </div>
           <div className="button-row">
-            <button
-              type="button"
-              onClick={togglePlayback}
-            >
+            <button type="button" onClick={togglePlayback}>
               {isPaused ? "Play video" : "Pause video"}
             </button>
             <button

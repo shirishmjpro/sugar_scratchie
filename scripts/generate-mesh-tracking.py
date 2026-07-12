@@ -667,6 +667,7 @@ def main():
         compare_trackers(frames, queries, base_driver_count, ref_idx)
         return
 
+    print(f"Running tracker={TRACKER} on device={DEVICE} ...", flush=True)
     tracks_v, conf_v = run_tracker(TRACKER, frames, queries)
     vis_v = (conf_v > 0.5).astype(np.uint8)  # T,M
     print(f"Tracked with {TRACKER}: {tracks_v.shape}, mean visibility {vis_v.mean():.2f}")

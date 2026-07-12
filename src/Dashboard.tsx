@@ -1,12 +1,17 @@
 import {
   AlertTriangle,
+  Check,
+  Clapperboard,
   ExternalLink,
+  FileArchive,
   FileUp,
   Image,
   LoaderCircle,
   Play,
   SlidersHorizontal,
   Square,
+  Trash2,
+  UserRound,
   Video,
   WandSparkles,
   Workflow,
@@ -34,6 +39,7 @@ import {
 } from "@radix-ui/themes";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MaskEditor } from "./videoFlow/MaskEditor";
 
 type CardInfo = {
   id: string;
@@ -485,478 +491,6 @@ function MeshOverlayPreview({
   );
 }
 
-type GarmentMeshData = TrackedMeshPreviewData & {
-  garment?: number[] | null;
-};
-
-function coverFit(videoWidth: number, videoHeight: number, width: number, height: number) {
-  const scale = Math.max(width / videoWidth, height / videoHeight);
-  const drawWidth = videoWidth * scale;
-  const drawHeight = videoHeight * scale;
-  return {
-    dx: (width - drawWidth) / 2,
-    dy: (height - drawHeight) / 2,
-    dw: drawWidth,
-    dh: drawHeight,
-  };
-}
-
-/**
- * Paint-the-mask editor. The app stores scratchability as a static per-vertex
- * `garment` array; here the operator scrubs the clip to a pose (e.g. arm raised,
- * or to expose the neck), then paints/erases the vertices that sit on the fabric
- * in that frame. Because vertices are drawn at their tracked positions for the
- * current frame, painting a raised arm marks exactly the cells that will be
- * under the finger when the arm is raised in the prototype.
- */
-function MaskEditor({
-  cards,
-  selectedCardId,
-  onSelectCard,
-  onSaved,
-  onError,
-}: {
-  cards: CardInfo[];
-  selectedCardId: string;
-  onSelectCard: (value: string) => void;
-  onSaved: () => void;
-  onError: (message: string) => void;
-}) {
-  const card = useMemo(
-    () => cards.find((entry) => entry.id === selectedCardId) ?? cards[0],
-    [cards, selectedCardId],
-  );
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const garmentRef = useRef<Uint8Array | null>(null);
-  const framesRef = useRef<TrackedMeshFrame[]>([]);
-  const dimsRef = useRef({ cols: 0, rows: 0, width: 390, height: 672 });
-  const brushRef = useRef({ mode: "add" as "add" | "erase", radius: 26 });
-  const drawingRef = useRef(false);
-  const cursorRef = useRef<{ x: number; y: number } | null>(null);
-
-  const [meshReady, setMeshReady] = useState(false);
-  const [loadError, setLoadError] = useState("");
-  const [coverage, setCoverage] = useState({ on: 0, total: 0 });
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState("");
-  const [brushMode, setBrushMode] = useState<"add" | "erase">("add");
-  const [brushRadius, setBrushRadius] = useState(26);
-  const [playing, setPlaying] = useState(false);
-
-  const meshFile = card?.mesh ?? "";
-  const videoSrc = card ? previewSource(card.foreground) : "";
-  const meshSrc = meshFile ? previewSource(`public/mesh/${meshFile}`) : "";
-
-  useEffect(() => {
-    brushRef.current.mode = brushMode;
-  }, [brushMode]);
-  useEffect(() => {
-    brushRef.current.radius = brushRadius;
-  }, [brushRadius]);
-
-  function recomputeCoverage() {
-    const garment = garmentRef.current;
-    if (!garment) return;
-    let on = 0;
-    for (let i = 0; i < garment.length; i += 1) on += garment[i];
-    setCoverage({ on, total: garment.length });
-  }
-
-  // Load the mesh JSON (geometry + current garment mask) for the selected card.
-  useEffect(() => {
-    let cancelled = false;
-    setMeshReady(false);
-    setLoadError("");
-    setSaveMsg("");
-    setDirty(false);
-    garmentRef.current = null;
-    framesRef.current = [];
-    if (!meshSrc) return undefined;
-
-    // Cache-bust so the editor always edits the latest on-disk mask (the backend
-    // FileResponse can otherwise be served from the browser cache, losing edits).
-    const freshSrc = `${meshSrc}${meshSrc.includes("?") ? "&" : "?"}v=${Date.now()}`;
-    fetch(freshSrc, { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Mesh not available (${response.status})`);
-        return response.json() as Promise<GarmentMeshData>;
-      })
-      .then((data) => {
-        if (cancelled) return;
-        const cols = data.mesh?.cols ?? 0;
-        const rows = data.mesh?.rows ?? 0;
-        const total = cols * rows;
-        if (total <= 0 || !data.frames || data.frames.length === 0) {
-          throw new Error("Mesh has no grid or frames");
-        }
-        const garment = new Uint8Array(total);
-        if (Array.isArray(data.garment) && data.garment.length === total) {
-          for (let i = 0; i < total; i += 1) garment[i] = data.garment[i] ? 1 : 0;
-        } else {
-          // No mask yet — start fully scratchable so the operator carves it down.
-          garment.fill(1);
-        }
-        garmentRef.current = garment;
-        framesRef.current = data.frames;
-        dimsRef.current = {
-          cols,
-          rows,
-          width: data.canvas?.width ?? 390,
-          height: data.canvas?.height ?? 672,
-        };
-        setMeshReady(true);
-        recomputeCoverage();
-      })
-      .catch((caught: unknown) => {
-        if (!cancelled) setLoadError(caught instanceof Error ? caught.message : String(caught));
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [meshSrc]);
-
-  // Render loop: video (cover-fit) + scratchable cells + grid + vertices + brush.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video || !meshReady) return undefined;
-    const { cols, rows, width, height } = dimsRef.current;
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return undefined;
-
-    let raf = 0;
-
-    const draw = () => {
-      const frames = framesRef.current;
-      const garment = garmentRef.current;
-      ctx.clearRect(0, 0, width, height);
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        const fit = coverFit(video.videoWidth, video.videoHeight, width, height);
-        try {
-          ctx.drawImage(video, fit.dx, fit.dy, fit.dw, fit.dh);
-        } catch {
-          /* frame not ready */
-        }
-      }
-      const frame = frameForTime(frames, video.currentTime);
-      if (frame && garment) {
-        const on = (index: number) => garment[index] === 1;
-        // Fill scratchable cells (all four corners painted on).
-        ctx.fillStyle = "rgba(34, 220, 130, 0.30)";
-        for (let row = 0; row < rows - 1; row += 1) {
-          for (let col = 0; col < cols - 1; col += 1) {
-            const tl = row * cols + col;
-            const tr = tl + 1;
-            const bl = tl + cols;
-            const br = bl + 1;
-            if (!(on(tl) && on(tr) && on(bl) && on(br))) continue;
-            const a = frame.verts[tl];
-            const b = frame.verts[tr];
-            const c = frame.verts[br];
-            const d = frame.verts[bl];
-            if (!a || !b || !c || !d) continue;
-            ctx.beginPath();
-            ctx.moveTo(a[0], a[1]);
-            ctx.lineTo(b[0], b[1]);
-            ctx.lineTo(c[0], c[1]);
-            ctx.lineTo(d[0], d[1]);
-            ctx.closePath();
-            ctx.fill();
-          }
-        }
-        // Faint grid.
-        ctx.lineWidth = 0.6;
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
-        ctx.beginPath();
-        for (let row = 0; row < rows; row += 1) {
-          for (let col = 0; col < cols; col += 1) {
-            const index = row * cols + col;
-            const here = frame.verts[index];
-            if (!here) continue;
-            if (col < cols - 1) {
-              const right = frame.verts[index + 1];
-              if (right) {
-                ctx.moveTo(here[0], here[1]);
-                ctx.lineTo(right[0], right[1]);
-              }
-            }
-            if (row < rows - 1) {
-              const down = frame.verts[index + cols];
-              if (down) {
-                ctx.moveTo(here[0], here[1]);
-                ctx.lineTo(down[0], down[1]);
-              }
-            }
-          }
-        }
-        ctx.stroke();
-        // Vertices: bright green where scratchable, dim otherwise.
-        for (let index = 0; index < frame.verts.length; index += 1) {
-          const vert = frame.verts[index];
-          if (!vert) continue;
-          if (on(index)) {
-            ctx.fillStyle = "rgba(46, 255, 150, 0.95)";
-            ctx.beginPath();
-            ctx.arc(vert[0], vert[1], 2.1, 0, Math.PI * 2);
-            ctx.fill();
-          } else {
-            ctx.fillStyle = "rgba(255, 90, 90, 0.55)";
-            ctx.beginPath();
-            ctx.arc(vert[0], vert[1], 1.3, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      }
-      // Brush cursor.
-      const cursor = cursorRef.current;
-      if (cursor) {
-        ctx.lineWidth = 1.2;
-        ctx.strokeStyle = brushRef.current.mode === "add" ? "rgba(46, 255, 150, 0.9)" : "rgba(255, 90, 90, 0.9)";
-        ctx.beginPath();
-        ctx.arc(cursor.x, cursor.y, brushRef.current.radius, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      raf = window.requestAnimationFrame(draw);
-    };
-
-    draw();
-    return () => window.cancelAnimationFrame(raf);
-  }, [meshReady]);
-
-  function toMeshPoint(clientX: number, clientY: number) {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return null;
-    const { width, height } = dimsRef.current;
-    return {
-      x: ((clientX - rect.left) / rect.width) * width,
-      y: ((clientY - rect.top) / rect.height) * height,
-    };
-  }
-
-  function paintAt(clientX: number, clientY: number) {
-    const point = toMeshPoint(clientX, clientY);
-    if (!point) return;
-    cursorRef.current = point;
-    if (!drawingRef.current) return;
-    const garment = garmentRef.current;
-    const video = videoRef.current;
-    if (!garment || !video) return;
-    const frame = frameForTime(framesRef.current, video.currentTime);
-    if (!frame) return;
-    const radius = brushRef.current.radius;
-    const r2 = radius * radius;
-    const value = brushRef.current.mode === "add" ? 1 : 0;
-    let changed = false;
-    for (let index = 0; index < frame.verts.length; index += 1) {
-      const vert = frame.verts[index];
-      if (!vert) continue;
-      const dx = vert[0] - point.x;
-      const dy = vert[1] - point.y;
-      if (dx * dx + dy * dy <= r2 && garment[index] !== value) {
-        garment[index] = value;
-        changed = true;
-      }
-    }
-    if (changed && !dirty) setDirty(true);
-  }
-
-  function fillAll(value: 0 | 1) {
-    const garment = garmentRef.current;
-    if (!garment) return;
-    garment.fill(value);
-    setDirty(true);
-    recomputeCoverage();
-  }
-
-  async function save() {
-    const garment = garmentRef.current;
-    if (!garment || !meshFile) return;
-    setSaving(true);
-    setSaveMsg("");
-    onError("");
-    try {
-      const result = await api<{ ok: boolean; sum: number; total: number }>("/api/mesh/garment", {
-        method: "POST",
-        body: JSON.stringify({ file: meshFile, garment: Array.from(garment) }),
-      });
-      setDirty(false);
-      setSaveMsg(`Saved ${result.sum}/${result.total} cells. Reload the mesh in the prototype to see it.`);
-      onSaved();
-    } catch (caught) {
-      onError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function togglePlay() {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) {
-      void video.play().catch(() => undefined);
-      setPlaying(true);
-    } else {
-      video.pause();
-      setPlaying(false);
-    }
-  }
-
-  function step(deltaSeconds: number) {
-    const video = videoRef.current;
-    if (!video) return;
-    video.pause();
-    setPlaying(false);
-    video.currentTime = Math.max(0, Math.min((video.duration || 0) - 0.001, video.currentTime + deltaSeconds));
-  }
-
-  const coveragePct = coverage.total > 0 ? Math.round((coverage.on / coverage.total) * 100) : 0;
-
-  return (
-    <Card>
-      <Grid columns={{ initial: "1", md: "2" }} gap="5">
-        <Flex direction="column" gap="4">
-          <Flex align="center" justify="between">
-            <Heading size="4">Mask Editor</Heading>
-            <Badge color={dirty ? "orange" : "gray"}>{dirty ? "Unsaved" : "Saved"}</Badge>
-          </Flex>
-          <Text color="gray" size="2">
-            Paint the cells that should be scratchable. Scrub to a frame (e.g. the arm raised, or to expose the neck),
-            then drag on the figure to add or erase. Save writes the mask back into the mesh; hit "Reload mesh" in the
-            prototype to pick it up.
-          </Text>
-
-          <Field label="Card">
-            <CardSelect cards={cards} selectedCardId={card?.id ?? ""} onValueChange={onSelectCard} />
-          </Field>
-
-          <Field label="Brush">
-            <Flex gap="2" wrap="wrap">
-              <Button
-                color={brushMode === "add" ? "green" : "gray"}
-                variant={brushMode === "add" ? "solid" : "soft"}
-                onClick={() => setBrushMode("add")}
-              >
-                Add
-              </Button>
-              <Button
-                color={brushMode === "erase" ? "red" : "gray"}
-                variant={brushMode === "erase" ? "solid" : "soft"}
-                onClick={() => setBrushMode("erase")}
-              >
-                Erase
-              </Button>
-            </Flex>
-          </Field>
-
-          <Field label={`Brush size (${brushRadius}px)`}>
-            <input
-              max={80}
-              min={8}
-              onChange={(event) => setBrushRadius(Number(event.currentTarget.value))}
-              type="range"
-              value={brushRadius}
-            />
-          </Field>
-
-          <Field label="Playback">
-            <Flex gap="2" wrap="wrap">
-              <Button color="gray" variant="soft" onClick={togglePlay}>
-                {playing ? <Square {...iconProps} /> : <Play {...iconProps} />}
-                {playing ? "Pause" : "Play"}
-              </Button>
-              <Button color="gray" variant="soft" onClick={() => step(-0.1)}>
-                -0.1s
-              </Button>
-              <Button color="gray" variant="soft" onClick={() => step(0.1)}>
-                +0.1s
-              </Button>
-            </Flex>
-          </Field>
-
-          <Field label="Whole mask">
-            <Flex gap="2" wrap="wrap">
-              <Button color="gray" variant="soft" onClick={() => fillAll(1)}>
-                Fill all
-              </Button>
-              <Button color="gray" variant="soft" onClick={() => fillAll(0)}>
-                Clear all
-              </Button>
-            </Flex>
-          </Field>
-
-          <Separator size="4" />
-          <Flex align="center" gap="3" justify="between">
-            <Text color="gray" size="2" weight="bold">
-              Scratchable: {coveragePct}% ({coverage.on}/{coverage.total})
-            </Text>
-            <Button disabled={!meshReady || saving || !dirty} onClick={save}>
-              <Play {...iconProps} />
-              {saving ? "Saving" : "Save mask"}
-            </Button>
-          </Flex>
-          {saveMsg ? (
-            <Text as="div" color="green" size="1" weight="medium">
-              {saveMsg}
-            </Text>
-          ) : null}
-          {loadError ? (
-            <Text as="div" color="orange" size="1" weight="medium">
-              {loadError}
-            </Text>
-          ) : null}
-        </Flex>
-
-        <Flex direction="column" gap="3">
-          <Heading size="3">Canvas</Heading>
-          <Separator size="4" />
-          <Box className="mask-editor-stage">
-            <video
-              ref={videoRef}
-              className="mask-editor-video"
-              loop
-              muted
-              playsInline
-              preload="auto"
-              src={videoSrc}
-            />
-            <canvas
-              ref={canvasRef}
-              className="mask-editor-canvas"
-              onPointerDown={(event) => {
-                event.currentTarget.setPointerCapture(event.pointerId);
-                drawingRef.current = true;
-                paintAt(event.clientX, event.clientY);
-              }}
-              onPointerMove={(event) => paintAt(event.clientX, event.clientY)}
-              onPointerUp={() => {
-                drawingRef.current = false;
-                recomputeCoverage();
-              }}
-              onPointerLeave={() => {
-                drawingRef.current = false;
-                cursorRef.current = null;
-                recomputeCoverage();
-              }}
-            />
-          </Box>
-          <Text color="gray" size="1">
-            Green dots/cells are scratchable. Red dots are off. The video is shown cover-fit to match how the
-            prototype renders it, so what you paint lines up with the live scratch area.
-          </Text>
-        </Flex>
-      </Grid>
-    </Card>
-  );
-}
-
 function Field({
   children,
   label,
@@ -1090,6 +624,289 @@ function FilePathPicker({
   );
 }
 
+
+function VideoManagerPanel({
+  cards,
+  editingCardId,
+  onEditingCardChange,
+  onRefresh,
+  onRefreshJobs,
+  onError,
+}: {
+  cards: CardInfo[];
+  editingCardId: string;
+  onEditingCardChange: (value: string) => void;
+  onRefresh: () => Promise<void>;
+  onRefreshJobs: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [newCardId, setNewCardId] = useState("");
+  const [newCardLabel, setNewCardLabel] = useState("");
+  const [newBackground, setNewBackground] = useState("");
+  const [newForeground, setNewForeground] = useState("");
+  const [editLabel, setEditLabel] = useState("");
+  const [editBackground, setEditBackground] = useState("");
+  const [editForeground, setEditForeground] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [compressWebm, setCompressWebm] = useState(true);
+
+  const editingCard = useMemo(
+    () => cards.find((card) => card.id === editingCardId) ?? cards[0],
+    [cards, editingCardId],
+  );
+
+  useEffect(() => {
+    if (!editingCard) return;
+    setEditLabel(editingCard.label);
+    setEditBackground("");
+    setEditForeground("");
+  }, [editingCard]);
+
+  async function saveCard() {
+    if (!editingCard) return;
+    setIsSaving(true);
+    onError("");
+    try {
+      await api<CardInfo>(`/api/cards/${editingCard.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          label: editLabel,
+          ...(editBackground ? { background: editBackground } : {}),
+          ...(editForeground ? { foreground: editForeground } : {}),
+        }),
+      });
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function createCard() {
+    setIsCreating(true);
+    onError("");
+    try {
+      await api<CardInfo>("/api/cards", {
+        method: "POST",
+        body: JSON.stringify({
+          id: newCardId,
+          label: newCardLabel,
+          background: newBackground,
+          foreground: newForeground,
+        }),
+      });
+      setNewCardId("");
+      setNewCardLabel("");
+      setNewBackground("");
+      setNewForeground("");
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  async function deleteCard() {
+    if (!editingCard || editingCard.id === "original") return;
+    if (!window.confirm(`Delete card "${editingCard.label}" and its video files?`)) return;
+    setIsDeleting(true);
+    onError("");
+    try {
+      await api<{ ok: boolean }>(`/api/cards/${editingCard.id}`, { method: "DELETE" });
+      onEditingCardChange(cards.find((card) => card.id === "original")?.id ?? cards[0]?.id ?? "");
+      await onRefresh();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  async function compressCard() {
+    if (!editingCard) return;
+    if (
+      !window.confirm(
+        `Compress "${editingCard.label}" to 540px H.264? Originals are backed up to .video-backups/ before being overwritten.`,
+      )
+    ) {
+      return;
+    }
+    setIsCompressing(true);
+    onError("");
+    try {
+      await api<JobInfo>(`/api/jobs/cards/${editingCard.id}/compress`, {
+        method: "POST",
+        body: JSON.stringify({ write_webm: compressWebm }),
+      });
+      await onRefreshJobs();
+    } catch (caught) {
+      onError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setIsCompressing(false);
+    }
+  }
+
+  const canCreate = Boolean(newCardId.trim() && newCardLabel.trim() && newBackground && newForeground);
+
+  return (
+    <Grid
+      columns={{ initial: "1", lg: "2" }}
+      gap="5"
+    >
+      <Flex
+        direction="column"
+        gap="4"
+      >
+        <Heading size="4">Edit card</Heading>
+        <Field label="Card">
+          <CardSelect
+            cards={cards}
+            selectedCardId={editingCard?.id ?? ""}
+            onValueChange={onEditingCardChange}
+          />
+        </Field>
+        <Field label="Label">
+          <TextField.Root
+            value={editLabel}
+            onChange={(event) => setEditLabel(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Background video (reveal layer)">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel={editBackground ? "New background preview" : "Current background"}
+            value={editBackground || editingCard?.background || ""}
+            onChange={setEditBackground}
+            onError={onError}
+          />
+        </Field>
+        <Field label="Foreground video (green-screen scratch layer)">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel={editForeground ? "New foreground preview" : "Current foreground"}
+            value={editForeground || editingCard?.foreground || ""}
+            onChange={setEditForeground}
+            onError={onError}
+          />
+        </Field>
+        <Flex gap="2">
+          <Button
+            disabled={!editingCard || isSaving}
+            onClick={saveCard}
+          >
+            {isSaving ? <LoaderCircle {...iconProps} /> : <FileUp {...iconProps} />}
+            {isSaving ? "Saving" : "Save changes"}
+          </Button>
+          <Button
+            color="red"
+            disabled={!editingCard || editingCard.id === "original" || isDeleting}
+            variant="soft"
+            onClick={deleteCard}
+          >
+            {isDeleting ? <LoaderCircle {...iconProps} /> : <Trash2 {...iconProps} />}
+            Delete card
+          </Button>
+        </Flex>
+        <Text
+          color="gray"
+          size="1"
+        >
+          Upload replacements or pick a workspace path, then save. The original card can be updated but not deleted.
+        </Text>
+
+        <Separator size="4" />
+        <Heading size="3">Compress videos</Heading>
+        <label className="checkbox-label">
+          <Checkbox
+            checked={compressWebm}
+            onCheckedChange={(checked) => setCompressWebm(checked === true)}
+          />
+          Also write VP9 WebM sidecars
+        </label>
+        <Flex gap="2">
+          <Button
+            color="gray"
+            disabled={!editingCard || isCompressing}
+            variant="soft"
+            onClick={compressCard}
+          >
+            {isCompressing ? <LoaderCircle {...iconProps} /> : <FileArchive {...iconProps} />}
+            {isCompressing ? "Starting" : "Compress videos"}
+          </Button>
+        </Flex>
+        <Text
+          color="gray"
+          size="1"
+        >
+          Re-encodes both clips to 540px H.264 in place (same as the Video Flow compress step). Originals are
+          backed up to .video-backups/. Watch progress in the Jobs tab.
+        </Text>
+      </Flex>
+
+      <Flex
+        direction="column"
+        gap="4"
+      >
+        <Heading size="4">Create card</Heading>
+        <Field label="Card id">
+          <TextField.Root
+            placeholder="my_card_1"
+            value={newCardId}
+            onChange={(event) => setNewCardId(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Label">
+          <TextField.Root
+            placeholder="My Card 1"
+            value={newCardLabel}
+            onChange={(event) => setNewCardLabel(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Background video">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel="Background preview"
+            value={newBackground}
+            onChange={setNewBackground}
+            onError={onError}
+          />
+        </Field>
+        <Field label="Foreground video">
+          <FilePathPicker
+            accept="video/*"
+            preview="video"
+            previewLabel="Foreground preview"
+            value={newForeground}
+            onChange={setNewForeground}
+            onError={onError}
+          />
+        </Field>
+        <Button
+          disabled={!canCreate || isCreating}
+          onClick={createCard}
+        >
+          {isCreating ? <LoaderCircle {...iconProps} /> : <Video {...iconProps} />}
+          {isCreating ? "Creating" : "Create card"}
+        </Button>
+        <Text
+          color="gray"
+          size="1"
+        >
+          New cards are stored under public/cards/&lt;id&gt;/ and appear in the prototype card switcher after refresh.
+        </Text>
+      </Flex>
+    </Grid>
+  );
+}
+
 export function Dashboard() {
   const [assets, setAssets] = useState<AssetsResponse>({ cards: [], meshes: [] });
   const [jobs, setJobs] = useState<JobInfo[]>([]);
@@ -1106,11 +923,6 @@ export function Dashboard() {
   const [grokOut, setGrokOut] = useState(".tmp/grok-edit.mp4");
   const [enhancePrompt, setEnhancePrompt] = useState(true);
   const [resolution, setResolution] = useState("720p");
-  const [imageVideoSource, setImageVideoSource] = useState("");
-  const [imageVideoPrompt, setImageVideoPrompt] = useState(
-    "Animate this still image into a short natural fashion video with subtle body movement and a steady camera.",
-  );
-  const [imageVideoOut, setImageVideoOut] = useState(".tmp/image-to-video.mp4");
   const [sourceImage, setSourceImage] = useState("");
   const [motionPrompt, setMotionPrompt] = useState(
     "Animate this still portrait into a short natural fashion video with subtle body movement and a steady camera.",
@@ -1120,6 +932,7 @@ export function Dashboard() {
   );
   const [flowBaseOut, setFlowBaseOut] = useState(".tmp/image-video-base.mp4");
   const [flowOut, setFlowOut] = useState(".tmp/image-dress-video.mp4");
+  const [videoManagerCardId, setVideoManagerCardId] = useState("");
 
   const selectedCard = useMemo(() => {
     return assets.cards.find((card) => card.id === selectedCardId) ?? assets.cards[0];
@@ -1129,6 +942,7 @@ export function Dashboard() {
     const data = await api<AssetsResponse>("/api/assets");
     setAssets(data);
     setSelectedCardId((current) => current || data.cards[0]?.id || "");
+    setVideoManagerCardId((current) => current || data.cards[0]?.id || "");
   }
 
   async function refreshJobs() {
@@ -1188,24 +1002,6 @@ export function Dashboard() {
           prompt: grokPrompt,
           out: grokOut,
           enhance: enhancePrompt,
-          resolution,
-        }),
-      });
-      await refreshJobs();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
-  }
-
-  async function startImageToVideoJob() {
-    setError("");
-    try {
-      await api<JobInfo>("/api/jobs/image-to-video", {
-        method: "POST",
-        body: JSON.stringify({
-          image: imageVideoSource,
-          prompt: imageVideoPrompt,
-          out: imageVideoOut,
           resolution,
         }),
       });
@@ -1289,6 +1085,18 @@ export function Dashboard() {
               >
                 <LoaderCircle {...iconProps} />
                 Refresh
+              </Button>
+              <Button asChild variant="soft">
+                <a href="/dashboard/models">
+                  <UserRound {...iconProps} />
+                  Models
+                </a>
+              </Button>
+              <Button asChild variant="soft">
+                <a href="/dashboard/video-flow">
+                  <Clapperboard {...iconProps} />
+                  Video Flow
+                </a>
               </Button>
               <Button asChild>
                 <a href="/">
@@ -1431,17 +1239,18 @@ export function Dashboard() {
                 <SlidersHorizontal {...iconProps} />
                 Mask Editor
               </Tabs.Trigger>
-              <Tabs.Trigger value="image-video">
-                <Video {...iconProps} />
-                Image Video
-              </Tabs.Trigger>
               <Tabs.Trigger value="image-flow">
                 <Image {...iconProps} />
                 Image Flow
               </Tabs.Trigger>
+
               <Tabs.Trigger value="dress-edit">
                 <WandSparkles {...iconProps} />
                 Dress Edit
+              </Tabs.Trigger>
+              <Tabs.Trigger value="videos">
+                <Video {...iconProps} />
+                Videos
               </Tabs.Trigger>
               <Tabs.Trigger value="assets">Assets</Tabs.Trigger>
               <Tabs.Trigger value="jobs">Jobs</Tabs.Trigger>
@@ -1571,82 +1380,23 @@ export function Dashboard() {
               </Tabs.Content>
 
               <Tabs.Content value="mask">
-                <MaskEditor
-                  cards={assets.cards}
-                  selectedCardId={selectedCard?.id ?? ""}
-                  onSelectCard={setSelectedCardId}
-                  onSaved={() => refreshAssets().catch(() => undefined)}
-                  onError={setError}
-                />
-              </Tabs.Content>
-
-              <Tabs.Content value="image-video">
                 <Card>
-                  <Flex
-                    direction="column"
-                    gap="4"
-                  >
-                    <Flex
-                      align="center"
-                      justify="between"
-                    >
-                      <Heading size="4">Image To Video</Heading>
-                      <Badge color="blue">Generator</Badge>
-                    </Flex>
-                    <Field label="Source image path or URL">
-                      <FilePathPicker
-                        accept="image/*"
-                        placeholder="Pick an image or paste a path/URL"
-                        preview="image"
-                        previewLabel="Source image"
-                        previewSize="compact"
-                        value={imageVideoSource}
-                        onChange={setImageVideoSource}
+                  <Flex direction="column" gap="4">
+                    <Field label="Card">
+                      <CardSelect
+                        cards={assets.cards}
+                        selectedCardId={selectedCard?.id ?? ""}
+                        onValueChange={setSelectedCardId}
+                      />
+                    </Field>
+                    {selectedCard ? (
+                      <MaskEditor
+                        meshFile={selectedCard.mesh}
+                        videoSrc={previewSource(selectedCard.foreground)}
+                        onSaved={() => refreshAssets().catch(() => undefined)}
                         onError={setError}
                       />
-                    </Field>
-                    <Field label="Motion prompt">
-                      <TextArea
-                        className="dashboard-textarea"
-                        value={imageVideoPrompt}
-                        onChange={(event) => setImageVideoPrompt(event.currentTarget.value)}
-                      />
-                    </Field>
-                    <Grid
-                      columns={{ initial: "1", md: "2" }}
-                      gap="3"
-                    >
-                      <Field label="Output video">
-                        <FilePathPicker
-                          accept="video/*"
-                          preview="video"
-                          previewLabel="Generated video"
-                          value={imageVideoOut}
-                          onChange={setImageVideoOut}
-                          onError={setError}
-                        />
-                      </Field>
-                      <Field label="Resolution">
-                        <Select.Root
-                          value={resolution || "default"}
-                          onValueChange={(value) => setResolution(value === "default" ? "" : value)}
-                        >
-                          <Select.Trigger />
-                          <Select.Content>
-                            <Select.Item value="720p">720p</Select.Item>
-                            <Select.Item value="480p">480p</Select.Item>
-                            <Select.Item value="default">Default</Select.Item>
-                          </Select.Content>
-                        </Select.Root>
-                      </Field>
-                    </Grid>
-                    <Button
-                      disabled={!imageVideoSource || !canUseGrok}
-                      onClick={startImageToVideoJob}
-                    >
-                      <Play {...iconProps} />
-                      Start image video
-                    </Button>
+                    ) : null}
                   </Flex>
                 </Card>
               </Tabs.Content>
@@ -1725,6 +1475,7 @@ export function Dashboard() {
                   </Flex>
                 </Card>
               </Tabs.Content>
+
 
               <Tabs.Content value="dress-edit">
                 <Card>
@@ -1808,6 +1559,38 @@ export function Dashboard() {
                       <Play {...iconProps} />
                       Start edit job
                     </Button>
+                  </Flex>
+                </Card>
+              </Tabs.Content>
+
+              <Tabs.Content value="videos">
+                <Card>
+                  <Flex
+                    direction="column"
+                    gap="5"
+                  >
+                    <Flex
+                      align="center"
+                      justify="between"
+                    >
+                      <Heading size="4">Manage Videos</Heading>
+                      <Button
+                        color="gray"
+                        variant="soft"
+                        onClick={() => refreshAssets().catch((caught) => setError(String(caught)))}
+                      >
+                        <LoaderCircle {...iconProps} />
+                        Refresh cards
+                      </Button>
+                    </Flex>
+                    <VideoManagerPanel
+                      cards={assets.cards}
+                      editingCardId={videoManagerCardId || selectedCard?.id || ""}
+                      onEditingCardChange={setVideoManagerCardId}
+                      onError={setError}
+                      onRefresh={refreshAssets}
+                      onRefreshJobs={refreshJobs}
+                    />
                   </Flex>
                 </Card>
               </Tabs.Content>

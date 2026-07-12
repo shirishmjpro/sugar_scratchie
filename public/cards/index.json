@@ -1,0 +1,183 @@
+{
+  "cards": [
+    {
+      "id": "original",
+      "label": "Original",
+      "bottom": "/cards/ai%20girl%202.mp4",
+      "foreground": "/cards/Green%20bg%20sample%202%20swap.mp4",
+      "mesh": "tracked-mesh.json",
+      "chroma_key": true,
+      "sort_order": 0
+    },
+    {
+      "id": "asian_2",
+      "label": "Asian 2",
+      "bottom": "/cards/asian_2/background.mp4",
+      "foreground": "/cards/asian_2/foreground.mp4",
+      "mesh": "asian_2.json",
+      "chroma_key": false,
+      "sort_order": 1,
+      "model_id": "asia"
+    },
+    {
+      "id": "chinese_1",
+      "label": "Chinese 1",
+      "bottom": "/cards/chinese_1/background.mp4",
+      "foreground": "/cards/chinese_1/foreground.mp4",
+      "mesh": "chinese_1.json",
+      "chroma_key": false,
+      "sort_order": 2,
+      "model_id": "asia"
+    },
+    {
+      "id": "asian_1",
+      "label": "Asian 1",
+      "bottom": "/cards/asian_1/background.mp4",
+      "foreground": "/cards/asian_1/foreground.mp4",
+      "mesh": "asian_1.json",
+      "chroma_key": false,
+      "sort_order": 3,
+      "model_id": "asia"
+    },
+    {
+      "id": "girl_1",
+      "label": "Girl 1",
+      "bottom": "/cards/girl_1/background.mp4",
+      "foreground": "/cards/girl_1/foreground.mp4",
+      "mesh": "girl_1.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "girl"
+    },
+    {
+      "id": "girl_2",
+      "label": "Girl 2",
+      "bottom": "/cards/girl_2/background.mp4",
+      "foreground": "/cards/girl_2/foreground.mp4",
+      "mesh": "girl_2.json",
+      "chroma_key": false,
+      "sort_order": 1,
+      "model_id": "girl"
+    },
+    {
+      "id": "julia_1",
+      "label": "Julia 1",
+      "bottom": "/cards/julia_1/background.mp4",
+      "foreground": "/cards/julia_1/foreground.mp4",
+      "mesh": "julia_1.json",
+      "chroma_key": false,
+      "sort_order": 1,
+      "model_id": "glaucamp"
+    },
+    {
+      "id": "brazilian_1",
+      "label": "Brazilian 1",
+      "bottom": "/cards/brazilian_1/background.mp4",
+      "foreground": "/cards/brazilian_1/foreground.mp4",
+      "mesh": "brazilian_1.json",
+      "chroma_key": false,
+      "sort_order": 2,
+      "model_id": "glaucamp"
+    },
+    {
+      "id": "janja_1",
+      "label": "Janja 1",
+      "bottom": "/cards/janja_1/background.mp4",
+      "foreground": "/cards/janja_1/foreground.mp4",
+      "mesh": "janja_1.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "janja"
+    },
+    {
+      "id": "janja_2",
+      "label": "Janja 2",
+      "bottom": "/cards/janja_2/background.mp4",
+      "foreground": "/cards/janja_2/foreground.mp4",
+      "mesh": "janja_2.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "janja"
+    },
+    {
+      "id": "juliana_1",
+      "label": "Juliana 1",
+      "bottom": "/cards/juliana_1/background.mp4",
+      "foreground": "/cards/juliana_1/foreground.mp4",
+      "mesh": "juliana_1.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "julianaval"
+    },
+    {
+      "id": "juliana_2",
+      "label": "Juliana 2",
+      "bottom": "/cards/juliana_2/background.mp4",
+      "foreground": "/cards/juliana_2/foreground.mp4",
+      "mesh": "juliana_2.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "julianaval"
+    },
+    {
+      "id": "juliana_3",
+      "label": "Juliana 3",
+      "bottom": "/cards/juliana_3/background.mp4",
+      "foreground": "/cards/juliana_3/foreground.mp4",
+      "mesh": "juliana_3.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "julianaval"
+    },
+    {
+      "id": "korean_tie",
+      "label": "Korean dream",
+      "bottom": "/cards/korean_tie/background.mp4",
+      "foreground": "/cards/korean_tie/foreground.mp4",
+      "mesh": "korean_tie.json",
+      "chroma_key": false,
+      "sort_order": 1,
+      "model_id": "korea"
+    },
+    {
+      "id": "korean_2",
+      "label": "Korean 2",
+      "bottom": "/cards/korean_2/background.mp4",
+      "foreground": "/cards/korean_2/foreground.mp4",
+      "mesh": "korean_2.json",
+      "chroma_key": false,
+      "sort_order": 2,
+      "model_id": "korea"
+    },
+    {
+      "id": "shine_1",
+      "label": "Shine 1",
+      "bottom": "/cards/shine_1/background.mp4",
+      "foreground": "/cards/shine_1/foreground.mp4",
+      "mesh": "shine_1.json",
+      "chroma_key": false,
+      "sort_order": 0,
+      "model_id": "shine"
+    },
+    {
+      "id": "shine_3",
+      "label": "Shine 3",
+      "bottom": "/cards/shine_3/background.mp4",
+      "foreground": "/cards/shine_3/foreground.mp4",
+      "mesh": "shine_3.json",
+      "chroma_key": false,
+      "sort_order": 1,
+      "model_id": "shine"
+    },
+    {
+      "id": "shine_4",
+      "label": "Shine 4",
+      "bottom": "/cards/shine_4/background.mp4",
+      "foreground": "/cards/shine_4/foreground.mp4",
+      "mesh": "shine_4.json",
+      "chroma_key": false,
+      "sort_order": 2,
+      "model_id": "shine"
+    }
+  ]
+}
