@@ -27,6 +27,24 @@ const SCRATCH_TEX_SIZE = 1024;
 // chest-follow camera offset stays below PRESENT_ZOOM-1 so no canvas edge shows.
 export const PRESENT_ZOOM = 1.15;
 
+export type ImageLayerDepths = {
+  back: number;
+  mid: number;
+  front: number;
+};
+
+export const PHOTO_LAYER_DEPTHS: ImageLayerDepths = {
+  back: 1,
+  mid: 0.6,
+  front: 0.25,
+};
+
+export type ImageLayerCameras = {
+  back: { x: number; y: number };
+  mid: { x: number; y: number };
+  front: { x: number; y: number };
+};
+
 function clamp(value: number, lo: number, hi: number) {
   return value < lo ? lo : value > hi ? hi : value;
 }
@@ -71,6 +89,18 @@ function makeVideoTexture(gl: WebGL2RenderingContext) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   return tex;
+}
+
+type ImageSource = HTMLImageElement | HTMLVideoElement | HTMLCanvasElement;
+
+function sourceDimensions(source: ImageSource): { w: number; h: number } {
+  if (source instanceof HTMLVideoElement) {
+    return { w: source.videoWidth, h: source.videoHeight };
+  }
+  if (source instanceof HTMLImageElement) {
+    return { w: source.naturalWidth, h: source.naturalHeight };
+  }
+  return { w: source.width, h: source.height };
 }
 
 // Fullscreen-ish quad in [0,1]^2, drawn as a triangle strip.
@@ -250,6 +280,7 @@ export class GarmentGLRenderer {
   private lineBuf: WebGLBuffer;
 
   private bottomTex: WebGLTexture;
+  private midTex: WebGLTexture;
   private fgTex: WebGLTexture;
   private scratchTex: WebGLTexture;
   private scratchFbo: WebGLFramebuffer;
@@ -277,9 +308,21 @@ export class GarmentGLRenderer {
   // browsers without rVFC).
   private videoFrameHooked = new WeakSet<HTMLVideoElement>();
   private videoFrameReady = new WeakMap<HTMLVideoElement, boolean>();
+  private imageTexState = new WeakMap<WebGLTexture, { w: number; h: number; src: ImageSource }>();
+  private lastFrontPresentCamera = { x: 0, y: 0 };
 
-  constructor(canvas: HTMLCanvasElement, width: number, height: number) {
-    const gl = canvas.getContext("webgl2", { premultipliedAlpha: false, alpha: false });
+  constructor(
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    options: { alpha?: boolean; preserveDrawingBuffer?: boolean } = {},
+  ) {
+    const alpha = options.alpha ?? false;
+    const gl = canvas.getContext("webgl2", {
+      premultipliedAlpha: false,
+      alpha,
+      preserveDrawingBuffer: options.preserveDrawingBuffer ?? false,
+    });
     if (!gl) throw new Error("WebGL2 not available");
     this.gl = gl;
     this.width = width;
@@ -302,6 +345,7 @@ export class GarmentGLRenderer {
     this.lineBuf = gl.createBuffer()!;
 
     this.bottomTex = makeVideoTexture(gl);
+    this.midTex = makeVideoTexture(gl);
     this.fgTex = makeVideoTexture(gl);
 
     this.scratchTex = makeTexture(gl, SCRATCH_TEX_SIZE, SCRATCH_TEX_SIZE);
@@ -328,6 +372,9 @@ export class GarmentGLRenderer {
     // clip differs in size) rather than being skipped as an unchanged frame.
     this.videoTexState.delete(this.bottomTex);
     this.videoTexState.delete(this.fgTex);
+    this.imageTexState.delete(this.bottomTex);
+    this.imageTexState.delete(this.midTex);
+    this.imageTexState.delete(this.fgTex);
     this.clearFlakes();
   }
 
@@ -465,6 +512,51 @@ export class GarmentGLRenderer {
     this.videoTexState.set(tex, { w: vw, h: vh, t: video.currentTime });
   }
 
+  private uploadImage(tex: WebGLTexture, source: ImageSource): boolean {
+    const gl = this.gl;
+    const { w, h } = sourceDimensions(source);
+    if (!w || !h) return false;
+
+    const state = this.imageTexState.get(tex);
+    const sizeChanged = !state || state.w !== w || state.h !== h || state.src !== source;
+    if (!sizeChanged) return true;
+
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    this.imageTexState.set(tex, { w, h, src: source });
+    return true;
+  }
+
+  private drawSource(
+    prog: WebGLProgram,
+    tex: WebGLTexture,
+    source: ImageSource,
+    chroma: boolean,
+    camX = 0,
+    camY = 0,
+    overscan = 1,
+    upload = true,
+  ) {
+    const gl = this.gl;
+    gl.useProgram(prog);
+    if (upload) {
+      if (source instanceof HTMLVideoElement) {
+        this.uploadVideo(tex, source);
+      } else if (!this.uploadImage(tex, source)) {
+        return;
+      }
+    }
+    const { w, h } = sourceDimensions(source);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
+    const chromaLoc = gl.getUniformLocation(prog, "uChroma");
+    if (chromaLoc) gl.uniform1i(chromaLoc, chroma ? 1 : 0);
+    this.coverUniforms(prog, w || this.width, h || this.height, camX, camY, overscan);
+    this.bindQuad(prog);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
   private drawVideo(
     prog: WebGLProgram,
     tex: WebGLTexture,
@@ -475,19 +567,7 @@ export class GarmentGLRenderer {
     overscan = 1,
     upload = true,
   ) {
-    const gl = this.gl;
-    gl.useProgram(prog);
-    // Skip the upload to redraw the previously cached frame (video stalled but
-    // its metadata — and thus videoWidth/Height for cover framing — persists).
-    if (upload) this.uploadVideo(tex, video);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.uniform1i(gl.getUniformLocation(prog, "uTex"), 0);
-    const chromaLoc = gl.getUniformLocation(prog, "uChroma");
-    if (chromaLoc) gl.uniform1i(chromaLoc, chroma ? 1 : 0);
-    this.coverUniforms(prog, video.videoWidth || this.width, video.videoHeight || this.height, camX, camY, overscan);
-    this.bindQuad(prog);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this.drawSource(prog, tex, video, chroma, camX, camY, overscan, upload);
   }
 
   render(
@@ -573,6 +653,271 @@ export class GarmentGLRenderer {
     this.drawFlakes(camX, camY);
 
     // 5. mesh overlay
+    if (showMesh && sample) {
+      this.drawMeshLines(sample);
+    }
+  }
+
+  getFrontPresentCamera() {
+    return this.lastFrontPresentCamera;
+  }
+
+  private presentCamera(base: { x: number; y: number }, depth: number) {
+    return {
+      x: clamp(base.x * depth, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(base.y * depth, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+  }
+
+  private drawImageLayer(
+    image: HTMLImageElement | null,
+    tex: WebGLTexture,
+    camera: { x: number; y: number },
+    chroma: boolean,
+    blendOnTop: boolean,
+    overscan = PRESENT_ZOOM,
+  ) {
+    if (!image || !image.complete || !image.naturalWidth) return false;
+    const gl = this.gl;
+    if (blendOnTop) {
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    } else {
+      gl.disable(gl.BLEND);
+    }
+    this.drawSource(this.blit, tex, image, chroma, camera.x, camera.y, overscan);
+    return true;
+  }
+
+  renderPhotoBackground(
+    backImage: HTMLImageElement | null,
+    camera: { x: number; y: number },
+    overscan = PRESENT_ZOOM,
+  ) {
+    const gl = this.gl;
+    const cam = {
+      x: clamp(camera.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(camera.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (this.drawImageLayer(backImage, this.bottomTex, cam, false, false, overscan)) {
+      this.bottomEverReady = true;
+    } else if (backImage && this.bottomEverReady) {
+      this.drawSource(
+        this.blit,
+        this.bottomTex,
+        backImage,
+        false,
+        cam.x,
+        cam.y,
+        overscan,
+        false,
+      );
+    }
+  }
+
+  // Mid + scratchable front on a transparent canvas; holes stay in reference frame.
+  renderPhotoForeground(
+    midImage: HTMLImageElement | null,
+    frontImage: HTMLImageElement | null,
+    sample: GLMeshSample | null,
+    showMesh: boolean,
+    camera: { x: number; y: number },
+    frontChroma = true,
+  ) {
+    const gl = this.gl;
+    const cam = {
+      x: clamp(camera.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(camera.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+    this.lastFrontPresentCamera = cam;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    this.drawImageLayer(midImage, this.midTex, cam, false, true);
+
+    const frontReady = !!frontImage && frontImage.complete && frontImage.naturalWidth > 0;
+
+    if (frontReady) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.disable(gl.BLEND);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.drawSource(this.blit, this.fgTex, frontImage!, frontChroma);
+
+      if (sample) {
+        this.drawMeshPunch(sample);
+      }
+      this.fgEverReady = true;
+    }
+
+    if (frontReady || this.fgEverReady) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.useProgram(this.composite);
+      gl.enable(gl.BLEND);
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
+      gl.uniform1i(gl.getUniformLocation(this.composite, "uTex"), 0);
+      gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+      gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), cam.x, cam.y);
+      this.bindQuad(this.composite);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    if (showMesh && sample) {
+      this.drawMeshLines(sample);
+    }
+  }
+
+  // Linked parallax layers: back/mid/front share one camera; scratch FBO stays in
+  // the reference frame so holes remain glued to the garment mesh.
+  renderImageLayers(
+    backImage: HTMLImageElement | null,
+    midImage: HTMLImageElement | null,
+    frontImage: HTMLImageElement | null,
+    sample: GLMeshSample | null,
+    showMesh: boolean,
+    cameras: ImageLayerCameras,
+    frontChroma = true,
+  ) {
+    const gl = this.gl;
+    const backCam = {
+      x: clamp(cameras.back.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(cameras.back.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+    const midCam = {
+      x: clamp(cameras.mid.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(cameras.mid.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+    const frontCam = {
+      x: clamp(cameras.front.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+      y: clamp(cameras.front.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1),
+    };
+    this.lastFrontPresentCamera = frontCam;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (this.drawImageLayer(backImage, this.bottomTex, backCam, false, false)) {
+      this.bottomEverReady = true;
+    } else if (backImage && this.bottomEverReady) {
+      this.drawSource(this.blit, this.bottomTex, backImage, false, backCam.x, backCam.y, PRESENT_ZOOM, false);
+    }
+
+    this.drawImageLayer(midImage, this.midTex, midCam, false, true);
+
+    const frontReady = !!frontImage && frontImage.complete && frontImage.naturalWidth > 0;
+    if (!frontReady && !this.fgEverReady) return;
+
+    if (frontReady) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.disable(gl.BLEND);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.drawSource(this.blit, this.fgTex, frontImage!, frontChroma);
+
+      if (sample) {
+        this.drawMeshPunch(sample);
+      }
+      this.fgEverReady = true;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(this.composite);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
+    gl.uniform1i(gl.getUniformLocation(this.composite, "uTex"), 0);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), frontCam.x, frontCam.y);
+    this.bindQuad(this.composite);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    if (showMesh && sample) {
+      this.drawMeshLines(sample);
+    }
+  }
+
+  // Still-image variant: background can parallax independently; foreground +
+  // scratch holes stay in the reference frame.
+  renderImages(
+    bottomImage: HTMLImageElement | null,
+    foregroundImage: HTMLImageElement | null,
+    sample: GLMeshSample | null,
+    showMesh: boolean,
+    backgroundCamera: { x: number; y: number } = { x: 0, y: 0 },
+    foregroundChroma = false,
+  ) {
+    const gl = this.gl;
+    const bgCamX = clamp(backgroundCamera.x, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
+    const bgCamY = clamp(backgroundCamera.y, -(PRESENT_ZOOM - 1), PRESENT_ZOOM - 1);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (bottomImage && bottomImage.complete && bottomImage.naturalWidth > 0) {
+      this.drawSource(this.blit, this.bottomTex, bottomImage, false, bgCamX, bgCamY, PRESENT_ZOOM);
+      this.bottomEverReady = true;
+    } else if (bottomImage && this.bottomEverReady) {
+      this.drawSource(this.blit, this.bottomTex, bottomImage, false, bgCamX, bgCamY, PRESENT_ZOOM, false);
+    }
+
+    const fgReady = !!foregroundImage && foregroundImage.complete && foregroundImage.naturalWidth > 0;
+    if (!fgReady && !this.fgEverReady) return;
+
+    if (fgReady) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.disable(gl.BLEND);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.drawSource(this.blit, this.fgTex, foregroundImage!, foregroundChroma);
+
+      if (sample) {
+        this.drawMeshPunch(sample);
+      }
+      this.fgEverReady = true;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(this.composite);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fgColorTex);
+    gl.uniform1i(gl.getUniformLocation(this.composite, "uTex"), 0);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uScale"), PRESENT_ZOOM, PRESENT_ZOOM);
+    gl.uniform2f(gl.getUniformLocation(this.composite, "uOffset"), 0, 0);
+    this.bindQuad(this.composite);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
     if (showMesh && sample) {
       this.drawMeshLines(sample);
     }
