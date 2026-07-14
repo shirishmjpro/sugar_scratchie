@@ -645,25 +645,30 @@ export class GarmentGLRenderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     // Bikini / mid — same present camera as clothes.
-    this.drawImageLayer(midImage, this.midTex, cam, false, true);
+    if (midImage) {
+      this.drawImageLayer(midImage, this.midTex, cam, false, true);
+    }
 
     const frontReady =
       !!frontImage && frontImage.complete && frontImage.naturalWidth > 0;
-    if (!frontReady && !this.fgEverReady) return;
-
-    if (frontReady) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
-      gl.viewport(0, 0, this.width, this.height);
-      gl.disable(gl.BLEND);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      this.drawSource(this.blit, this.fgTex, frontImage!, frontChroma);
-
-      if (sample) {
-        this.drawMeshPunch(sample);
+    if (!frontReady) {
+      if (showMesh && sample) {
+        this.drawMeshLines(sample);
       }
-      this.fgEverReady = true;
+      return;
     }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fgFbo);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.drawSource(this.blit, this.fgTex, frontImage!, frontChroma);
+
+    if (sample) {
+      this.drawMeshPunch(sample);
+    }
+    this.fgEverReady = true;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);

@@ -339,6 +339,21 @@ export function PhotoScratchTest() {
   const [usingSample, setUsingSample] = useState(true);
   const [uploadLabel, setUploadLabel] = useState("Sample assets");
   const [backSrc, setBackSrc] = useState(BACK_LAYER_SRC);
+  const [midSrc, setMidSrc] = useState(MID_LAYER_SRC);
+  const [frontSrc, setFrontSrc] = useState(FRONT_LAYER_SRC);
+  const [showLayerBg, setShowLayerBg] = useState(true);
+  const [showLayerMid, setShowLayerMid] = useState(true);
+  const [showLayerClothes, setShowLayerClothes] = useState(true);
+  const showLayersRef = useRef({
+    bg: true,
+    mid: true,
+    clothes: true,
+  });
+  showLayersRef.current = {
+    bg: showLayerBg,
+    mid: showLayerMid,
+    clothes: showLayerClothes,
+  };
   const [sessionSymbols, setSessionSymbols] =
     useState<number[]>(buildSessionSymbols);
   const [revealedSymbols, setRevealedSymbols] = useState(0);
@@ -381,6 +396,8 @@ export function PhotoScratchTest() {
     frontImageRef.current = front;
     applyMesh(mesh);
     setBackSrc(back.src);
+    setMidSrc(mid.src);
+    setFrontSrc(front.src);
     setUsingSample(!cardId);
     setUploadLabel(label);
     setReady(true);
@@ -396,8 +413,14 @@ export function PhotoScratchTest() {
       backImageRef.current = img;
       setBackSrc(img.src);
     }
-    if (slot === "mid") midImageRef.current = img;
-    if (slot === "front") frontImageRef.current = img;
+    if (slot === "mid") {
+      midImageRef.current = img;
+      setMidSrc(img.src);
+    }
+    if (slot === "front") {
+      frontImageRef.current = img;
+      setFrontSrc(img.src);
+    }
     if (!trackedMeshRef.current) {
       const meshRes = await fetch(MESH_SRC);
       if (!meshRes.ok)
@@ -420,6 +443,8 @@ export function PhotoScratchTest() {
     midImageRef.current = img;
     frontImageRef.current = img;
     setBackSrc(img.src);
+    setMidSrc(img.src);
+    setFrontSrc(img.src);
     if (!trackedMeshRef.current) {
       const meshRes = await fetch(MESH_SRC);
       if (!meshRes.ok)
@@ -522,9 +547,10 @@ export function PhotoScratchTest() {
         y: cameras.front.y + pxToClipY(idle.y, rect.height || CANVAS_HEIGHT),
       };
 
+      const layers = showLayersRef.current;
       fgRenderer.renderPhotoForeground(
-        midImageRef.current,
-        frontImageRef.current,
+        layers.mid ? midImageRef.current : null,
+        layers.clothes ? frontImageRef.current : null,
         sample
           ? toGlSample(sample, trackedMeshRef.current?.garment ?? null)
           : null,
@@ -854,6 +880,111 @@ export function PhotoScratchTest() {
             </button>
           </section>
 
+          <section
+            className="photo-scratch-layers"
+            aria-label="Layer stack"
+          >
+            <h2>Layers</h2>
+            <p className="photo-scratch-upload-note">
+              Stack bottom → top. Toggle one off to see what sits underneath.
+            </p>
+            <div className="photo-scratch-layer-grid">
+              {(
+                [
+                  {
+                    id: "bg",
+                    label: "1. Background",
+                    hint: "room",
+                    src: backSrc,
+                    on: showLayerBg,
+                    set: setShowLayerBg,
+                  },
+                  {
+                    id: "mid",
+                    label: "2. Bikini",
+                    hint: "mid / reveal",
+                    src: midSrc,
+                    on: showLayerMid,
+                    set: setShowLayerMid,
+                  },
+                  {
+                    id: "clothes",
+                    label: "3. Clothes",
+                    hint: "top / scratch",
+                    src: frontSrc,
+                    on: showLayerClothes,
+                    set: setShowLayerClothes,
+                  },
+                ] as const
+              ).map((layer) => (
+                <label
+                  key={layer.id}
+                  className={`photo-scratch-layer-card${layer.on ? " is-on" : " is-off"}`}
+                >
+                  <span className="photo-scratch-layer-thumb">
+                    <img src={layer.src} alt="" draggable={false} />
+                  </span>
+                  <span className="photo-scratch-layer-meta">
+                    <span className="photo-scratch-layer-title">
+                      {layer.label}
+                    </span>
+                    <span className="photo-scratch-layer-hint">{layer.hint}</span>
+                    <span className="photo-scratch-layer-toggle">
+                      <input
+                        type="checkbox"
+                        checked={layer.on}
+                        onChange={(event) => layer.set(event.target.checked)}
+                      />
+                      {layer.on ? "visible" : "hidden"}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="photo-scratch-layer-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLayerBg(true);
+                  setShowLayerMid(true);
+                  setShowLayerClothes(true);
+                }}
+              >
+                Show all
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLayerBg(true);
+                  setShowLayerMid(false);
+                  setShowLayerClothes(false);
+                }}
+              >
+                Solo bg
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLayerBg(false);
+                  setShowLayerMid(true);
+                  setShowLayerClothes(false);
+                }}
+              >
+                Solo bikini
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLayerBg(false);
+                  setShowLayerMid(false);
+                  setShowLayerClothes(true);
+                }}
+              >
+                Solo clothes
+              </button>
+            </div>
+          </section>
+
           <div className="photo-scratch-controls">
             {parallax.showEnableButton ? (
               <button
@@ -914,7 +1045,7 @@ export function PhotoScratchTest() {
 
         <div
           ref={stageRef}
-          className={`stage photo-scratch-stage${ready ? " is-ready" : ""}${isScratching ? " is-finger-dragging is-scratching" : ""}`}
+          className={`stage photo-scratch-stage${ready ? " is-ready" : ""}${isScratching ? " is-finger-dragging is-scratching" : ""}${showLayerBg ? "" : " is-bg-hidden"}`}
         >
           <div className="bg-drag-scale" aria-hidden="true">
             <img
