@@ -56,18 +56,26 @@ const FOREGROUND_CHROMA = false;
 // never reveals the stage letterboxing.
 const PARALLAX_MAX_X = 22;
 const PARALLAX_MAX_Y = 16;
-const PARALLAX_FINGER_MAX = 20;
+// Opposite room drift while scratching — girl layers stay locked.
+const PARALLAX_FINGER_MAX = 16;
+const PARALLAX_FINGER_GAIN = 0.22;
 const BG_OVERSCAN = Math.max(
   PRESENT_ZOOM,
   1 + (2 * (PARALLAX_MAX_X + PARALLAX_FINGER_MAX)) / CANVAS_WIDTH,
   1 + (2 * (PARALLAX_MAX_Y + PARALLAX_FINGER_MAX)) / CANVAS_HEIGHT,
 );
 // Idle “alive” sway for synced bikini + clothes before the first scratch.
-// Mostly up/down, with a slight diagonal drift to the right.
-const IDLE_SWAY_AMP_X = 4;
-const IDLE_SWAY_AMP_Y = 8;
-const IDLE_SWAY_PERIOD_MS = 3400;
-const IDLE_SWAY_EASE = 0.06;
+// Soft motion after load — mostly up/down with a slight right drift.
+const IDLE_SWAY_AMP_X = 2.8;
+const IDLE_SWAY_AMP_Y = 5.5;
+const IDLE_SWAY_PERIOD_MS = 4200;
+const IDLE_SWAY_EASE = 0.04;
+// Softly ease girl cam toward lock (center) / unlock — no hard snap.
+const GIRL_CAM_EASE = 0.085;
+// Room blur/zoom ease slower than girl lock; keep blur subtle.
+const BG_FX_EASE = 0.035;
+const BG_BLUR_PX = 7;
+const BG_BRIGHTNESS_DIM = 0.8;
 
 type ScratchMark = { u: number; v: number; radius: number };
 
@@ -311,6 +319,9 @@ export function PhotoScratchTest() {
   const isScratchingRef = useRef(false);
   const scratchStartedRef = useRef(false);
   const idleSwayRef = useRef<Vec2>({ x: 0, y: 0 });
+  const girlCamRef = useRef<Vec2>({ x: 0, y: 0 });
+  const bgBlurRef = useRef(0);
+  const bgBrightnessRef = useRef(1);
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   const objectUrlsRef = useRef<string[]>([]);
   const parallaxStateRef = useRef<ParallaxState | null>({
@@ -324,10 +335,13 @@ export function PhotoScratchTest() {
     stateOutRef: parallaxStateRef,
     maxX: PARALLAX_MAX_X,
     maxY: PARALLAX_MAX_Y,
-    rangeDeg: 16,
-    bgGain: 1,
-    fingerGain: 0.2,
+    // Smaller rangeDeg = more travel per degree of tilt (compass feels livelier).
+    rangeDeg: 12,
+    bgGain: 1.15,
+    fingerGain: PARALLAX_FINGER_GAIN,
     fingerMax: PARALLAX_FINGER_MAX,
+    fingerMovesGroup: false,
+    smooth: 0.12,
   });
 
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -470,6 +484,8 @@ export function PhotoScratchTest() {
     stage.style.setProperty("--bg-base-scale", String(BG_OVERSCAN));
     stage.style.setProperty("--bg-base-x", "0px");
     stage.style.setProperty("--bg-base-y", "0px");
+    stage.style.setProperty("--bg-blur", "0px");
+    stage.style.setProperty("--bg-brightness", "1");
   }, []);
 
   useEffect(() => {
@@ -529,9 +545,9 @@ export function PhotoScratchTest() {
       );
 
       // Synced bikini + clothes idle sway (up/down + diagonal to the right).
-      // Stops once the player has started scratching; eases out instead of snapping.
+      // Active whenever the finger is up — same gentle motion as after load.
       const phase = (performance.now() / IDLE_SWAY_PERIOD_MS) * Math.PI * 2;
-      const wantIdle = !scratchStartedRef.current;
+      const wantIdle = !isScratchingRef.current;
       const wave = Math.sin(phase);
       // Same phase on X/Y → diagonal; bias X positive so the drift leans right.
       const targetIdleX = wantIdle
@@ -542,10 +558,35 @@ export function PhotoScratchTest() {
       idle.x += (targetIdleX - idle.x) * IDLE_SWAY_EASE;
       idle.y += (targetIdleY - idle.y) * IDLE_SWAY_EASE;
 
-      const groupCam = {
+      // Ease girl cam toward center while scratching; ease back to tilt/idle after.
+      // Hard-locking to {0,0} felt like a dry snap to the middle.
+      const scratching = isScratchingRef.current;
+      const liveCam = {
         x: cameras.front.x + pxToClipX(idle.x, rect.width || CANVAS_WIDTH),
         y: cameras.front.y + pxToClipY(idle.y, rect.height || CANVAS_HEIGHT),
       };
+      const targetCam = scratching ? { x: 0, y: 0 } : liveCam;
+      const girlCam = girlCamRef.current;
+      girlCam.x += (targetCam.x - girlCam.x) * GIRL_CAM_EASE;
+      girlCam.y += (targetCam.y - girlCam.y) * GIRL_CAM_EASE;
+      const groupCam = { x: girlCam.x, y: girlCam.y };
+
+      // Ease room blur + brightness in/out with scratch.
+      const blurTarget = scratching ? BG_BLUR_PX : 0;
+      const brightnessTarget = scratching ? BG_BRIGHTNESS_DIM : 1;
+      bgBlurRef.current += (blurTarget - bgBlurRef.current) * BG_FX_EASE;
+      bgBrightnessRef.current +=
+        (brightnessTarget - bgBrightnessRef.current) * BG_FX_EASE;
+      if (stageRef.current) {
+        stageRef.current.style.setProperty(
+          "--bg-blur",
+          `${bgBlurRef.current.toFixed(2)}px`,
+        );
+        stageRef.current.style.setProperty(
+          "--bg-brightness",
+          bgBrightnessRef.current.toFixed(3),
+        );
+      }
 
       const layers = showLayersRef.current;
       fgRenderer.renderPhotoForeground(
@@ -1057,10 +1098,6 @@ export function PhotoScratchTest() {
               src={backSrc}
               alt=""
               draggable={false}
-              style={{
-                // Inline — CSS filter transitions on the wrapper stuck at blur(0).
-                filter: isScratching ? "blur(14px)" : "none",
-              }}
             />
           </div>
           <div className="photo-scratch-fg-drag-scale">

@@ -37,6 +37,11 @@ type UseDeviceParallaxOptions = {
   fingerGain?: number;
   /** Cap on finger contribution in CSS pixels. */
   fingerMax?: number;
+  /**
+   * When false (photo-scratch), finger drag does not pan the girl layers —
+   * only the background moves, in the opposite direction.
+   */
+  fingerMovesGroup?: boolean;
   /** Expose live state for the rAF render loop. */
   stateOutRef?: RefObject<ParallaxState | null> | { current: ParallaxState | null };
   /** Legacy single-offset out ref (clip-space callers). */
@@ -78,6 +83,7 @@ export function useDeviceParallax({
   bgGain = 1,
   fingerGain = 0.2,
   fingerMax = 20,
+  fingerMovesGroup = true,
   stateOutRef,
   cameraOutRef,
   mouseGain = 0,
@@ -103,6 +109,7 @@ export function useDeviceParallax({
     bgGain,
     fingerGain,
     fingerMax,
+    fingerMovesGroup,
     mouseGain,
   });
   optsRef.current = {
@@ -114,6 +121,7 @@ export function useDeviceParallax({
     bgGain,
     fingerGain,
     fingerMax,
+    fingerMovesGroup,
     mouseGain,
   };
 
@@ -136,16 +144,19 @@ export function useDeviceParallax({
   useEffect(() => {
     let frameId = 0;
     const tick = () => {
-      const { smooth: s, bgGain: bgG } = optsRef.current;
+      const { smooth: s, bgGain: bgG, fingerMovesGroup: fingerOnGroup } =
+        optsRef.current;
       const tilt = tiltTargetRef.current;
       const finger = fingerTargetRef.current;
+      // Girl layers: tilt only (optional). Finger never drags the girl when
+      // fingerMovesGroup is false — bg pans the opposite way instead.
       const groupTarget = {
-        x: tilt.x + finger.x,
-        y: tilt.y + finger.y,
+        x: tilt.x + (fingerOnGroup ? finger.x : 0),
+        y: tilt.y + (fingerOnGroup ? finger.y : 0),
       };
       const bgTarget = {
-        x: tilt.x * bgG + finger.x,
-        y: tilt.y * bgG + finger.y,
+        x: tilt.x * bgG + (fingerOnGroup ? finger.x : -finger.x),
+        y: tilt.y * bgG + (fingerOnGroup ? finger.y : -finger.y),
       };
       const group = groupCurrentRef.current;
       const bg = bgCurrentRef.current;

@@ -1944,15 +1944,16 @@ dd {
   z-index: 1;
   transform: scale(1);
   transform-origin: center center;
-  /* Release: match bg-drag-scale timing (no blur on the person) */
-  transition: transform 900ms ease-in-out 0ms;
-  will-change: transform;
+  /* Girl layers stay put while scratching — no drag zoom. */
+  transition: none;
+  will-change: auto;
   pointer-events: none;
+  filter: none;
 }
 
 .photo-scratch-stage.is-finger-dragging .photo-scratch-fg-drag-scale {
-  transform: scale(1.05);
-  transition: transform 1200ms ease-in-out 50ms;
+  transform: scale(1);
+  filter: none;
 }
 
 .photo-scratch-fg-layer {
@@ -1960,25 +1961,34 @@ dd {
   inset: 0;
   width: 100%;
   pointer-events: auto;
+  filter: none;
 }
 
-/* Drag zoom on the wrapper; blur only on the bg image (not mid/clothes). */
+/*
+  Background: soft scale + room blur while scratching.
+  Blur amount is --bg-blur (set from React). Opposite finger pan
+  comes from --bg-parallax-* on the img.
+*/
 .photo-scratch-stage .bg-drag-scale {
   position: absolute;
   inset: 0;
   transform: scale(1);
   transform-origin: center center;
-  transition: transform 900ms ease-in-out 0ms;
+  transition: transform 1100ms cubic-bezier(0.22, 0.61, 0.36, 1);
   will-change: transform;
   pointer-events: none;
   z-index: 0;
 }
 
-.photo-scratch-stage.is-finger-dragging .bg-drag-scale {
-  transform: scale(1.05);
-  transition: transform 1200ms ease-in-out 50ms;
+.photo-scratch-stage.is-finger-dragging .bg-drag-scale,
+.photo-scratch-stage.is-scratching .bg-drag-scale,
+.photo-scratch-stage .bg-drag-scale.is-bg-blurred {
+  transform: scale(1.03);
+  transition: transform 1000ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
+.photo-scratch-stage .bg-drag-scale .layer-bg,
+.photo-scratch-stage .bg-drag-scale .photo-scratch-bg-layer,
 .photo-scratch-stage .layer-bg {
   position: absolute;
   inset: 0;
@@ -1987,7 +1997,7 @@ dd {
   z-index: 0;
   object-fit: cover;
   object-position: center center;
-  filter: blur(0px);
+  filter: blur(var(--bg-blur, 0px)) brightness(var(--bg-brightness, 1));
   /*
     Finger + tilt offset. Must live in CSS (not an inline transform),
     otherwise React layer defaults overwrite --bg-parallax-*.
@@ -1998,17 +2008,8 @@ dd {
       0
     )
     scale(var(--bg-base-scale, 1));
-  transition:
-    transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
-    filter 900ms ease-in-out 0ms;
-  will-change: transform, filter;
-}
-
-.photo-scratch-stage.is-finger-dragging .layer-bg {
-  filter: blur(10px);
-  transition:
-    transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
-    filter 1200ms ease-in-out 50ms;
+  transition: transform 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform;
 }
 
 .photo-scratch-stage.is-bg-hidden .bg-drag-scale {
