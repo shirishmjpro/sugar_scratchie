@@ -20,7 +20,7 @@ import {
 import { useDeviceParallax, type ParallaxState } from "./useDeviceParallax";
 
 const BACK_LAYER_SRC = "/photo-scratch/background.jpg";
-const MID_LAYER_SRC = "/photo-scratch/mid.jpg";
+const MID_LAYER_SRC = "/photo-scratch/mid.png";
 const FRONT_LAYER_SRC = "/photo-scratch/foreground.png";
 const MESH_SRC = "/photo-scratch/mesh.json";
 
