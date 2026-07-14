@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { Theme } from "@radix-ui/themes";
 import { Dashboard } from "./Dashboard";
 import { ModelsPage } from "./ModelsPage";
+import { PhotoScratchTest } from "./PhotoScratchTest";
 import { ScratchPrototype } from "./ScratchPrototype";
 import { VideoFlowDesignerPage } from "./videoFlow/VideoFlowDesignerPage";
 import { VideoFlowHubPage } from "./videoFlow/VideoFlowHubPage";
@@ -21,6 +22,7 @@ function pickApp(pathname: string) {
   if (path === "/dashboard/models") return ModelsPage;
   if (path === "/dashboard/video-flow" || path === "/video-flow") return VideoFlowHubPage;
   if (path === "/dashboard") return Dashboard;
+  if (path === "/photo-scratch") return PhotoScratchTest;
   return ScratchPrototype;
 }
 
