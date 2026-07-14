@@ -1047,13 +1047,20 @@ export function PhotoScratchTest() {
           ref={stageRef}
           className={`stage photo-scratch-stage${ready ? " is-ready" : ""}${isScratching ? " is-finger-dragging is-scratching" : ""}${showLayerBg ? "" : " is-bg-hidden"}`}
         >
-          <div className="bg-drag-scale" aria-hidden="true">
+          <div
+            className={`bg-drag-scale${isScratching ? " is-bg-blurred" : ""}`}
+            aria-hidden="true"
+          >
             <img
               ref={bgImageRef}
               className="layer-bg photo-scratch-bg-layer"
               src={backSrc}
               alt=""
               draggable={false}
+              style={{
+                // Inline — CSS filter transitions on the wrapper stuck at blur(0).
+                filter: isScratching ? "blur(14px)" : "none",
+              }}
             />
           </div>
           <div className="photo-scratch-fg-drag-scale">
