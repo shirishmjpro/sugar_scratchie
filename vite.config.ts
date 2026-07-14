@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -158,6 +159,7 @@ function writeModelsIndex() {
 export default defineConfig({
   plugins: [
     react(),
+    basicSsl(),
     {
       name: "mesh-json-index",
       buildStart() {
@@ -184,6 +186,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5080,
+    https: true,
     proxy: {
       "/api": "http://127.0.0.1:8090",
     },
@@ -191,5 +194,6 @@ export default defineConfig({
   preview: {
     host: "0.0.0.0",
     port: 5080,
+    https: true,
   },
 });
